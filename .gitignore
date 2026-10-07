@@ -1,0 +1,17 @@
+/target/
+**/target/
+*.zip
+*.tar.gz
+*.rlib
+*.rmeta
+*.so
+*.o
+*.a
+.vscode/
+.idea/
+*.swp
+.DS_Store
+*.ini
+*.env
+.secrets/
+*.log
