@@ -1,0 +1,24 @@
+# Rust
+/target/
+**/target/
+
+# Build artifacts
+*.zip
+*.tar.gz
+*.rlib
+*.rmeta
+*.so
+*.o
+*.a
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secrets / logs
+*.ini
+*.env
+.secrets/
+*.log
