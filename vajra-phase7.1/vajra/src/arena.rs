@@ -70,7 +70,10 @@ impl SlabPool {
     /// (rounded up to a multiple of 64).
     pub fn new(slot_size: usize, capacity: usize) -> io::Result<Self> {
         if slot_size == 0 || capacity == 0 || capacity > u32::MAX as usize {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad slab geometry"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bad slab geometry",
+            ));
         }
         let slot_size = slot_size.div_ceil(CACHE_LINE) * CACHE_LINE;
         let map_len = slot_size
@@ -120,7 +123,11 @@ impl SlabPool {
         };
         // SAFETY: idx < capacity, so the offset stays inside the mapping.
         let p = unsafe { self.base.add(idx as usize * self.slot_size) };
-        Some(PoolBuf { ptr: NonNull::new(p)?, len: self.slot_size, idx })
+        Some(PoolBuf {
+            ptr: NonNull::new(p)?,
+            len: self.slot_size,
+            idx,
+        })
     }
 
     /// Return a slot for reuse. Contents are left as-is (not zeroed).

@@ -105,15 +105,23 @@ pub fn varint_encode(v: u64, out: &mut Vec<u8>) {
 pub enum FrameParse<'a> {
     /// More bytes are needed for the type, length or payload.
     Incomplete,
-    Frame { ty: u64, payload: &'a [u8], total: usize },
+    Frame {
+        ty: u64,
+        payload: &'a [u8],
+        total: usize,
+    },
     /// The declared payload exceeds the caller's limit.
     TooLarge,
 }
 
 /// Parse one frame from the front of `buf`. Frames are only returned complete.
 pub fn parse_frame(buf: &[u8], max_payload: usize) -> FrameParse<'_> {
-    let Some((ty, n1)) = varint_decode(buf) else { return FrameParse::Incomplete };
-    let Some((len, n2)) = varint_decode(&buf[n1..]) else { return FrameParse::Incomplete };
+    let Some((ty, n1)) = varint_decode(buf) else {
+        return FrameParse::Incomplete;
+    };
+    let Some((len, n2)) = varint_decode(&buf[n1..]) else {
+        return FrameParse::Incomplete;
+    };
     if len > max_payload as u64 {
         return FrameParse::TooLarge;
     }
@@ -122,7 +130,11 @@ pub fn parse_frame(buf: &[u8], max_payload: usize) -> FrameParse<'_> {
     if buf.len() - start < len {
         return FrameParse::Incomplete;
     }
-    FrameParse::Frame { ty, payload: &buf[start..start + len], total: start + len }
+    FrameParse::Frame {
+        ty,
+        payload: &buf[start..start + len],
+        total: start + len,
+    }
 }
 
 fn frame(ty: u64, payload: &[u8], out: &mut Vec<u8>) {
@@ -234,8 +246,14 @@ pub mod qpack {
         ("content-type", "text/plain;charset=utf-8"),
         ("range", "bytes=0-"),
         ("strict-transport-security", "max-age=31536000"),
-        ("strict-transport-security", "max-age=31536000; includesubdomains"),
-        ("strict-transport-security", "max-age=31536000; includesubdomains; preload"),
+        (
+            "strict-transport-security",
+            "max-age=31536000; includesubdomains",
+        ),
+        (
+            "strict-transport-security",
+            "max-age=31536000; includesubdomains; preload",
+        ),
         ("vary", "accept-encoding"),
         ("vary", "origin"),
         ("x-content-type-options", "nosniff"),
@@ -262,7 +280,10 @@ pub mod qpack {
         ("access-control-request-method", "post"),
         ("alt-svc", "clear"),
         ("authorization", ""),
-        ("content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none'"),
+        (
+            "content-security-policy",
+            "script-src 'none'; object-src 'none'; base-uri 'none'",
+        ),
         ("early-data", "1"),
         ("expect-ct", ""),
         ("forwarded", ""),
@@ -338,7 +359,10 @@ pub mod qpack {
 
     impl Decoder {
         pub fn new(max_bytes: usize) -> Self {
-            Self { huff: hpack::Decoder::new(), max_bytes }
+            Self {
+                huff: hpack::Decoder::new(),
+                max_bytes,
+            }
         }
 
         /// Huffman-decode `data` by wrapping it in an HPACK literal and letting
@@ -357,7 +381,13 @@ pub mod qpack {
 
         /// A string literal whose first byte holds the Huffman flag at
         /// `h_mask` followed by a `prefix`-bit length.
-        fn string(&mut self, b: &[u8], pos: &mut usize, h_mask: u8, prefix: u8) -> Result<Vec<u8>, QErr> {
+        fn string(
+            &mut self,
+            b: &[u8],
+            pos: &mut usize,
+            h_mask: u8,
+            prefix: u8,
+        ) -> Result<Vec<u8>, QErr> {
             let first = *b.get(*pos).ok_or(QErr::Malformed)?;
             let huff = first & h_mask != 0;
             let len = int_decode(b, pos, prefix).ok_or(QErr::Malformed)?;
@@ -457,7 +487,12 @@ pub mod qpack {
             int_encode(i as u64, 4, if sensitive { 0x70 } else { 0x50 }, out);
             put_value(value, out);
         } else {
-            int_encode(name.len() as u64, 3, if sensitive { 0x30 } else { 0x20 }, out);
+            int_encode(
+                name.len() as u64,
+                3,
+                if sensitive { 0x30 } else { 0x20 },
+                out,
+            );
             out.extend_from_slice(name);
             put_value(value, out);
         }
@@ -535,9 +570,8 @@ pub struct H3Request {
 
 fn is_token(s: &str) -> bool {
     !s.is_empty()
-        && s.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-        })
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 /// Validate a decoded field section as a request header block (RFC 9114 §4.3.1, 4.2).
@@ -571,13 +605,16 @@ fn build_request(fields: Vec<(Vec<u8>, Vec<u8>)>) -> Result<H3Request, H3Err> {
             continue;
         }
         seen_regular = true;
-        if name.is_empty() || name.iter().any(|b| b.is_ascii_uppercase() || *b <= b' ' || *b == b':') {
+        if name.is_empty()
+            || name
+                .iter()
+                .any(|b| b.is_ascii_uppercase() || *b <= b' ' || *b == b':')
+        {
             return Err(bad);
         }
         match name.as_slice() {
-            b"connection" | b"keep-alive" | b"proxy-connection" | b"transfer-encoding" | b"upgrade" => {
-                return Err(bad)
-            }
+            b"connection" | b"keep-alive" | b"proxy-connection" | b"transfer-encoding"
+            | b"upgrade" => return Err(bad),
             b"te" if value != b"trailers" => return Err(bad),
             b"cookie" => match &mut cookie {
                 Some(c) => {
@@ -636,7 +673,13 @@ pub struct RequestStream {
 
 impl RequestStream {
     pub fn new(max_body: usize) -> Self {
-        Self { buf: Vec::new(), state: RState::Start, req: None, body: Vec::new(), max_body }
+        Self {
+            buf: Vec::new(),
+            state: RState::Start,
+            req: None,
+            body: Vec::new(),
+            max_body,
+        }
     }
 
     /// Feed bytes read from the stream (`fin` = the peer finished the stream).
@@ -678,7 +721,9 @@ impl RequestStream {
             return Err(H3Err::Stream(H3_REQUEST_INCOMPLETE));
         };
         if let Some((_, v)) = req.headers.iter().find(|(n, _)| n == b"content-length") {
-            let declared = std::str::from_utf8(v).ok().and_then(|s| s.trim().parse::<usize>().ok());
+            let declared = std::str::from_utf8(v)
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok());
             if declared != Some(self.body.len()) {
                 return Err(H3Err::Stream(H3_MESSAGE_ERROR));
             }
@@ -760,7 +805,12 @@ impl Default for UniStream {
 
 impl UniStream {
     pub fn new() -> Self {
-        Self { buf: Vec::new(), kind: None, got_settings: false, discarded: 0 }
+        Self {
+            buf: Vec::new(),
+            kind: None,
+            got_settings: false,
+            discarded: 0,
+        }
     }
 
     pub fn kind(&self) -> Option<UniKind> {
@@ -775,7 +825,9 @@ impl UniStream {
         self.buf.extend_from_slice(data);
 
         if self.kind.is_none() {
-            let Some((t, n)) = varint_decode(&self.buf) else { return Ok(()) };
+            let Some((t, n)) = varint_decode(&self.buf) else {
+                return Ok(());
+            };
             self.buf.drain(..n);
             self.kind = Some(match t {
                 0x00 => UniKind::Control,
@@ -877,7 +929,17 @@ mod tests {
 
     #[test]
     fn varint_roundtrip_and_boundaries() {
-        for v in [0u64, 1, 63, 64, 16383, 16384, 1_073_741_823, 1_073_741_824, (1 << 62) - 1] {
+        for v in [
+            0u64,
+            1,
+            63,
+            64,
+            16383,
+            16384,
+            1_073_741_823,
+            1_073_741_824,
+            (1 << 62) - 1,
+        ] {
             let mut b = Vec::new();
             varint_encode(v, &mut b);
             assert_eq!(varint_decode(&b), Some((v, b.len())), "{v}");
@@ -885,7 +947,10 @@ mod tests {
         // RFC 9000 Appendix A examples.
         assert_eq!(varint_decode(&[0x25]), Some((37, 1)));
         assert_eq!(varint_decode(&[0x7b, 0xbd]), Some((15293, 2)));
-        assert_eq!(varint_decode(&[0x9d, 0x7f, 0x3e, 0x7d]), Some((494_878_333, 4)));
+        assert_eq!(
+            varint_decode(&[0x9d, 0x7f, 0x3e, 0x7d]),
+            Some((494_878_333, 4))
+        );
         assert_eq!(
             varint_decode(&[0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c]),
             Some((151_288_809_941_952_652, 8))
@@ -906,7 +971,9 @@ mod tests {
         assert_eq!(qpack::int_decode(&o, &mut p, 5), Some(1337));
         assert_eq!(p, 3);
         // Overlong continuation must not overflow.
-        let evil = [0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        let evil = [
+            0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ];
         let mut p = 0;
         assert_eq!(qpack::int_decode(&evil, &mut p, 5), None);
     }
@@ -939,7 +1006,13 @@ mod tests {
             "GET",
             "example.com",
             "/a/b?x=1",
-            &[("accept", "*/*"), ("user-agent", "t/1"), ("x-custom", "v"), ("cookie", "a=1"), ("cookie", "b=2")],
+            &[
+                ("accept", "*/*"),
+                ("user-agent", "t/1"),
+                ("x-custom", "v"),
+                ("cookie", "a=1"),
+                ("cookie", "b=2"),
+            ],
             &mut wire,
         );
         let mut rs = RequestStream::new(1 << 20);
@@ -948,7 +1021,9 @@ mod tests {
         assert_eq!(req.path, "/a/b?x=1");
         assert_eq!(req.authority, b"example.com");
         assert!(req.headers.contains(&(b"accept".to_vec(), b"*/*".to_vec())));
-        assert!(req.headers.contains(&(b"cookie".to_vec(), b"a=1; b=2".to_vec())));
+        assert!(req
+            .headers
+            .contains(&(b"cookie".to_vec(), b"a=1; b=2".to_vec())));
         assert!(req.body.is_empty());
     }
 
@@ -976,7 +1051,9 @@ mod tests {
         let mut wire = Vec::new();
         request_headers_frame("POST", "h", "/", &[("content-length", "3")], &mut wire);
         data_frame(b"toolong", &mut wire);
-        let e = RequestStream::new(1 << 20).feed(&wire, true, &mut dec()).unwrap_err();
+        let e = RequestStream::new(1 << 20)
+            .feed(&wire, true, &mut dec())
+            .unwrap_err();
         assert_eq!(e, H3Err::Stream(H3_MESSAGE_ERROR));
     }
 
@@ -985,7 +1062,9 @@ mod tests {
         let mut wire = Vec::new();
         request_headers_frame("POST", "h", "/", &[], &mut wire);
         data_frame(&vec![0u8; 2000], &mut wire);
-        let e = RequestStream::new(1000).feed(&wire, true, &mut dec()).unwrap_err();
+        let e = RequestStream::new(1000)
+            .feed(&wire, true, &mut dec())
+            .unwrap_err();
         assert_eq!(e, H3Err::TooLarge);
     }
 
@@ -995,14 +1074,18 @@ mod tests {
         let mut w = Vec::new();
         data_frame(b"x", &mut w);
         assert_eq!(
-            RequestStream::new(100).feed(&w, true, &mut dec()).unwrap_err(),
+            RequestStream::new(100)
+                .feed(&w, true, &mut dec())
+                .unwrap_err(),
             H3Err::Conn(H3_FRAME_UNEXPECTED)
         );
         // SETTINGS on a request stream.
         let mut w = Vec::new();
         frame(F_SETTINGS, &[], &mut w);
         assert_eq!(
-            RequestStream::new(100).feed(&w, false, &mut dec()).unwrap_err(),
+            RequestStream::new(100)
+                .feed(&w, false, &mut dec())
+                .unwrap_err(),
             H3Err::Conn(H3_FRAME_UNEXPECTED)
         );
         // Reserved HTTP/2 frame types.
@@ -1010,7 +1093,9 @@ mod tests {
             let mut w = Vec::new();
             frame(t, &[], &mut w);
             assert_eq!(
-                RequestStream::new(100).feed(&w, false, &mut dec()).unwrap_err(),
+                RequestStream::new(100)
+                    .feed(&w, false, &mut dec())
+                    .unwrap_err(),
                 H3Err::Conn(H3_FRAME_UNEXPECTED)
             );
         }
@@ -1019,10 +1104,15 @@ mod tests {
         frame(0x21, b"grease", &mut w);
         request_headers_frame("GET", "h", "/", &[], &mut w);
         frame(0x40, b"more", &mut w);
-        assert!(RequestStream::new(100).feed(&w, true, &mut dec()).unwrap().is_some());
+        assert!(RequestStream::new(100)
+            .feed(&w, true, &mut dec())
+            .unwrap()
+            .is_some());
         // Stream ended before any HEADERS.
         assert_eq!(
-            RequestStream::new(100).feed(&[], true, &mut dec()).unwrap_err(),
+            RequestStream::new(100)
+                .feed(&[], true, &mut dec())
+                .unwrap_err(),
             H3Err::Stream(H3_REQUEST_INCOMPLETE)
         );
         // Truncated frame at FIN.
@@ -1030,7 +1120,9 @@ mod tests {
         request_headers_frame("GET", "h", "/", &[], &mut w);
         w.truncate(w.len() - 1);
         assert_eq!(
-            RequestStream::new(100).feed(&w, true, &mut dec()).unwrap_err(),
+            RequestStream::new(100)
+                .feed(&w, true, &mut dec())
+                .unwrap_err(),
             H3Err::Conn(H3_FRAME_ERROR)
         );
     }
@@ -1043,10 +1135,15 @@ mod tests {
         let mut tr = Vec::new();
         qpack::encode_response(200, &[(b"x-trailer".to_vec(), b"1".to_vec())], &mut tr);
         frame(F_HEADERS, &tr, &mut w);
-        assert!(RequestStream::new(100).feed(&w, true, &mut dec()).unwrap().is_some());
+        assert!(RequestStream::new(100)
+            .feed(&w, true, &mut dec())
+            .unwrap()
+            .is_some());
         frame(F_HEADERS, &tr, &mut w); // a third field section
         assert_eq!(
-            RequestStream::new(100).feed(&w, true, &mut dec()).unwrap_err(),
+            RequestStream::new(100)
+                .feed(&w, true, &mut dec())
+                .unwrap_err(),
             H3Err::Conn(H3_FRAME_UNEXPECTED)
         );
     }
@@ -1069,13 +1166,23 @@ mod tests {
             frame(F_HEADERS, &b, &mut w);
             RequestStream::new(100).feed(&w, true, &mut dec())
         };
-        let ok = vec![(":method", "GET"), (":scheme", "https"), (":path", "/"), (":authority", "a")];
+        let ok = vec![
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/"),
+            (":authority", "a"),
+        ];
         assert!(run(ok.clone()).unwrap().is_some());
 
         let msg = Err(H3Err::Stream(H3_MESSAGE_ERROR));
         // Missing pseudo-headers.
         for skip in 0..4 {
-            let f: Vec<_> = ok.iter().enumerate().filter(|(i, _)| *i != skip).map(|(_, x)| *x).collect();
+            let f: Vec<_> = ok
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, x)| *x)
+                .collect();
             if skip == 3 {
                 assert!(run(f).unwrap().is_some(), "authority may be absent");
             } else {
@@ -1095,7 +1202,13 @@ mod tests {
         let mut f = ok.clone();
         f.push(("X-Upper", "x"));
         assert_eq!(run(f), msg);
-        for h in ["connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection"] {
+        for h in [
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "upgrade",
+            "proxy-connection",
+        ] {
             let mut f = ok.clone();
             f.push((h, "x"));
             assert_eq!(run(f), msg, "{h}");
@@ -1124,9 +1237,14 @@ mod tests {
         f[1] = (":scheme", "ftp");
         assert_eq!(run(f), msg);
         // Host substitutes for :authority.
-        let r = run(vec![(":method", "GET"), (":scheme", "https"), (":path", "/"), ("host", "h.example")])
-            .unwrap()
-            .unwrap();
+        let r = run(vec![
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":path", "/"),
+            ("host", "h.example"),
+        ])
+        .unwrap()
+        .unwrap();
         assert_eq!(r.authority, b"h.example");
     }
 
@@ -1136,7 +1254,9 @@ mod tests {
         // Required Insert Count = 1.
         frame(F_HEADERS, &[0x01, 0x00, 0xd0], &mut w);
         assert_eq!(
-            RequestStream::new(100).feed(&w, true, &mut dec()).unwrap_err(),
+            RequestStream::new(100)
+                .feed(&w, true, &mut dec())
+                .unwrap_err(),
             H3Err::Conn(QPACK_DECOMPRESSION_FAILED)
         );
         // Indexed field line with T=0 (dynamic) despite RIC=0.
@@ -1146,7 +1266,10 @@ mod tests {
         assert_eq!(d.decode(&[0x00, 0x00, 0x10]), Err(qpack::QErr::Dynamic));
         assert_eq!(d.decode(&[0x00, 0x00, 0x00]), Err(qpack::QErr::Dynamic));
         // Literal with dynamic name reference (T=0).
-        assert_eq!(d.decode(&[0x00, 0x00, 0x40, 0x00]), Err(qpack::QErr::Dynamic));
+        assert_eq!(
+            d.decode(&[0x00, 0x00, 0x40, 0x00]),
+            Err(qpack::QErr::Dynamic)
+        );
     }
 
     #[test]
@@ -1155,10 +1278,22 @@ mod tests {
         // Truncated values/names, out-of-range index, oversized lengths.
         assert_eq!(d.decode(&[]), Err(qpack::QErr::Malformed));
         assert_eq!(d.decode(&[0x00]), Err(qpack::QErr::Malformed));
-        assert_eq!(d.decode(&[0x00, 0x00, 0xff, 0x7f]), Err(qpack::QErr::Malformed)); // idx 62+127 > 98
-        assert_eq!(d.decode(&[0x00, 0x00, 0x51, 0x05, b'a']), Err(qpack::QErr::Malformed));
-        assert_eq!(d.decode(&[0x00, 0x00, 0x27, b'a']), Err(qpack::QErr::Malformed));
-        assert_eq!(d.decode(&[0x00, 0x00, 0x51, 0x7f, 0xff, 0xff, 0xff, 0x7f]), Err(qpack::QErr::TooLarge));
+        assert_eq!(
+            d.decode(&[0x00, 0x00, 0xff, 0x7f]),
+            Err(qpack::QErr::Malformed)
+        ); // idx 62+127 > 98
+        assert_eq!(
+            d.decode(&[0x00, 0x00, 0x51, 0x05, b'a']),
+            Err(qpack::QErr::Malformed)
+        );
+        assert_eq!(
+            d.decode(&[0x00, 0x00, 0x27, b'a']),
+            Err(qpack::QErr::Malformed)
+        );
+        assert_eq!(
+            d.decode(&[0x00, 0x00, 0x51, 0x7f, 0xff, 0xff, 0xff, 0x7f]),
+            Err(qpack::QErr::TooLarge)
+        );
         // Exhaustive 1- and 2-byte tails after a valid prefix.
         for a in 0..=255u8 {
             let _ = d.decode(&[0, 0, a]);
@@ -1175,7 +1310,10 @@ mod tests {
                 qpack::encode_field(b"x", b"1", b);
             }
         });
-        assert_eq!(qpack::Decoder::new(1 << 20).decode(&b), Err(qpack::QErr::TooLarge));
+        assert_eq!(
+            qpack::Decoder::new(1 << 20).decode(&b),
+            Err(qpack::QErr::TooLarge)
+        );
     }
 
     #[test]
@@ -1184,7 +1322,10 @@ mod tests {
         qpack::encode_response(
             200,
             &[
-                (b"content-type".to_vec(), b"text/html; charset=utf-8".to_vec()),
+                (
+                    b"content-type".to_vec(),
+                    b"text/html; charset=utf-8".to_vec(),
+                ),
                 (b"server".to_vec(), b"vajra".to_vec()),
                 (b"x-own".to_vec(), b"1".to_vec()),
                 (b"set-cookie".to_vec(), b"a=b".to_vec()),
@@ -1204,7 +1345,10 @@ mod tests {
         // Uncommon status codes use a literal with the `:status` name reference.
         let mut b = Vec::new();
         qpack::encode_response(418, &[], &mut b);
-        assert_eq!(qpack::Decoder::new(4096).decode(&b).unwrap()[0], (b":status".to_vec(), b"418".to_vec()));
+        assert_eq!(
+            qpack::Decoder::new(4096).decode(&b).unwrap()[0],
+            (b":status".to_vec(), b"418".to_vec())
+        );
     }
 
     #[test]
@@ -1215,7 +1359,11 @@ mod tests {
                 let mut b = vec![0, 0];
                 qpack::encode_field(n.as_bytes(), val.as_bytes(), &mut b);
                 let f = d.decode(&b).unwrap();
-                assert_eq!(f, vec![(n.as_bytes().to_vec(), val.as_bytes().to_vec())], "{n}={val}");
+                assert_eq!(
+                    f,
+                    vec![(n.as_bytes().to_vec(), val.as_bytes().to_vec())],
+                    "{n}={val}"
+                );
             }
         }
         // Long values exercise multi-byte length prefixes.
@@ -1260,8 +1408,14 @@ mod tests {
         w.extend(settings_frame(&[]));
         assert_eq!(UniStream::new().feed(&mk(w)), Err(H3_FRAME_UNEXPECTED));
         // Reserved HTTP/2 setting identifiers and duplicates inside a frame.
-        assert_eq!(UniStream::new().feed(&mk(settings_frame(&[(0x2, 1)]))), Err(H3_SETTINGS_ERROR));
-        assert_eq!(UniStream::new().feed(&mk(settings_frame(&[(0x6, 1), (0x6, 2)]))), Err(H3_SETTINGS_ERROR));
+        assert_eq!(
+            UniStream::new().feed(&mk(settings_frame(&[(0x2, 1)]))),
+            Err(H3_SETTINGS_ERROR)
+        );
+        assert_eq!(
+            UniStream::new().feed(&mk(settings_frame(&[(0x6, 1), (0x6, 2)]))),
+            Err(H3_SETTINGS_ERROR)
+        );
         // Unknown settings are fine; so are GOAWAY, MAX_PUSH_ID and GREASE frames afterwards.
         let mut w = settings_frame(&[(0x1, 4096), (0x7, 16), (0x1f * 5 + 0x21, 0)]);
         frame(F_GOAWAY, &[0x08], &mut w);
@@ -1282,11 +1436,17 @@ mod tests {
 
     #[test]
     fn other_unidirectional_streams() {
-        assert_eq!(UniStream::new().feed(&[0x01]), Err(H3_STREAM_CREATION_ERROR));
+        assert_eq!(
+            UniStream::new().feed(&[0x01]),
+            Err(H3_STREAM_CREATION_ERROR)
+        );
         let mut u = UniStream::new();
         assert_eq!(u.feed(&[0x02, 1, 2, 3]), Ok(()));
         assert_eq!(u.kind(), Some(UniKind::QpackEncoder));
-        assert_eq!(u.feed(&vec![0u8; MAX_QPACK_STREAM_BYTES]), Err(H3_EXCESSIVE_LOAD));
+        assert_eq!(
+            u.feed(&vec![0u8; MAX_QPACK_STREAM_BYTES]),
+            Err(H3_EXCESSIVE_LOAD)
+        );
         let mut u = UniStream::new();
         assert_eq!(u.feed(&[0x40, 0x21, 9, 9, 9]), Ok(())); // reserved type 0x21
         assert_eq!(u.kind(), Some(UniKind::Ignored));
@@ -1301,7 +1461,11 @@ mod tests {
         assert_eq!(parse_frame(&[0x00, 0x40, 0x20], 10), FrameParse::TooLarge);
         assert_eq!(
             parse_frame(&[0x00, 0x02, 7, 8, 0xff], 10),
-            FrameParse::Frame { ty: 0, payload: &[7, 8], total: 4 }
+            FrameParse::Frame {
+                ty: 0,
+                payload: &[7, 8],
+                total: 4
+            }
         );
         // Header-only frame types use multi-byte type varints.
         let mut o = Vec::new();
@@ -1333,7 +1497,13 @@ mod tests {
             seed
         };
         let mut good = Vec::new();
-        request_headers_frame("POST", "ex", "/p?q=1", &[("accept", "*/*"), ("content-length", "4")], &mut good);
+        request_headers_frame(
+            "POST",
+            "ex",
+            "/p?q=1",
+            &[("accept", "*/*"), ("content-length", "4")],
+            &mut good,
+        );
         data_frame(b"abcd", &mut good);
         let ctl = {
             let mut c = vec![0x00];

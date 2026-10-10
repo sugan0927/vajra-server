@@ -84,12 +84,19 @@ fn spawn_upstream(handler: Arc<Handler>) -> Upstream {
             });
         }
     });
-    Upstream { addr, seen, accepts }
+    Upstream {
+        addr,
+        seen,
+        accepts,
+    }
 }
 
 fn ok(body: &str) -> Vec<u8> {
-    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}", body.len())
-        .into_bytes()
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
 }
 
 /// An upstream that always answers with its own name.
@@ -99,7 +106,10 @@ fn named(name: &'static str) -> Upstream {
 
 /// A port that refuses connections.
 fn dead_addr() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
 }
 
 // ───────────────────────── server harness ─────────────────────────
@@ -119,7 +129,10 @@ fn start(dynamic: Dynamic, config_path: Option<PathBuf>) -> Option<Server> {
     let (done_tx, done_rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let l = [Listener { fd: sock.as_raw_fd(), tls: false }];
+        let l = [Listener {
+            fd: sock.as_raw_fd(),
+            tls: false,
+        }];
         match Worker::new(&l, Config::default(), &dynamic, None) {
             Ok(mut w) => {
                 w.attach_control(0, inbox, Duration::from_secs(3));
@@ -140,11 +153,18 @@ fn start(dynamic: Dynamic, config_path: Option<PathBuf>) -> Option<Server> {
         return None;
     }
     let mgr = Arc::new(Manager::new(vec![handle], config_path, Settings::default()));
-    Some(Server { addr, mgr, done: done_rx })
+    Some(Server {
+        addr,
+        mgr,
+        done: done_rx,
+    })
 }
 
 fn proxies(p: Vec<ProxySettings>) -> Dynamic {
-    Dynamic { proxies: p, ..Dynamic::default() }
+    Dynamic {
+        proxies: p,
+        ..Dynamic::default()
+    }
 }
 
 fn multi(prefix: &str, ups: &[SocketAddr], balance: Balance) -> ProxySettings {
@@ -166,8 +186,15 @@ fn tmpdir(name: &str) -> PathBuf {
 // ───────────────────────── HTTP helpers ─────────────────────────
 
 fn split_response(buf: &[u8]) -> (String, Vec<u8>) {
-    let split = buf.windows(4).position(|w| w == b"\r\n\r\n").expect("no header end") + 4;
-    (String::from_utf8_lossy(&buf[..split]).into_owned(), buf[split..].to_vec())
+    let split = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("no header end")
+        + 4;
+    (
+        String::from_utf8_lossy(&buf[..split]).into_owned(),
+        buf[split..].to_vec(),
+    )
 }
 
 /// One request on a fresh connection.
@@ -243,7 +270,12 @@ fn write_cfg(path: &Path, upstream: SocketAddr, log: Option<&Path>) {
 #[test]
 fn round_robin_spreads_requests_evenly() {
     let (a, b) = (named("A"), named("B"));
-    let Some(s) = start(proxies(vec![multi("/api/", &[a.addr, b.addr], Balance::RoundRobin)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![multi("/api/", &[a.addr, b.addr], Balance::RoundRobin)]),
+        None,
+    ) else {
+        return;
+    };
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for _ in 0..10 {
@@ -257,18 +289,36 @@ fn round_robin_spreads_requests_evenly() {
 #[test]
 fn ip_hash_pins_a_client_to_one_upstream() {
     let (a, b) = (named("A"), named("B"));
-    let Some(s) = start(proxies(vec![multi("/api/", &[a.addr, b.addr], Balance::IpHash)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![multi("/api/", &[a.addr, b.addr], Balance::IpHash)]),
+        None,
+    ) else {
+        return;
+    };
 
     let bodies: std::collections::HashSet<_> =
         (0..6).map(|_| text(get(s.addr, "/api/x").1)).collect();
-    assert_eq!(bodies.len(), 1, "same client address => same upstream: {bodies:?}");
+    assert_eq!(
+        bodies.len(),
+        1,
+        "same client address => same upstream: {bodies:?}"
+    );
 }
 
 #[test]
 fn dead_upstream_is_failed_over_then_skipped() {
     let dead = dead_addr();
     let live = named("live");
-    let Some(s) = start(proxies(vec![multi("/api/", &[dead, live.addr], Balance::RoundRobin)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![multi(
+            "/api/",
+            &[dead, live.addr],
+            Balance::RoundRobin,
+        )]),
+        None,
+    ) else {
+        return;
+    };
 
     for i in 0..8 {
         let (head, body) = get(s.addr, "/api/x");
@@ -278,9 +328,25 @@ fn dead_upstream_is_failed_over_then_skipped() {
 
     // max_fails = 2: the dead upstream is tried twice, then its circuit opens.
     let m = s.mgr.scrape();
-    assert!(m.contains(&format!("vajra_upstream_connect_errors_total{{upstream=\"{dead}\"}} 2\n")), "{m}");
-    assert!(m.contains(&format!("vajra_upstream_requests_total{{upstream=\"{dead}\"}} 2\n")), "{m}");
-    assert!(m.contains(&format!("vajra_upstream_requests_total{{upstream=\"{}\"}} 8\n", live.addr)), "{m}");
+    assert!(
+        m.contains(&format!(
+            "vajra_upstream_connect_errors_total{{upstream=\"{dead}\"}} 2\n"
+        )),
+        "{m}"
+    );
+    assert!(
+        m.contains(&format!(
+            "vajra_upstream_requests_total{{upstream=\"{dead}\"}} 2\n"
+        )),
+        "{m}"
+    );
+    assert!(
+        m.contains(&format!(
+            "vajra_upstream_requests_total{{upstream=\"{}\"}} 8\n",
+            live.addr
+        )),
+        "{m}"
+    );
     assert_eq!(live.requests(), 8);
 }
 
@@ -288,7 +354,16 @@ fn dead_upstream_is_failed_over_then_skipped() {
 fn connect_failures_fail_over_even_for_post() {
     let dead = dead_addr();
     let live = named("live");
-    let Some(s) = start(proxies(vec![multi("/api/", &[dead, live.addr], Balance::RoundRobin)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![multi(
+            "/api/",
+            &[dead, live.addr],
+            Balance::RoundRobin,
+        )]),
+        None,
+    ) else {
+        return;
+    };
 
     // Nothing was sent to the dead upstream, so replaying the POST is safe.
     let (head, body) = send(s.addr, "POST", "/api/submit", "", "payload");
@@ -299,7 +374,16 @@ fn connect_failures_fail_over_even_for_post() {
 
 #[test]
 fn all_upstreams_dead_gives_502() {
-    let Some(s) = start(proxies(vec![multi("/api/", &[dead_addr(), dead_addr()], Balance::RoundRobin)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![multi(
+            "/api/",
+            &[dead_addr(), dead_addr()],
+            Balance::RoundRobin,
+        )]),
+        None,
+    ) else {
+        return;
+    };
     let (head, body) = get(s.addr, "/api/x");
     assert!(head.starts_with("HTTP/1.1 502"), "{head}");
     assert_eq!(body, b"bad gateway\n");
@@ -319,7 +403,9 @@ fn proxy_cache_hit_miss_bypass_and_invalidation() {
     let mut p = ProxySettings::simple("/c/", up.addr, false, 5);
     p.cache = true;
     p.cache_default_ttl_secs = 60;
-    let Some(s) = start(proxies(vec![p]), None) else { return };
+    let Some(s) = start(proxies(vec![p]), None) else {
+        return;
+    };
 
     // 1. miss, 2. hit: the upstream is asked only once.
     let (head, body) = get(s.addr, "/c/x");
@@ -347,7 +433,10 @@ fn proxy_cache_hit_miss_bypass_and_invalidation() {
     let (head, _) = send(s.addr, "POST", "/c/x", "", "z");
     assert!(head.starts_with("HTTP/1.1 200 OK"));
     let (head, _) = get(s.addr, "/c/x");
-    assert!(head.contains("X-Cache: MISS\r\n"), "after invalidation: {head}");
+    assert!(
+        head.contains("X-Cache: MISS\r\n"),
+        "after invalidation: {head}"
+    );
     assert_eq!(up.requests(), 6);
 
     let m = s.mgr.scrape();
@@ -361,16 +450,20 @@ fn proxy_cache_hit_miss_bypass_and_invalidation() {
 
 #[test]
 fn metrics_are_exposed_over_http() {
-    let Some(s) = start(Dynamic::default(), None) else { return };
+    let Some(s) = start(Dynamic::default(), None) else {
+        return;
+    };
     for _ in 0..3 {
         assert!(get(s.addr, "/health").0.starts_with("HTTP/1.1 200"));
     }
     assert!(get(s.addr, "/missing").0.starts_with("HTTP/1.1 404"));
 
-    let (admin_addr, _h) = admin::serve("127.0.0.1:0".parse().unwrap(), Arc::clone(&s.mgr)).unwrap();
+    let (admin_addr, _h) =
+        admin::serve("127.0.0.1:0".parse().unwrap(), Arc::clone(&s.mgr)).unwrap();
     let mut c = TcpStream::connect(admin_addr).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    c.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    c.write_all(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
     let mut out = String::new();
     c.read_to_string(&mut out).unwrap();
 
@@ -378,23 +471,52 @@ fn metrics_are_exposed_over_http() {
     assert!(out.contains("version=0.0.4"));
     assert!(out.contains("vajra_workers 1\n"), "{out}");
     assert!(out.contains("vajra_connections_total 4\n"), "{out}");
-    assert!(out.contains("vajra_http_requests_total{protocol=\"http1\"} 4\n"), "{out}");
-    assert!(out.contains("vajra_http_responses_total{class=\"2xx\"} 3\n"), "{out}");
-    assert!(out.contains("vajra_http_responses_total{class=\"4xx\"} 1\n"), "{out}");
-    assert!(!out.contains("vajra_sent_bytes_total 0\n"), "bytes were sent: {out}");
+    assert!(
+        out.contains("vajra_http_requests_total{protocol=\"http1\"} 4\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("vajra_http_responses_total{class=\"2xx\"} 3\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("vajra_http_responses_total{class=\"4xx\"} 1\n"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("vajra_sent_bytes_total 0\n"),
+        "bytes were sent: {out}"
+    );
     assert!(out.contains("# TYPE vajra_upstream_latency_seconds histogram"));
 }
 
 #[test]
 fn upstream_latency_histogram_counts_proxied_requests() {
     let up = named("x");
-    let Some(s) = start(proxies(vec![ProxySettings::simple("/api/", up.addr, false, 5)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![ProxySettings::simple("/api/", up.addr, false, 5)]),
+        None,
+    ) else {
+        return;
+    };
     for _ in 0..3 {
         get(s.addr, "/api/x");
     }
     let m = s.mgr.scrape();
-    assert!(m.contains(&format!("vajra_upstream_latency_seconds_count{{upstream=\"{}\"}} 3\n", up.addr)), "{m}");
-    assert!(m.contains(&format!("vajra_upstream_latency_seconds_bucket{{upstream=\"{}\",le=\"+Inf\"}} 3\n", up.addr)), "{m}");
+    assert!(
+        m.contains(&format!(
+            "vajra_upstream_latency_seconds_count{{upstream=\"{}\"}} 3\n",
+            up.addr
+        )),
+        "{m}"
+    );
+    assert!(
+        m.contains(&format!(
+            "vajra_upstream_latency_seconds_bucket{{upstream=\"{}\",le=\"+Inf\"}} 3\n",
+            up.addr
+        )),
+        "{m}"
+    );
 }
 
 // ───────────────────────── hot reload ─────────────────────────
@@ -406,12 +528,15 @@ fn hot_reload_swaps_routes_without_dropping_connections() {
     let cfg = dir.join("vajra.toml");
     write_cfg(&cfg, a.addr, None);
     let settings = Settings::load(&cfg).unwrap();
-    let Some(s) = start(settings.dynamic(), Some(cfg.clone())) else { return };
+    let Some(s) = start(settings.dynamic(), Some(cfg.clone())) else {
+        return;
+    };
 
     // A keep-alive connection opened before the reload...
     let mut c = TcpStream::connect(s.addr).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    c.write_all(b"GET /api/x HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    c.write_all(b"GET /api/x HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
     assert_eq!(read_response(&mut c).1, b"A");
 
     write_cfg(&cfg, b.addr, None);
@@ -419,7 +544,8 @@ fn hot_reload_swaps_routes_without_dropping_connections() {
     assert!(msg.contains("reloaded 1 worker"), "{msg}");
 
     // ...survives it and its next request already uses the new route.
-    c.write_all(b"GET /api/x HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    c.write_all(b"GET /api/x HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
     assert_eq!(read_response(&mut c).1, b"B");
     assert_eq!(get(s.addr, "/api/x").1, b"B");
 
@@ -431,7 +557,10 @@ fn hot_reload_swaps_routes_without_dropping_connections() {
     assert_eq!(get(s.addr, "/api/x").1, b"B");
 
     let m = s.mgr.scrape();
-    assert!(m.contains("vajra_config_reloads_total{result=\"ok\"} 1\n"), "{m}");
+    assert!(
+        m.contains("vajra_config_reloads_total{result=\"ok\"} 1\n"),
+        "{m}"
+    );
 }
 
 #[test]
@@ -443,7 +572,9 @@ fn reload_drops_cached_entries_from_the_old_routes() {
         format!("[[proxy]]\nprefix = \"/c/\"\nupstream = \"{up}\"\ncache = true\ncache_default_ttl_secs = 300\n")
     };
     std::fs::write(&cfg, toml(a.addr)).unwrap();
-    let Some(s) = start(Settings::load(&cfg).unwrap().dynamic(), Some(cfg.clone())) else { return };
+    let Some(s) = start(Settings::load(&cfg).unwrap().dynamic(), Some(cfg.clone())) else {
+        return;
+    };
 
     assert_eq!(get(s.addr, "/c/x").1, b"A");
     assert!(get(s.addr, "/c/x").0.contains("X-Cache: HIT"));
@@ -452,7 +583,10 @@ fn reload_drops_cached_entries_from_the_old_routes() {
     s.mgr.reload().unwrap();
     let (head, body) = get(s.addr, "/c/x");
     assert!(head.contains("X-Cache: MISS"), "{head}");
-    assert_eq!(body, b"B", "a stale answer from the old upstream must not survive the reload");
+    assert_eq!(
+        body, b"B",
+        "a stale answer from the old upstream must not survive the reload"
+    );
 }
 
 #[test]
@@ -461,7 +595,9 @@ fn access_log_is_written_and_rotated_by_reload() {
     let dir = tmpdir("rotate");
     let (cfg, log) = (dir.join("vajra.toml"), dir.join("logs/access.log"));
     write_cfg(&cfg, up.addr, Some(&log));
-    let Some(s) = start(Settings::load(&cfg).unwrap().dynamic(), Some(cfg.clone())) else { return };
+    let Some(s) = start(Settings::load(&cfg).unwrap().dynamic(), Some(cfg.clone())) else {
+        return;
+    };
 
     assert!(get(s.addr, "/health").0.starts_with("HTTP/1.1 200"));
     wait_for("first log line", || file_len(&log) > 0);
@@ -486,13 +622,20 @@ fn access_log_is_written_and_rotated_by_reload() {
 fn access_log_format() {
     let dir = tmpdir("logfmt");
     let log = dir.join("access.log");
-    let d = Dynamic { access_log: Some(log.to_string_lossy().into_owned()), ..Dynamic::default() };
+    let d = Dynamic {
+        access_log: Some(log.to_string_lossy().into_owned()),
+        ..Dynamic::default()
+    };
     let Some(s) = start(d, None) else { return };
 
     get(s.addr, "/health");
     get(s.addr, "/nope?q=1");
     s.mgr.shutdown();
-    assert!(s.done.recv_timeout(Duration::from_secs(10)).unwrap().is_ok());
+    assert!(s
+        .done
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .is_ok());
 
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<_> = text.lines().collect();
@@ -501,8 +644,16 @@ fn access_log_format() {
         assert!(l.starts_with("127.0.0.1 - - ["), "{l}");
         assert!(l.contains(" +0000] \""), "{l}");
     }
-    assert!(lines[0].ends_with("\"GET /health HTTP/1.1\" 200 3"), "{}", lines[0]);
-    assert!(lines[1].ends_with("\"GET /nope?q=1 HTTP/1.1\" 404 10"), "{}", lines[1]);
+    assert!(
+        lines[0].ends_with("\"GET /health HTTP/1.1\" 200 3"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].ends_with("\"GET /nope?q=1 HTTP/1.1\" 404 10"),
+        "{}",
+        lines[1]
+    );
 }
 
 // ───────────────────────── graceful shutdown ─────────────────────────
@@ -513,12 +664,18 @@ fn graceful_shutdown_finishes_in_flight_work_and_closes_idle_connections() {
         std::thread::sleep(Duration::from_millis(700));
         ok("slow-but-complete")
     }));
-    let Some(s) = start(proxies(vec![ProxySettings::simple("/slow/", up.addr, false, 5)]), None) else { return };
+    let Some(s) = start(
+        proxies(vec![ProxySettings::simple("/slow/", up.addr, false, 5)]),
+        None,
+    ) else {
+        return;
+    };
 
     // An idle keep-alive connection.
     let mut idle = TcpStream::connect(s.addr).unwrap();
     idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    idle.write_all(b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n").unwrap();
+    idle.write_all(b"GET /health HTTP/1.1\r\nHost: t\r\n\r\n")
+        .unwrap();
     assert_eq!(read_response(&mut idle).1, b"ok\n");
 
     // A request that is still running when shutdown begins.
@@ -529,7 +686,11 @@ fn graceful_shutdown_finishes_in_flight_work_and_closes_idle_connections() {
 
     // The idle connection is closed by the server...
     let mut b = [0u8; 16];
-    assert_eq!(idle.read(&mut b).unwrap_or(0), 0, "idle connection should see EOF");
+    assert_eq!(
+        idle.read(&mut b).unwrap_or(0),
+        0,
+        "idle connection should see EOF"
+    );
 
     // ...the in-flight request still completes...
     let (head, body) = busy.join().unwrap();
@@ -537,21 +698,36 @@ fn graceful_shutdown_finishes_in_flight_work_and_closes_idle_connections() {
     assert_eq!(body, b"slow-but-complete");
 
     // ...and the worker exits cleanly once nothing is left.
-    assert!(s.done.recv_timeout(Duration::from_secs(10)).expect("worker did not exit").is_ok());
+    assert!(s
+        .done
+        .recv_timeout(Duration::from_secs(10))
+        .expect("worker did not exit")
+        .is_ok());
 }
 
 #[test]
 fn shutdown_deadline_abandons_stuck_connections() {
     // A client that never finishes its request must not hold the process forever.
-    let Some(s) = start(Dynamic::default(), None) else { return };
+    let Some(s) = start(Dynamic::default(), None) else {
+        return;
+    };
     let mut stuck = TcpStream::connect(s.addr).unwrap();
-    stuck.write_all(b"GET /health HTTP/1.1\r\nHost: t\r\n").unwrap(); // headers never completed
+    stuck
+        .write_all(b"GET /health HTTP/1.1\r\nHost: t\r\n")
+        .unwrap(); // headers never completed
     std::thread::sleep(Duration::from_millis(100));
 
     let t0 = Instant::now();
     s.mgr.shutdown();
     // Grace period is 3 s in this harness.
-    assert!(s.done.recv_timeout(Duration::from_secs(10)).expect("worker did not exit").is_ok());
+    assert!(s
+        .done
+        .recv_timeout(Duration::from_secs(10))
+        .expect("worker did not exit")
+        .is_ok());
     let took = t0.elapsed();
-    assert!(took >= Duration::from_millis(2500) && took < Duration::from_secs(8), "{took:?}");
+    assert!(
+        took >= Duration::from_millis(2500) && took < Duration::from_secs(8),
+        "{took:?}"
+    );
 }
