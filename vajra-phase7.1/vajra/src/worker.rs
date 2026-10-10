@@ -1211,6 +1211,10 @@ impl Worker {
             ensure_peer(&mut self.conns[idx], need_peer);
             let peer = self.conns[idx].peer;
 
+            crate::req_id::set_opt(
+                crate::req_id::extract_from_h2(&req.headers)
+                    .or_else(|| Some(crate::req_id::RequestId::generate())),
+            );
             let path = req.path.split('?').next().unwrap_or("/");
             let head_only = req.method == "HEAD";
             let inm = req

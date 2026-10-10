@@ -15,6 +15,7 @@ name = "vajra"
 path = "src/main.rs"
 
 [dependencies]
+getrandom = "0.2"
 # io_uring bindings (tokio-rs). We drive the ring ourselves: no async runtime.
 io-uring = "0.7"
 # Raw syscalls / constants.

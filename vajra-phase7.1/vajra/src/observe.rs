@@ -18,6 +18,7 @@ use crate::cache::CacheStats;
 use crate::config::{LogFormat, UpAddr};
 use crate::control::Snapshot;
 use crate::date::format_clf;
+use crate::req_id::IdKind;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -97,6 +98,8 @@ pub struct Metrics {
     pub ws_upgrades: u64,
     /// Requests answered by a FastCGI (PHP-FPM) application.
     pub fcgi_requests: u64,
+    pub request_ids_from_client: u64,
+    pub request_ids_generated: u64,
     pub requests_h1: u64,
     pub requests_h2: u64,
     pub requests_h3: u64,
@@ -130,6 +133,8 @@ impl Metrics {
         self.tls_handshakes += o.tls_handshakes;
         self.ws_upgrades += o.ws_upgrades;
         self.fcgi_requests += o.fcgi_requests;
+        self.request_ids_from_client += o.request_ids_from_client;
+        self.request_ids_generated += o.request_ids_generated;
         self.requests_h1 += o.requests_h1;
         self.requests_h2 += o.requests_h2;
         self.requests_h3 += o.requests_h3;
@@ -202,6 +207,13 @@ impl Observer {
         };
         self.m.status[class] += 1;
 
+        let rid = crate::req_id::current();
+        match rid.as_ref().map(|r| r.kind()) {
+            Some(IdKind::Client)    => self.m.request_ids_from_client += 1,
+            Some(IdKind::Generated) => self.m.request_ids_generated += 1,
+            None => {}
+        }
+
         if !self.log_enabled {
             return;
         }
@@ -226,6 +238,7 @@ impl Observer {
         status: u16,
         bytes: u64,
     ) {
+        let rid = crate::req_id::current();
         let log = &mut self.log;
         match ip {
             Some(ip) => {
@@ -241,7 +254,12 @@ impl Observer {
         push_escaped(log, target.as_bytes(), 2048);
         log.push(b' ');
         log.extend_from_slice(proto.name().as_bytes());
-        let _ = writeln!(log_writer(log), "\" {status} {bytes}");
+        let _ = write!(log_writer(log), "\" {status} {bytes}");
+        if let Some(id) = rid.as_ref() {
+            log.push(b' ');
+            log.extend_from_slice(id.as_str().as_bytes());
+        }
+        log.push(b'\n');
     }
 
     /// One JSON object per line, newline-terminated.
@@ -257,6 +275,7 @@ impl Observer {
         status: u16,
         bytes: u64,
     ) {
+        let rid = crate::req_id::current();
         let now = self.now;
         let log = &mut self.log;
         log.push(b'{');
@@ -276,6 +295,11 @@ impl Observer {
         if let Some(ip) = ip {
             log.extend_from_slice(b",\"client_ip\":\"");
             let _ = write!(log_writer(log), "{ip}");
+            log.push(b'"');
+        }
+        if let Some(id) = rid.as_ref() {
+            log.extend_from_slice(b",\"request_id\":\"");
+            log.extend_from_slice(id.as_str().as_bytes());
             log.push(b'"');
         }
         log.push(b'}');

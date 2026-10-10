@@ -127,6 +127,10 @@ pub fn process(
 
         match req.parse(&input[consumed..]) {
             Ok(httparse::Status::Complete(n)) => {
+                crate::req_id::set_opt(
+                    crate::req_id::extract_from_h1(req.headers)
+                        .or_else(|| Some(crate::req_id::RequestId::generate())),
+                );
                 let method = req.method.unwrap_or("");
                 let target = req.path.unwrap_or("/");
                 let path = target.split('?').next().unwrap_or("/");

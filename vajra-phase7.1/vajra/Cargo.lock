@@ -606,6 +606,7 @@ name = "vajra"
 version = "0.7.1"
 dependencies = [
  "bytes",
+ "getrandom 0.2.17",
  "hpack",
  "httparse",
  "io-uring",
