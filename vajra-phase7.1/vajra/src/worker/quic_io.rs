@@ -47,6 +47,7 @@ pub(super) struct QuicRt {
     fd: RawFd,
     engine: Quic,
     cfg: QuicConfig,
+    #[allow(dead_code)]
     cert: Option<crate::config::TlsPaths>,
     rx: Vec<Box<RxSlot>>,
     tx: Vec<Box<TxSlot>>,
@@ -59,7 +60,12 @@ pub(super) struct QuicRt {
 }
 
 impl QuicRt {
-    fn new(fd: RawFd, engine: Quic, cfg: QuicConfig, cert: Option<crate::config::TlsPaths>) -> Self {
+    fn new(
+        fd: RawFd,
+        engine: Quic,
+        cfg: QuicConfig,
+        cert: Option<crate::config::TlsPaths>,
+    ) -> Self {
         let rx = (0..RX_SLOTS)
             .map(|_| {
                 // SAFETY: msghdr/iovec/sockaddr_storage are plain C structs; all-zero is valid.
@@ -140,7 +146,9 @@ impl Worker {
     }
 
     pub(super) fn q_busy(&self) -> bool {
-        self.quic.as_ref().is_some_and(|q| q.engine.busy() || !q.txq.is_empty())
+        self.quic
+            .as_ref()
+            .is_some_and(|q| q.engine.busy() || !q.txq.is_empty())
     }
 
     pub(super) fn q_begin_drain(&mut self) {
@@ -188,7 +196,10 @@ impl Worker {
         for s in q.tx.iter_mut() {
             if let Some(a) = s.addr.take() {
                 if let Some(dest) = a.as_socket() {
-                    pending.push(Datagram { dest, data: std::mem::take(&mut s.data) });
+                    pending.push(Datagram {
+                        dest,
+                        data: std::mem::take(&mut s.data),
+                    });
                 }
             }
         }
@@ -196,7 +207,14 @@ impl Worker {
             let sa = SockAddr::from(d.dest);
             // SAFETY: valid buffer and sockaddr; best-effort send on a non-blocking socket.
             unsafe {
-                libc::sendto(q.fd, d.data.as_ptr().cast(), d.data.len(), libc::MSG_DONTWAIT, sa.as_ptr(), sa.len());
+                libc::sendto(
+                    q.fd,
+                    d.data.as_ptr().cast(),
+                    d.data.len(),
+                    libc::MSG_DONTWAIT,
+                    sa.as_ptr(),
+                    sa.len(),
+                );
             }
         }
     }
@@ -287,7 +305,9 @@ impl Worker {
     /// Make sure a timer is armed for the engine's earliest deadline.
     fn q_rearm_timer(&mut self) {
         let Some(q) = self.quic.as_mut() else { return };
-        let Some(next) = q.engine.next_timeout() else { return };
+        let Some(next) = q.engine.next_timeout() else {
+            return;
+        };
         // An armed timer at or before `next` will fire first and re-arm.
         if q.timers.values().any(|(t, _)| *t <= next) {
             return;
@@ -295,10 +315,16 @@ impl Worker {
         let seq = q.timer_seq;
         q.timer_seq += 1;
         let d = next.saturating_duration_since(Instant::now());
-        let ts = Box::new(types::Timespec::new().sec(d.as_secs()).nsec(d.subsec_nanos()));
+        let ts = Box::new(
+            types::Timespec::new()
+                .sec(d.as_secs())
+                .nsec(d.subsec_nanos()),
+        );
         let ptr = &*ts as *const types::Timespec;
         q.timers.insert(seq, (next, ts)); // the Box keeps the timespec alive and at a fixed address
-        let entry = opcode::Timeout::new(ptr).build().user_data(user_data(OP_Q_TIMER, seq as usize));
+        let entry = opcode::Timeout::new(ptr)
+            .build()
+            .user_data(user_data(OP_Q_TIMER, seq as usize));
         push(&mut self.ring, entry);
     }
 
@@ -355,12 +381,25 @@ impl Worker {
         let peer = Some(r.peer.ip());
         let path = req.path.split('?').next().unwrap_or("/");
         let head_only = req.method == "HEAD";
-        let inm = req.headers.iter().find(|(n, _)| n == b"if-none-match").map(|(_, v)| v.as_slice());
-        let reply = router::route(&req.method, path, inm, self.files.as_mut(), &self.proxies.table);
+        let inm = req
+            .headers
+            .iter()
+            .find(|(n, _)| n == b"if-none-match")
+            .map(|(_, v)| v.as_slice());
+        let reply = router::route(
+            &req.method,
+            path,
+            inm,
+            self.files.as_mut(),
+            &self.proxies.table,
+        );
 
         if let Some((ri, php_target)) = reply.proxy_parts() {
-            let hdrs: Vec<(&[u8], &[u8])> =
-                req.headers.iter().map(|(n, v)| (n.as_slice(), v.as_slice())).collect();
+            let hdrs: Vec<(&[u8], &[u8])> = req
+                .headers
+                .iter()
+                .map(|(n, v)| (n.as_slice(), v.as_slice()))
+                .collect();
             let cache_on = self.proxies.table.route(ri).cache.is_some();
             let mode = match cache::lookup_for_request(
                 &mut self.cache,
@@ -373,11 +412,29 @@ impl Worker {
             ) {
                 cache::Lookup::Hit(hit) => {
                     let bodyless = hit.status == 204 || hit.status == 304;
-                    let body = if bodyless { Vec::new() } else { (*hit.body).clone() };
-                    let resp = http::h2_proxy_response(hit.status, &hit.headers, body, head_only, &date, Some("HIT"));
+                    let body = if bodyless {
+                        Vec::new()
+                    } else {
+                        (*hit.body).clone()
+                    };
+                    let resp = http::h2_proxy_response(
+                        hit.status,
+                        &hit.headers,
+                        body,
+                        head_only,
+                        &date,
+                        Some("HIT"),
+                    );
                     let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
-                    self.obs.response(peer, Http::H3, &req.method, &req.path, hit.status, bytes);
-                    self.q_respond(QReq { id: r.id, stream: r.stream }, resp);
+                    self.obs
+                        .response(peer, Http::H3, &req.method, &req.path, hit.status, bytes);
+                    self.q_respond(
+                        QReq {
+                            id: r.id,
+                            stream: r.stream,
+                        },
+                        resp,
+                    );
                     return;
                 }
                 cache::Lookup::Miss(m) => m,
@@ -389,7 +446,11 @@ impl Worker {
                 &ReqParts {
                     method: &req.method,
                     target: &req.path,
-                    host: if req.authority.is_empty() { None } else { Some(req.authority.as_slice()) },
+                    host: if req.authority.is_empty() {
+                        None
+                    } else {
+                        Some(req.authority.as_slice())
+                    },
                     headers: &hdrs,
                     body: &req.body,
                     client_ip: peer,
@@ -399,15 +460,23 @@ impl Worker {
                 },
             );
             spec.cache = mode;
-            let q = QReq { id: r.id, stream: r.stream };
+            let q = QReq {
+                id: r.id,
+                stream: r.stream,
+            };
             match self.alloc_pseudo(q) {
                 Some(idx) => {
-                    self.conns[idx].proxy =
-                        Some(Box::new(ProxyJob::new(spec, Rc::clone(&self.proxies), peer, 0)));
+                    self.conns[idx].proxy = Some(Box::new(ProxyJob::new(
+                        spec,
+                        Rc::clone(&self.proxies),
+                        peer,
+                        0,
+                    )));
                     self.start_proxy(idx);
                 }
                 None => {
-                    self.obs.response(peer, Http::H3, &req.method, &req.path, 503, 0);
+                    self.obs
+                        .response(peer, Http::H3, &req.method, &req.path, 503, 0);
                     self.q_respond(q, http::h2_error(503, &date));
                 }
             }
@@ -416,8 +485,15 @@ impl Worker {
 
         let resp = http::h2_response(&reply, head_only, &date);
         let (status, bytes) = http::reply_meta(&reply, head_only);
-        self.obs.response(peer, Http::H3, &req.method, &req.path, status, bytes);
-        self.q_respond(QReq { id: r.id, stream: r.stream }, resp);
+        self.obs
+            .response(peer, Http::H3, &req.method, &req.path, status, bytes);
+        self.q_respond(
+            QReq {
+                id: r.id,
+                stream: r.stream,
+            },
+            resp,
+        );
     }
 
     // ───────────────────────── pseudo connection slots ─────────────────────────

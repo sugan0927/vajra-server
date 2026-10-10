@@ -39,9 +39,8 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use quinn_proto::crypto::rustls::QuicServerConfig;
 use quinn_proto::{
-    Connection, ConnectionHandle, DatagramEvent, Dir, Endpoint, EndpointConfig, EndpointEvent, Event,
-    IdleTimeout, Incoming, ReadError, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt,
-    WriteError,
+    Connection, ConnectionHandle, DatagramEvent, Dir, Endpoint, EndpointConfig, Event, IdleTimeout,
+    Incoming, ReadError, ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt, WriteError,
 };
 
 use crate::h2::{H2Body, H2Response};
@@ -77,7 +76,11 @@ impl Default for QuicConfig {
 }
 
 /// Build the QUIC server configuration from PEM files.
-pub fn server_config(cert: &Path, key: &Path, cfg: &QuicConfig) -> Result<Arc<ServerConfig>, String> {
+pub fn server_config(
+    cert: &Path,
+    key: &Path,
+    cfg: &QuicConfig,
+) -> Result<Arc<ServerConfig>, String> {
     let rustls_cfg = tls::build_quic_tls(cert, key)?;
     let crypto = QuicServerConfig::try_from(rustls_cfg).map_err(|e| format!("quic: {e}"))?;
     let mut sc = ServerConfig::with_crypto(Arc::new(crypto));
@@ -86,7 +89,8 @@ pub fn server_config(cert: &Path, key: &Path, cfg: &QuicConfig) -> Result<Arc<Se
     t.max_concurrent_bidi_streams(VarInt::from_u32(cfg.max_bidi_streams));
     t.max_concurrent_uni_streams(VarInt::from_u32(8));
     t.max_idle_timeout(Some(
-        IdleTimeout::try_from(cfg.idle_timeout).map_err(|_| "quic: idle timeout out of range".to_string())?,
+        IdleTimeout::try_from(cfg.idle_timeout)
+            .map_err(|_| "quic: idle timeout out of range".to_string())?,
     ));
     t.datagram_receive_buffer_size(None); // no unreliable datagrams
     t.stream_receive_window(VarInt::from_u32(256 * 1024));
@@ -133,8 +137,15 @@ pub struct QuicStats {
 
 enum Body {
     None,
-    Mem { data: Vec<u8>, pos: usize },
-    File { file: Rc<OpenFile>, off: u64, remaining: u64 },
+    Mem {
+        data: Vec<u8>,
+        pos: usize,
+    },
+    File {
+        file: Rc<OpenFile>,
+        off: u64,
+        remaining: u64,
+    },
 }
 
 enum Fill {
@@ -165,14 +176,20 @@ impl OutStream {
                 *pos += n;
                 Fill::More
             }
-            Body::File { file, off, remaining } => {
+            Body::File {
+                file,
+                off,
+                remaining,
+            } => {
                 if *remaining == 0 {
                     return Fill::Done;
                 }
                 let n = (*remaining).min(CHUNK as u64) as usize;
                 let mut tmp = vec![0u8; n];
                 // SAFETY: `tmp` is a live buffer of `n` bytes; the fd is owned by `file`.
-                let got = unsafe { libc::pread(file.fd(), tmp.as_mut_ptr().cast(), n, *off as libc::off_t) };
+                let got = unsafe {
+                    libc::pread(file.fd(), tmp.as_mut_ptr().cast(), n, *off as libc::off_t)
+                };
                 if got <= 0 {
                     return Fill::Error; // truncated or unreadable file
                 }
@@ -225,7 +242,9 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool, Option<VarIn
     let mut fin = false;
     let mut reset = None;
     let mut recv = conn.recv_stream(id);
-    let Ok(mut chunks) = recv.read(true) else { return (data, false, None) };
+    let Ok(mut chunks) = recv.read(true) else {
+        return (data, false, None);
+    };
     loop {
         match chunks.next(usize::MAX) {
             Ok(Some(c)) => data.extend_from_slice(&c.bytes),
@@ -266,10 +285,21 @@ fn start_out(qc: &mut QConn, id: StreamId, resp: H2Response) {
         H2Body::Mem(data) => Body::Mem { data, pos: 0 },
         H2Body::File(file) => {
             let remaining = file.size;
-            Body::File { file, off: 0, remaining }
+            Body::File {
+                file,
+                off: 0,
+                remaining,
+            }
         }
     };
-    qc.outs.insert(id, OutStream { pending, pos: 0, body });
+    qc.outs.insert(
+        id,
+        OutStream {
+            pending,
+            pos: 0,
+            body,
+        },
+    );
     pump_out(qc, id);
 }
 
@@ -280,8 +310,14 @@ fn start_error(qc: &mut QConn, id: StreamId, status: u16) {
         status,
         headers: vec![
             (b"server".to_vec(), b"Vajra".to_vec()),
-            (b"content-type".to_vec(), b"text/plain; charset=utf-8".to_vec()),
-            (b"content-length".to_vec(), body.len().to_string().into_bytes()),
+            (
+                b"content-type".to_vec(),
+                b"text/plain; charset=utf-8".to_vec(),
+            ),
+            (
+                b"content-length".to_vec(),
+                body.len().to_string().into_bytes(),
+            ),
         ],
         body: H2Body::Mem(body.to_vec()),
     };
@@ -290,7 +326,9 @@ fn start_error(qc: &mut QConn, id: StreamId, status: u16) {
 
 /// Write as much of the stream's response as flow control allows.
 fn pump_out(qc: &mut QConn, id: StreamId) {
-    let Some(mut o) = qc.outs.remove(&id) else { return };
+    let Some(mut o) = qc.outs.remove(&id) else {
+        return;
+    };
     loop {
         if o.pos < o.pending.len() {
             match qc.conn.send_stream(id).write(&o.pending[o.pos..]) {
@@ -340,7 +378,12 @@ pub struct Quic {
 impl Quic {
     pub fn new(cfg: QuicConfig, server: Arc<ServerConfig>) -> Self {
         Self {
-            endpoint: Endpoint::new(Arc::new(EndpointConfig::default()), Some(server), false, None),
+            endpoint: Endpoint::new(
+                Arc::new(EndpointConfig::default()),
+                Some(server),
+                false,
+                None,
+            ),
             conns: HashMap::new(),
             dirty: HashSet::new(),
             timers: BTreeMap::new(),
@@ -370,13 +413,23 @@ impl Quic {
     }
 
     fn push_scratch(&mut self, dest: SocketAddr, size: usize) {
-        self.out.push(Datagram { dest, data: self.scratch[..size].to_vec() });
+        self.out.push(Datagram {
+            dest,
+            data: self.scratch[..size].to_vec(),
+        });
     }
 
     /// Feed one received UDP datagram.
     pub fn recv(&mut self, now: Instant, remote: SocketAddr, data: &[u8]) {
         self.scratch.clear();
-        let ev = self.endpoint.handle(now, remote, None, None, BytesMut::from(data), &mut self.scratch);
+        let ev = self.endpoint.handle(
+            now,
+            remote,
+            None,
+            None,
+            BytesMut::from(data),
+            &mut self.scratch,
+        );
         match ev {
             None => {}
             Some(DatagramEvent::NewConnection(incoming)) => self.on_incoming(now, incoming),
@@ -442,7 +495,9 @@ impl Quic {
     /// Fire every expired connection timer.
     pub fn on_timeout(&mut self, now: Instant) {
         loop {
-            let Some((&(when, g), &ch)) = self.timers.iter().next() else { break };
+            let Some((&(when, g), &ch)) = self.timers.iter().next() else {
+                break;
+            };
             if when > now {
                 break;
             }
@@ -479,7 +534,9 @@ impl Quic {
     /// Answer a request previously returned by [`take_requests`](Self::take_requests).
     /// Silently ignored if the connection is gone.
     pub fn respond(&mut self, id: QConnId, stream: StreamId, resp: H2Response) {
-        let Some(qc) = self.conns.get_mut(&id.handle) else { return };
+        let Some(qc) = self.conns.get_mut(&id.handle) else {
+            return;
+        };
         if qc.gen != id.gen {
             return;
         }
@@ -512,7 +569,9 @@ impl Quic {
     // ───────────────────────── driving one connection ─────────────────────────
 
     fn drive(&mut self, ch: ConnectionHandle, now: Instant) {
-        let Some(mut qc) = self.conns.remove(&ch) else { return };
+        let Some(mut qc) = self.conns.remove(&ch) else {
+            return;
+        };
         let mut drained = false;
 
         'outer: loop {
@@ -542,12 +601,16 @@ impl Quic {
                         qc.outs.clear();
                     }
                     Event::Stream(StreamEvent::Opened { .. }) => {}
-                    Event::Stream(StreamEvent::Readable { id }) => self.on_readable(&mut qc, id, now),
+                    Event::Stream(StreamEvent::Readable { id }) => {
+                        self.on_readable(&mut qc, id, now)
+                    }
                     Event::Stream(StreamEvent::Writable { id }) => pump_out(&mut qc, id),
                     Event::Stream(StreamEvent::Stopped { id, .. }) => {
                         qc.outs.remove(&id);
                     }
-                    Event::Stream(StreamEvent::Available { dir: Dir::Uni }) => self.open_control(&mut qc),
+                    Event::Stream(StreamEvent::Available { dir: Dir::Uni }) => {
+                        self.open_control(&mut qc)
+                    }
                     _ => {}
                 }
             }
@@ -609,7 +672,9 @@ impl Quic {
         if qc.ctl.is_some() || qc.closing {
             return;
         }
-        let Some(id) = qc.conn.streams().open(Dir::Uni) else { return }; // retried on Available
+        let Some(id) = qc.conn.streams().open(Dir::Uni) else {
+            return;
+        }; // retried on Available
         qc.ctl = Some(id);
         let pre = h3::control_stream_preface();
         let _ = qc.conn.send_stream(id).write(&pre);
@@ -620,7 +685,9 @@ impl Quic {
             return;
         }
         loop {
-            let Some(id) = qc.conn.streams().accept(Dir::Bi) else { break };
+            let Some(id) = qc.conn.streams().accept(Dir::Bi) else {
+                break;
+            };
             qc.accepted_bidi += 1;
             if qc.draining {
                 let _ = qc.conn.recv_stream(id).stop(vi(h3::H3_REQUEST_REJECTED));
@@ -631,7 +698,9 @@ impl Quic {
             self.on_readable(qc, id, now);
         }
         loop {
-            let Some(id) = qc.conn.streams().accept(Dir::Uni) else { break };
+            let Some(id) = qc.conn.streams().accept(Dir::Uni) else {
+                break;
+            };
             qc.unis.insert(id, UniStream::new());
             self.on_readable(qc, id, now);
         }
@@ -654,14 +723,24 @@ impl Quic {
             qc.reqs.remove(&id);
             return;
         }
-        let Some(rs) = qc.reqs.get_mut(&id) else { return };
+        let Some(rs) = qc.reqs.get_mut(&id) else {
+            return;
+        };
         match rs.feed(&data, fin, &mut self.dec) {
             Ok(None) => {}
             Ok(Some(req)) => {
                 qc.reqs.remove(&id);
                 qc.pending += 1;
                 self.stats.requests += 1;
-                self.ready.push(Ready { id: QConnId { handle: qc.handle, gen: qc.gen }, stream: id, req, peer: qc.peer });
+                self.ready.push(Ready {
+                    id: QConnId {
+                        handle: qc.handle,
+                        gen: qc.gen,
+                    },
+                    stream: id,
+                    req,
+                    peer: qc.peer,
+                });
             }
             Err(H3Err::Conn(code)) => {
                 self.stats.protocol_errors += 1;
@@ -682,15 +761,19 @@ impl Quic {
 
     fn read_uni(&mut self, qc: &mut QConn, id: StreamId, now: Instant) {
         let (data, fin, reset) = read_all(&mut qc.conn, id);
-        let Some(us) = qc.unis.get_mut(&id) else { return };
+        let Some(us) = qc.unis.get_mut(&id) else {
+            return;
+        };
         if let Err(code) = us.feed(&data) {
             self.stats.protocol_errors += 1;
             close_conn(qc, now, code);
             return;
         }
         let kind = us.kind();
-        if matches!(kind, Some(UniKind::Control | UniKind::QpackEncoder | UniKind::QpackDecoder))
-            && (fin || reset.is_some())
+        if matches!(
+            kind,
+            Some(UniKind::Control | UniKind::QpackEncoder | UniKind::QpackDecoder)
+        ) && (fin || reset.is_some())
         {
             // Closing a critical stream is a connection error (RFC 9114 §6.2.1).
             self.stats.protocol_errors += 1;
