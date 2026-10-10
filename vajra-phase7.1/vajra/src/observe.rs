@@ -430,6 +430,18 @@ pub fn render_prometheus(snaps: &[Snapshot]) -> String {
     }
 
     header(&mut o, "vajra_received_bytes_total", "counter", "Bytes read from client sockets.");
+    let _ = writeln!(o, "# HELP vajra_request_ids_total Request IDs by source");
+    let _ = writeln!(o, "# TYPE vajra_request_ids_total counter");
+    let _ = writeln!(
+        o,
+        "vajra_request_ids_total{{source=\"client\"}} {}",
+        total.request_ids_from_client
+    );
+    let _ = writeln!(
+        o,
+        "vajra_request_ids_total{{source=\"generated\"}} {}",
+        total.request_ids_generated
+    );
     let _ = writeln!(o, "vajra_received_bytes_total {}", total.bytes_in);
     header(&mut o, "vajra_sent_bytes_total", "counter", "Bytes written to client sockets.");
     let _ = writeln!(o, "vajra_sent_bytes_total {}", total.bytes_out);
