@@ -529,6 +529,9 @@ fn h2_base(date: &[u8; DATE_LEN], ctype: &str, len: u64) -> Vec<(Vec<u8>, Vec<u8
         (b"content-type".to_vec(), ctype.as_bytes().to_vec()),
         (b"content-length".to_vec(), len.to_string().into_bytes()),
     ];
+    if let Some(id) = crate::req_id::current() {
+        v.push((b"x-request-id".to_vec(), id.as_str().as_bytes().to_vec()));
+    }
     push_alt_svc_h2(&mut v);
     v
 }
