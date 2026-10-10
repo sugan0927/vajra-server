@@ -635,9 +635,6 @@ mod tests {
 
     fn run_in(input: &str, t: &ProxyTable, e: &mut Env) -> (Outcome, String) {
         let mut out = Vec::new();
-    if let Some(id) = crate::req_id::current() {
-        out.push((b"x-request-id".to_vec(), id.as_str().as_bytes().to_vec()));
-    }
         let mut ctx = Ctx {
             files: None,
             proxies: t,
