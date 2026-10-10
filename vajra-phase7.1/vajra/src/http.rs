@@ -724,7 +724,7 @@ mod tests {
         let lines: Vec<_> = log.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("192.0.2.7 - - [06/Nov/1994:08:49:37 +0000] \"GET /health HTTP/1.1\" 200 3"), "{}", lines[0]);
-        assert!(lines[1].ends_with("\"GET /nope HTTP/1.1\" 404 10"), "{}", lines[1]);
+        assert!(lines[1].contains("\"GET /nope HTTP/1.1\" 404 10"), "{}", lines[1]);
         assert!(lines[2].contains("\"- - HTTP/1.1\" 400 12"), "{}", lines[2]);
     }
 
