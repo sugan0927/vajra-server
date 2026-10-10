@@ -60,17 +60,29 @@ fn exchange(addr: SocketAddr, raw: &str) -> (String, Vec<u8>) {
     s.write_all(raw.as_bytes()).unwrap();
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).unwrap();
-    let split = buf.windows(4).position(|w| w == b"\r\n\r\n").expect("no header end") + 4;
-    (String::from_utf8_lossy(&buf[..split]).into_owned(), buf[split..].to_vec())
+    let split = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("no header end")
+        + 4;
+    (
+        String::from_utf8_lossy(&buf[..split]).into_owned(),
+        buf[split..].to_vec(),
+    )
 }
 
 fn get(addr: SocketAddr, path: &str) -> (String, Vec<u8>) {
-    exchange(addr, &format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+    exchange(
+        addr,
+        &format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+    )
 }
 
 #[test]
 fn serves_small_file_with_headers() {
-    let Some(addr) = start(&make_root("small")) else { return };
+    let Some(addr) = start(&make_root("small")) else {
+        return;
+    };
     let (head, body) = get(addr, "/a.txt");
     assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
     assert!(head.contains("Content-Type: text/plain; charset=utf-8"));
@@ -82,7 +94,9 @@ fn serves_small_file_with_headers() {
 
 #[test]
 fn serves_large_file_intact_via_splice() {
-    let Some(addr) = start(&make_root("big")) else { return };
+    let Some(addr) = start(&make_root("big")) else {
+        return;
+    };
     let (head, body) = get(addr, "/big.bin");
     assert!(head.starts_with("HTTP/1.1 200 OK"));
     assert_eq!(body.len(), BIG_LEN);
@@ -91,7 +105,9 @@ fn serves_large_file_intact_via_splice() {
 
 #[test]
 fn index_for_root_path() {
-    let Some(addr) = start(&make_root("index")) else { return };
+    let Some(addr) = start(&make_root("index")) else {
+        return;
+    };
     let (head, body) = get(addr, "/");
     assert!(head.starts_with("HTTP/1.1 200 OK"));
     assert!(head.contains("text/html"));
@@ -100,9 +116,14 @@ fn index_for_root_path() {
 
 #[test]
 fn head_and_conditional_requests() {
-    let Some(addr) = start(&make_root("cond")) else { return };
+    let Some(addr) = start(&make_root("cond")) else {
+        return;
+    };
 
-    let (head, body) = exchange(addr, "HEAD /a.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let (head, body) = exchange(
+        addr,
+        "HEAD /a.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
     assert!(head.starts_with("HTTP/1.1 200 OK"));
     assert!(head.contains(&format!("Content-Length: {}", SMALL.len())));
     assert!(body.is_empty());
@@ -122,7 +143,9 @@ fn head_and_conditional_requests() {
 
 #[test]
 fn empty_file_has_no_body() {
-    let Some(addr) = start(&make_root("empty")) else { return };
+    let Some(addr) = start(&make_root("empty")) else {
+        return;
+    };
     let (head, body) = get(addr, "/empty.txt");
     assert!(head.starts_with("HTTP/1.1 200 OK"));
     assert!(head.contains("Content-Length: 0"));
@@ -131,17 +154,23 @@ fn empty_file_has_no_body() {
 
 #[test]
 fn missing_hidden_and_traversal() {
-    let Some(addr) = start(&make_root("sec")) else { return };
+    let Some(addr) = start(&make_root("sec")) else {
+        return;
+    };
     assert!(get(addr, "/missing.txt").0.starts_with("HTTP/1.1 404"));
     assert!(get(addr, "/.hidden").0.starts_with("HTTP/1.1 404"));
     assert!(get(addr, "/../etc/passwd").0.starts_with("HTTP/1.1 400"));
-    assert!(get(addr, "/%2e%2e/etc/passwd").0.starts_with("HTTP/1.1 400"));
+    assert!(get(addr, "/%2e%2e/etc/passwd")
+        .0
+        .starts_with("HTTP/1.1 400"));
     assert!(get(addr, "/a.txt%00.png").0.starts_with("HTTP/1.1 400"));
 }
 
 #[test]
 fn pipelined_file_requests_on_one_connection() {
-    let Some(addr) = start(&make_root("pipe")) else { return };
+    let Some(addr) = start(&make_root("pipe")) else {
+        return;
+    };
     // Two file responses back to back plus a built-in route, all pipelined.
     let raw = "GET /a.txt HTTP/1.1\r\nHost: x\r\n\r\n\
                GET /a.txt HTTP/1.1\r\nHost: x\r\n\r\n\
@@ -160,7 +189,9 @@ fn pipelined_file_requests_on_one_connection() {
 
 #[test]
 fn concurrent_large_transfers_reuse_pipes() {
-    let Some(addr) = start(&make_root("conc")) else { return };
+    let Some(addr) = start(&make_root("conc")) else {
+        return;
+    };
     let expected = big_body();
     let handles: Vec<_> = (0..8)
         .map(|_| {
@@ -181,10 +212,13 @@ fn concurrent_large_transfers_reuse_pipes() {
 
 #[test]
 fn client_hanging_up_mid_transfer_does_not_wedge_the_worker() {
-    let Some(addr) = start(&make_root("abort")) else { return };
+    let Some(addr) = start(&make_root("abort")) else {
+        return;
+    };
     for _ in 0..10 {
         let mut s = TcpStream::connect(addr).unwrap();
-        s.write_all(b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        s.write_all(b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         let mut one = [0u8; 16];
         let _ = s.read(&mut one);
         drop(s); // RST/FIN while splice is in flight

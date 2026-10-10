@@ -93,7 +93,11 @@ pub struct Outcome {
 }
 
 fn done(consumed: usize, close: bool) -> Outcome {
-    Outcome { consumed, close, action: Action::None }
+    Outcome {
+        consumed,
+        close,
+        action: Action::None,
+    }
 }
 
 /// Error response + metrics/log entry (the request line may be unparsed).
@@ -104,18 +108,20 @@ pub fn fail(
     status: u16,
     date: &[u8; DATE_LEN],
 ) {
-    obs.response(ip, Http::H1, "-", "-", status, error_body(status).len() as u64);
+    obs.response(
+        ip,
+        Http::H1,
+        "-",
+        "-",
+        status,
+        error_body(status).len() as u64,
+    );
     write_error(out, status, date);
 }
 
 /// Parse as many complete (possibly pipelined) requests as `input` holds,
 /// appending responses to `out`. Stops after a request that needs an action.
-pub fn process(
-    input: &[u8],
-    out: &mut Vec<u8>,
-    date: &[u8; DATE_LEN],
-    ctx: &mut Ctx,
-) -> Outcome {
+pub fn process(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &mut Ctx) -> Outcome {
     let mut consumed = 0;
     loop {
         if consumed == input.len() {
@@ -205,7 +211,11 @@ pub fn process(
                     }
                     if input.len() - consumed < n + cl {
                         // Head complete, body still arriving: consume nothing.
-                        return Outcome { consumed, close: false, action: Action::NeedBody };
+                        return Outcome {
+                            consumed,
+                            close: false,
+                            action: Action::NeedBody,
+                        };
                     }
                     let body = &input[consumed + n..consumed + n + cl];
                     let hdrs = hdrs_all;
@@ -222,11 +232,28 @@ pub fn process(
                     ) {
                         cache::Lookup::Hit(hit) => {
                             write_proxy_response(
-                                out, hit.status, &hit.headers, &hit.body, false, keep_alive, date,
+                                out,
+                                hit.status,
+                                &hit.headers,
+                                &hit.body,
+                                false,
+                                keep_alive,
+                                date,
                                 Some("HIT"),
                             );
-                            let bytes = if hit.status == 204 || hit.status == 304 { 0 } else { hit.body.len() as u64 };
-                            ctx.obs.response(ctx.client_ip, Http::H1, method, target, hit.status, bytes);
+                            let bytes = if hit.status == 204 || hit.status == 304 {
+                                0
+                            } else {
+                                hit.body.len() as u64
+                            };
+                            ctx.obs.response(
+                                ctx.client_ip,
+                                Http::H1,
+                                method,
+                                target,
+                                hit.status,
+                                bytes,
+                            );
                             consumed += n + cl;
                             if !keep_alive {
                                 return done(consumed, true);
@@ -270,13 +297,18 @@ pub fn process(
 
                 let bad = matches!(reply, Reply::BadRequest);
                 let (status, bytes) = reply_meta(&reply, head_only);
-                ctx.obs.response(ctx.client_ip, Http::H1, method, target, status, bytes);
+                ctx.obs
+                    .response(ctx.client_ip, Http::H1, method, target, status, bytes);
                 let file = write_reply(out, &reply, head_only, keep_alive, date);
                 if bad {
                     return done(input.len(), true);
                 }
                 if let Some(f) = file {
-                    return Outcome { consumed, close: !keep_alive, action: Action::File(f) };
+                    return Outcome {
+                        consumed,
+                        close: !keep_alive,
+                        action: Action::File(f),
+                    };
                 }
                 if !keep_alive {
                     return done(consumed, true);
@@ -322,9 +354,22 @@ fn write_reply(
     date: &[u8; DATE_LEN],
 ) -> Option<Rc<OpenFile>> {
     match reply {
-        Reply::Mem { status, ctype, body, allow } => {
+        Reply::Mem {
+            status,
+            ctype,
+            body,
+            allow,
+        } => {
             let extra: &[u8] = if *allow { b"Allow: GET, HEAD\r\n" } else { b"" };
-            write_head(out, *status, extra, ctype, body.len() as u64, keep_alive, date);
+            write_head(
+                out,
+                *status,
+                extra,
+                ctype,
+                body.len() as u64,
+                keep_alive,
+                date,
+            );
             if !head_only {
                 out.extend_from_slice(body);
             }
@@ -332,10 +377,26 @@ fn write_reply(
         }
         Reply::File { file, not_modified } => {
             if *not_modified {
-                write_head(out, 304, &file.head_extra, file.ctype, file.size, keep_alive, date);
+                write_head(
+                    out,
+                    304,
+                    &file.head_extra,
+                    file.ctype,
+                    file.size,
+                    keep_alive,
+                    date,
+                );
                 None
             } else {
-                write_head(out, 200, &file.head_extra, file.ctype, file.size, keep_alive, date);
+                write_head(
+                    out,
+                    200,
+                    &file.head_extra,
+                    file.ctype,
+                    file.size,
+                    keep_alive,
+                    date,
+                );
                 (!head_only && file.size > 0).then(|| Rc::clone(file))
             }
         }
@@ -398,7 +459,15 @@ pub fn error_body(status: u16) -> &'static [u8] {
 /// Minimal error response that always closes the connection.
 pub fn write_error(out: &mut Vec<u8>, status: u16, date: &[u8; DATE_LEN]) {
     let body = error_body(status);
-    write_head(out, status, b"", router::TEXT, body.len() as u64, false, date);
+    write_head(
+        out,
+        status,
+        b"",
+        router::TEXT,
+        body.len() as u64,
+        false,
+        date,
+    );
     out.extend_from_slice(body);
 }
 
@@ -521,7 +590,12 @@ fn h2_base(date: &[u8; DATE_LEN], ctype: &str, len: u64) -> Vec<(Vec<u8>, Vec<u8
 
 pub fn h2_response(reply: &Reply, head_only: bool, date: &[u8; DATE_LEN]) -> H2Response {
     match reply {
-        Reply::Mem { status, ctype, body, allow } => {
+        Reply::Mem {
+            status,
+            ctype,
+            body,
+            allow,
+        } => {
             let mut headers = h2_base(date, ctype, body.len() as u64);
             if *allow {
                 headers.push((b"allow".to_vec(), b"GET, HEAD".to_vec()));
@@ -529,7 +603,11 @@ pub fn h2_response(reply: &Reply, head_only: bool, date: &[u8; DATE_LEN]) -> H2R
             H2Response {
                 status: *status,
                 headers,
-                body: if head_only { H2Body::Empty } else { H2Body::Mem(body.to_vec()) },
+                body: if head_only {
+                    H2Body::Empty
+                } else {
+                    H2Body::Mem(body.to_vec())
+                },
             }
         }
         Reply::File { file, not_modified } => {
@@ -537,14 +615,22 @@ pub fn h2_response(reply: &Reply, head_only: bool, date: &[u8; DATE_LEN]) -> H2R
             headers.push((b"etag".to_vec(), file.etag.as_bytes().to_vec()));
             headers.push((b"last-modified".to_vec(), file.last_modified.to_vec()));
             if *not_modified {
-                H2Response { status: 304, headers, body: H2Body::Empty }
+                H2Response {
+                    status: 304,
+                    headers,
+                    body: H2Body::Empty,
+                }
             } else {
                 let body = if head_only || file.size == 0 {
                     H2Body::Empty
                 } else {
                     H2Body::File(Rc::clone(file))
                 };
-                H2Response { status: 200, headers, body }
+                H2Response {
+                    status: 200,
+                    headers,
+                    body,
+                }
             }
         }
         Reply::BadRequest | Reply::Proxy(_) | Reply::Php(..) => h2_error(400, date),
@@ -589,10 +675,21 @@ pub fn h2_proxy_response(
         out.push((b"x-cache".to_vec(), x.as_bytes().to_vec()));
     }
     if !head_req && !bodyless {
-        out.push((b"content-length".to_vec(), body.len().to_string().into_bytes()));
+        out.push((
+            b"content-length".to_vec(),
+            body.len().to_string().into_bytes(),
+        ));
     }
-    let body = if head_req || bodyless || body.is_empty() { H2Body::Empty } else { H2Body::Mem(body) };
-    H2Response { status, headers: out, body }
+    let body = if head_req || bodyless || body.is_empty() {
+        H2Body::Empty
+    } else {
+        H2Body::Mem(body)
+    };
+    H2Response {
+        status,
+        headers: out,
+        body,
+    }
 }
 
 #[cfg(test)]
@@ -616,7 +713,10 @@ mod tests {
     }
 
     fn env() -> Env {
-        Env { cache: Cache::new(&CacheSettings::default()), obs: Observer::new() }
+        Env {
+            cache: Cache::new(&CacheSettings::default()),
+            obs: Observer::new(),
+        }
     }
 
     fn run_in(input: &str, t: &ProxyTable, e: &mut Env) -> (Outcome, String) {
@@ -686,9 +786,17 @@ mod tests {
     fn connection_semantics() {
         let (o, resp) = run("GET / HTTP/1.0\r\n\r\n");
         assert!(o.close && resp.contains("Connection: close"));
-        assert!(!run("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n").0.close);
+        assert!(
+            !run("GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+                .0
+                .close
+        );
         assert!(run("GET / HTTP/1.1\r\nConnection: close\r\n\r\n").0.close);
-        assert!(run("GET / HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd").0.close);
+        assert!(
+            run("GET / HTTP/1.1\r\nContent-Length: 4\r\n\r\nabcd")
+                .0
+                .close
+        );
     }
 
     #[test]
@@ -719,8 +827,18 @@ mod tests {
         let log = String::from_utf8(e.obs.log.clone()).unwrap();
         let lines: Vec<_> = log.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].starts_with("192.0.2.7 - - [06/Nov/1994:08:49:37 +0000] \"GET /health HTTP/1.1\" 200 3"), "{}", lines[0]);
-        assert!(lines[1].ends_with("\"GET /nope HTTP/1.1\" 404 10"), "{}", lines[1]);
+        assert!(
+            lines[0].starts_with(
+                "192.0.2.7 - - [06/Nov/1994:08:49:37 +0000] \"GET /health HTTP/1.1\" 200 3"
+            ),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[1].ends_with("\"GET /nope HTTP/1.1\" 404 10"),
+            "{}",
+            lines[1]
+        );
         assert!(lines[2].contains("\"- - HTTP/1.1\" 400 12"), "{}", lines[2]);
     }
 
@@ -731,16 +849,31 @@ mod tests {
         let (o, resp) = run_with(req, &t);
         assert!(resp.is_empty());
         assert!(!o.close);
-        assert_eq!(o.consumed, req.len() - "EXTRA".len(), "early client bytes stay in the input");
-        let Action::Proxy(spec) = o.action else { panic!("expected proxy action") };
+        assert_eq!(
+            o.consumed,
+            req.len() - "EXTRA".len(),
+            "early client bytes stay in the input"
+        );
+        let Action::Proxy(spec) = o.action else {
+            panic!("expected proxy action")
+        };
         assert!(spec.upgrade && !spec.idempotent);
-        assert_eq!(spec.cache, CacheMode::None, "upgrades never touch the cache");
+        assert_eq!(
+            spec.cache,
+            CacheMode::None,
+            "upgrades never touch the cache"
+        );
         let up = String::from_utf8(spec.request).unwrap();
         assert!(up.contains("Sec-WebSocket-Key: abc\r\n") && up.contains("Upgrade: websocket\r\n"));
 
         // A plain `Upgrade: h2c` request is an ordinary proxied request.
-        let (o, _) = run_with("GET /api/x HTTP/1.1\r\nHost: e\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n", &t);
-        let Action::Proxy(spec) = o.action else { panic!() };
+        let (o, _) = run_with(
+            "GET /api/x HTTP/1.1\r\nHost: e\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n",
+            &t,
+        );
+        let Action::Proxy(spec) = o.action else {
+            panic!()
+        };
         assert!(!spec.upgrade);
     }
 
@@ -749,10 +882,15 @@ mod tests {
         let t = table(false);
         let req = "GET /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\n\r\n";
         let (o, resp) = run_with(req, &t);
-        assert!(resp.is_empty(), "nothing is written until the upstream answers");
+        assert!(
+            resp.is_empty(),
+            "nothing is written until the upstream answers"
+        );
         assert_eq!(o.consumed, req.len());
         assert!(!o.close);
-        let Action::Proxy(spec) = o.action else { panic!("expected proxy action") };
+        let Action::Proxy(spec) = o.action else {
+            panic!("expected proxy action")
+        };
         let up = String::from_utf8(spec.request.clone()).unwrap();
         assert!(up.starts_with("GET /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\n"));
         assert!(up.contains("X-Forwarded-For: 192.0.2.7\r\n"));
@@ -771,9 +909,13 @@ mod tests {
         let full = format!("{head}hello");
         let (o, _) = run_with(&full, &t);
         assert_eq!(o.consumed, full.len());
-        let Action::Proxy(spec) = o.action else { panic!() };
+        let Action::Proxy(spec) = o.action else {
+            panic!()
+        };
         assert!(!spec.idempotent);
-        assert!(String::from_utf8(spec.request).unwrap().ends_with("\r\n\r\nhello"));
+        assert!(String::from_utf8(spec.request)
+            .unwrap()
+            .ends_with("\r\n\r\nhello"));
     }
 
     #[test]
@@ -781,7 +923,10 @@ mod tests {
         let t = table(false);
         let (o, resp) = run_with("POST /api/x HTTP/1.1\r\nContent-Length: 999999\r\n\r\n", &t);
         assert!(o.close && resp.starts_with("HTTP/1.1 413"));
-        let (o, resp) = run_with("POST /api/x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", &t);
+        let (o, resp) = run_with(
+            "POST /api/x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            &t,
+        );
         assert!(o.close && resp.starts_with("HTTP/1.1 411"));
     }
 
@@ -794,8 +939,13 @@ mod tests {
         // Miss: the proxy is asked to store under a normalised key.
         let (o, resp) = run_in(get, &t, &mut e);
         assert!(resp.is_empty());
-        let Action::Proxy(spec) = o.action else { panic!("miss should proxy") };
-        assert_eq!(spec.cache, CacheMode::Store("example.com/api/users?id=1".into()));
+        let Action::Proxy(spec) = o.action else {
+            panic!("miss should proxy")
+        };
+        assert_eq!(
+            spec.cache,
+            CacheMode::Store("example.com/api/users?id=1".into())
+        );
 
         // Simulate the worker storing the upstream answer.
         e.cache.put(
@@ -827,14 +977,29 @@ mod tests {
         assert_eq!(o.consumed, both.len());
 
         // Unsafe methods ask for invalidation.
-        let (o, _) = run_in("POST /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n", &t, &mut e);
-        let Action::Proxy(spec) = o.action else { panic!() };
-        assert_eq!(spec.cache, CacheMode::Invalidate("example.com/api/users?id=1".into()));
+        let (o, _) = run_in(
+            "POST /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n",
+            &t,
+            &mut e,
+        );
+        let Action::Proxy(spec) = o.action else {
+            panic!()
+        };
+        assert_eq!(
+            spec.cache,
+            CacheMode::Invalidate("example.com/api/users?id=1".into())
+        );
 
         // Authorization bypasses the cache in both directions.
-        let (o, resp) = run_in("GET /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer t\r\n\r\n", &t, &mut e);
+        let (o, resp) = run_in(
+            "GET /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer t\r\n\r\n",
+            &t,
+            &mut e,
+        );
         assert!(resp.is_empty());
-        let Action::Proxy(spec) = o.action else { panic!() };
+        let Action::Proxy(spec) = o.action else {
+            panic!()
+        };
         assert_eq!(spec.cache, CacheMode::None);
     }
 
@@ -844,7 +1009,13 @@ mod tests {
         let mut e = env();
         e.cache.put(
             "h/api/x".into(),
-            CachedResponse { status: 200, headers: vec![], body: Rc::new(b"old".to_vec()), stored_at: 0, expires_at: 0 },
+            CachedResponse {
+                status: 200,
+                headers: vec![],
+                body: Rc::new(b"old".to_vec()),
+                stored_at: 0,
+                expires_at: 0,
+            },
         );
         let (o, resp) = run_in("GET /api/x HTTP/1.1\r\nHost: h\r\n\r\n", &t, &mut e);
         assert!(resp.is_empty() && matches!(o.action, Action::Proxy(_)));
@@ -860,7 +1031,16 @@ mod tests {
             (b"X-Cache".to_vec(), b"spoofed".to_vec()),
         ];
         let mut out = Vec::new();
-        write_proxy_response(&mut out, 201, &hdrs, b"abc", false, true, DATE, Some("MISS"));
+        write_proxy_response(
+            &mut out,
+            201,
+            &hdrs,
+            b"abc",
+            false,
+            true,
+            DATE,
+            Some("MISS"),
+        );
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("HTTP/1.1 201 Created\r\n"));
         assert!(s.contains("X-Custom: 1\r\n") && s.contains("Content-Length: 3\r\n"));
@@ -871,16 +1051,34 @@ mod tests {
         let mut out = Vec::new();
         write_proxy_response(&mut out, 200, &hdrs, b"", true, false, DATE, None);
         let s = String::from_utf8(out).unwrap();
-        assert!(s.contains("Content-Length: 99\r\n"), "HEAD passes the upstream length through");
-        assert!(s.ends_with("\r\n\r\n") && s.contains("Connection: close") && !s.contains("X-Cache"));
+        assert!(
+            s.contains("Content-Length: 99\r\n"),
+            "HEAD passes the upstream length through"
+        );
+        assert!(
+            s.ends_with("\r\n\r\n") && s.contains("Connection: close") && !s.contains("X-Cache")
+        );
     }
 
     #[test]
     fn h2_renderers() {
-        let r = h2_proxy_response(200, &[(b"X-A".to_vec(), b"1".to_vec())], b"hi".to_vec(), false, DATE, Some("HIT"));
+        let r = h2_proxy_response(
+            200,
+            &[(b"X-A".to_vec(), b"1".to_vec())],
+            b"hi".to_vec(),
+            false,
+            DATE,
+            Some("HIT"),
+        );
         assert!(r.headers.iter().any(|(n, v)| n == b"x-a" && v == b"1"));
-        assert!(r.headers.iter().any(|(n, v)| n == b"content-length" && v == b"2"));
-        assert!(r.headers.iter().any(|(n, v)| n == b"x-cache" && v == b"HIT"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(n, v)| n == b"content-length" && v == b"2"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(n, v)| n == b"x-cache" && v == b"HIT"));
         assert!(matches!(r.body, H2Body::Mem(_)));
         assert_eq!(h2_error(502, DATE).status, 502);
     }

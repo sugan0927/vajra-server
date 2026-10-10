@@ -31,8 +31,8 @@
 use crate::cache::{CacheMode, CachePolicy};
 use crate::config::{Balance, ProxySettings, UpAddr};
 use crate::fastcgi;
-use crate::php::{PhpConfig, Target};
 use crate::observe::Metrics;
+use crate::php::{PhpConfig, Target};
 use io_uring::types::Timespec;
 use socket2::SockAddr;
 use std::cell::RefCell;
@@ -75,7 +75,10 @@ pub struct ProxyTable {
 
 impl ProxyTable {
     pub fn empty() -> Self {
-        Self { routes: Vec::new(), php: None }
+        Self {
+            routes: Vec::new(),
+            php: None,
+        }
     }
 
     pub fn new(cfg: &[ProxySettings], max_object_bytes: usize) -> Self {
@@ -87,7 +90,10 @@ impl ProxyTable {
                 upstreams: p
                     .upstreams
                     .iter()
-                    .map(|a| Upstream { addr: a.clone(), sockaddr: to_sockaddr(a) })
+                    .map(|a| Upstream {
+                        addr: a.clone(),
+                        sockaddr: to_sockaddr(a),
+                    })
                     .collect(),
                 timeout: Timespec::new().sec(p.timeout_secs).nsec(0),
                 cache: p.cache.then_some(CachePolicy {
@@ -103,7 +109,8 @@ impl ProxyTable {
 
     /// The FastCGI route, if `[php]` is configured.
     pub fn php_route(&self) -> Option<(usize, &PhpConfig)> {
-        self.php.and_then(|i| self.routes[i].php.as_ref().map(|c| (i, c)))
+        self.php
+            .and_then(|i| self.routes[i].php.as_ref().map(|c| (i, c)))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -172,7 +179,13 @@ pub struct Balancer {
 impl Balancer {
     pub fn new(algo: Algo, n: usize, max_fails: u32, fail_timeout_secs: u64) -> Self {
         assert!((1..=64).contains(&n), "1..=64 upstreams per route");
-        Self { algo, rr: 0, ups: vec![UpState::default(); n], max_fails, fail_timeout: fail_timeout_secs }
+        Self {
+            algo,
+            rr: 0,
+            ups: vec![UpState::default(); n],
+            max_fails,
+            fail_timeout: fail_timeout_secs,
+        }
     }
 
     fn is_up(&self, i: usize, now: u64) -> bool {
@@ -185,17 +198,25 @@ impl Balancer {
         let n = self.ups.len();
         let untried = |i: usize| tried & (1u64 << i) == 0;
 
-        let mut cands: Vec<usize> = (0..n).filter(|&i| untried(i) && self.is_up(i, now)).collect();
+        let mut cands: Vec<usize> = (0..n)
+            .filter(|&i| untried(i) && self.is_up(i, now))
+            .collect();
         if cands.is_empty() {
             // Everything untried is marked down: fail open on the soonest to recover.
-            let soonest = (0..n).filter(|&i| untried(i)).min_by_key(|&i| self.ups[i].down_until)?;
+            let soonest = (0..n)
+                .filter(|&i| untried(i))
+                .min_by_key(|&i| self.ups[i].down_until)?;
             cands.push(soonest);
         }
 
         let choice = match self.algo {
             Algo::RoundRobin => {
                 // First candidate at or after the rotating cursor.
-                let c = cands.iter().copied().find(|&i| i >= self.rr % n).unwrap_or(cands[0]);
+                let c = cands
+                    .iter()
+                    .copied()
+                    .find(|&i| i >= self.rr % n)
+                    .unwrap_or(cands[0]);
                 self.rr = c + 1;
                 c
             }
@@ -211,7 +232,11 @@ impl Balancer {
             }
             Algo::IpHash => {
                 let start = (hash % n as u64) as usize;
-                cands.iter().copied().min_by_key(|&i| (i + n - start) % n).expect("non-empty")
+                cands
+                    .iter()
+                    .copied()
+                    .min_by_key(|&i| (i + n - start) % n)
+                    .expect("non-empty")
             }
         };
         self.ups[choice].active += 1;
@@ -285,14 +310,29 @@ impl ProxyState {
         let table = ProxyTable::new(cfg, max_object_bytes);
         let bal = cfg
             .iter()
-            .map(|p| Balancer::new(p.balance.into(), p.upstreams.len(), p.max_fails, p.fail_timeout_secs))
+            .map(|p| {
+                Balancer::new(
+                    p.balance.into(),
+                    p.upstreams.len(),
+                    p.max_fails,
+                    p.fail_timeout_secs,
+                )
+            })
             .collect();
-        let idle = cfg.iter().map(|p| vec![Vec::new(); p.upstreams.len()]).collect();
+        let idle = cfg
+            .iter()
+            .map(|p| vec![Vec::new(); p.upstreams.len()])
+            .collect();
         let mids = cfg
             .iter()
             .map(|p| p.upstreams.iter().map(|a| metrics.up_index(a)).collect())
             .collect();
-        Self { table, bal: RefCell::new(bal), idle: RefCell::new(idle), mids }
+        Self {
+            table,
+            bal: RefCell::new(bal),
+            idle: RefCell::new(idle),
+            mids,
+        }
     }
 
     pub fn take_idle(&self, route: usize, up: usize) -> Option<RawFd> {
@@ -400,9 +440,20 @@ pub fn make_spec(table: &ProxyTable, route: usize, p: &ReqParts) -> ProxySpec {
 }
 
 const SKIP_REQ: &[&str] = &[
-    "connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "transfer-encoding", "upgrade", "host", "content-length",
-    "x-forwarded-for", "x-forwarded-proto", "expect",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "expect",
 ];
 
 /// True for a WebSocket opening handshake: `Upgrade: websocket` and a
@@ -411,7 +462,8 @@ pub fn is_websocket_upgrade(headers: &[(&[u8], &[u8])]) -> bool {
     let has_token = |name: &str, tok: &str| {
         headers.iter().any(|(n, v)| {
             n.eq_ignore_ascii_case(name.as_bytes())
-                && v.split(|&b| b == b',').any(|t| t.trim_ascii().eq_ignore_ascii_case(tok.as_bytes()))
+                && v.split(|&b| b == b',')
+                    .any(|t| t.trim_ascii().eq_ignore_ascii_case(tok.as_bytes()))
         })
     };
     has_token("upgrade", "websocket") && has_token("connection", "upgrade")
@@ -420,8 +472,15 @@ pub fn is_websocket_upgrade(headers: &[(&[u8], &[u8])]) -> bool {
 /// Hop-by-hop headers (RFC 9110 7.6.1) that a proxy must not forward.
 pub fn is_hop_by_hop(name: &[u8]) -> bool {
     const HOP: &[&str] = &[
-        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-        "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
     ];
     HOP.iter().any(|h| name.eq_ignore_ascii_case(h.as_bytes()))
 }
@@ -458,7 +517,10 @@ pub fn build_request(route: &ProxyRoute, p: &ReqParts) -> Vec<u8> {
     out.extend_from_slice(b"\r\n");
 
     for (name, value) in p.headers {
-        if SKIP_REQ.iter().any(|s| name.eq_ignore_ascii_case(s.as_bytes())) {
+        if SKIP_REQ
+            .iter()
+            .any(|s| name.eq_ignore_ascii_case(s.as_bytes()))
+        {
             continue;
         }
         out.extend_from_slice(name);
@@ -539,7 +601,9 @@ pub fn parse_response_head(buf: &[u8], head_req: bool) -> HeadParse {
     for h in resp.headers.iter() {
         if h.name.eq_ignore_ascii_case("connection") {
             let has = |t: &str| {
-                h.value.split(|&b| b == b',').any(|x| x.trim_ascii().eq_ignore_ascii_case(t.as_bytes()))
+                h.value
+                    .split(|&b| b == b',')
+                    .any(|x| x.trim_ascii().eq_ignore_ascii_case(t.as_bytes()))
             };
             if has("close") {
                 keepalive = false;
@@ -547,7 +611,9 @@ pub fn parse_response_head(buf: &[u8], head_req: bool) -> HeadParse {
                 keepalive = true;
             }
         } else if h.name.eq_ignore_ascii_case("content-length") {
-            let v = std::str::from_utf8(h.value).ok().and_then(|s| s.trim().parse::<usize>().ok());
+            let v = std::str::from_utf8(h.value)
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok());
             match v {
                 Some(v) if content_length.map_or(true, |p| p == v) => content_length = Some(v),
                 _ => return HeadParse::Bad,
@@ -573,7 +639,13 @@ pub fn parse_response_head(buf: &[u8], head_req: bool) -> HeadParse {
         Framing::UntilClose
     };
 
-    HeadParse::Done(RespHead { status, head_len: n, headers: out, framing, keepalive })
+    HeadParse::Done(RespHead {
+        status,
+        head_len: n,
+        headers: out,
+        framing,
+        keepalive,
+    })
 }
 
 /// Incremental chunked-transfer decoder. `advance` is fed the *entire* raw
@@ -600,21 +672,30 @@ impl Chunked {
                 return if rest.len() > 128 { Err(()) } else { Ok(()) };
             };
             let line = &rest[..nl];
-            let hex = line.split(|&b| b == b';').next().unwrap_or(line).trim_ascii();
+            let hex = line
+                .split(|&b| b == b';')
+                .next()
+                .unwrap_or(line)
+                .trim_ascii();
             if hex.is_empty() || hex.len() > 16 {
                 return Err(());
             }
             let mut size: usize = 0;
             for &c in hex {
                 let d = (c as char).to_digit(16).ok_or(())? as usize;
-                size = size.checked_mul(16).and_then(|s| s.checked_add(d)).ok_or(())?;
+                size = size
+                    .checked_mul(16)
+                    .and_then(|s| s.checked_add(d))
+                    .ok_or(())?;
             }
 
             if size == 0 {
                 // Last chunk: skip optional trailer lines until the empty line.
                 let mut p = self.pos + nl + 2;
                 loop {
-                    let Some(e) = find_crlf(&raw[p..]) else { return Ok(()) };
+                    let Some(e) = find_crlf(&raw[p..]) else {
+                        return Ok(());
+                    };
                     if e == 0 {
                         self.pos = p + 2;
                         self.consumed = self.pos;
@@ -648,11 +729,23 @@ mod tests {
     use super::*;
 
     fn s(prefix: &str, port: u16, strip: bool) -> ProxySettings {
-        ProxySettings::simple(prefix, format!("127.0.0.1:{port}").parse().unwrap(), strip, 5)
+        ProxySettings::simple(
+            prefix,
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            strip,
+            5,
+        )
     }
 
     fn table(strip: bool) -> ProxyTable {
-        ProxyTable::new(&[s("/api/", 9000, strip), s("/api/v2/", 9001, false), s("/svc", 9002, true)], 1 << 20)
+        ProxyTable::new(
+            &[
+                s("/api/", 9000, strip),
+                s("/api/v2/", 9001, false),
+                s("/svc", 9002, true),
+            ],
+            1 << 20,
+        )
     }
 
     #[test]
@@ -677,8 +770,23 @@ mod tests {
         assert!(t.route(1).cache.is_none());
     }
 
-    fn parts<'a>(method: &'a str, target: &'a str, headers: &'a [(&'a [u8], &'a [u8])], body: &'a [u8]) -> ReqParts<'a> {
-        ReqParts { method, target, host: Some(b"example.com"), headers, body, client_ip: Some("10.1.2.3".parse().unwrap()), secure: true, upgrade: false, php: None }
+    fn parts<'a>(
+        method: &'a str,
+        target: &'a str,
+        headers: &'a [(&'a [u8], &'a [u8])],
+        body: &'a [u8],
+    ) -> ReqParts<'a> {
+        ReqParts {
+            method,
+            target,
+            host: Some(b"example.com"),
+            headers,
+            body,
+            client_ip: Some("10.1.2.3".parse().unwrap()),
+            secure: true,
+            upgrade: false,
+            php: None,
+        }
     }
 
     #[test]
@@ -714,22 +822,38 @@ mod tests {
             (b"Content-Length", b"999"),
             (b"Cookie", b"a=b"),
         ];
-        let r = String::from_utf8(build_request(t.route(0), &parts("GET", "/api/users?id=1", &hdrs, b""))).unwrap();
+        let r = String::from_utf8(build_request(
+            t.route(0),
+            &parts("GET", "/api/users?id=1", &hdrs, b""),
+        ))
+        .unwrap();
         assert!(r.starts_with("GET /api/users?id=1 HTTP/1.1\r\nHost: example.com\r\n"));
         assert!(r.contains("Accept: */*\r\n") && r.contains("Cookie: a=b\r\n"));
         assert!(!r.contains("6.6.6.6") && !r.contains("999"));
-        assert!(r.contains("X-Forwarded-For: 10.1.2.3\r\n") && r.contains("X-Forwarded-Proto: https\r\n"));
+        assert!(
+            r.contains("X-Forwarded-For: 10.1.2.3\r\n")
+                && r.contains("X-Forwarded-Proto: https\r\n")
+        );
         assert!(r.ends_with("Connection: keep-alive\r\n\r\n"));
     }
 
     #[test]
     fn strip_prefix_rewrites_target() {
         let t = table(true);
-        let r = String::from_utf8(build_request(t.route(0), &parts("GET", "/api/users?x=1", &[], b""))).unwrap();
+        let r = String::from_utf8(build_request(
+            t.route(0),
+            &parts("GET", "/api/users?x=1", &[], b""),
+        ))
+        .unwrap();
         assert!(r.starts_with("GET /users?x=1 HTTP/1.1"));
-        let r = String::from_utf8(build_request(t.route(2), &parts("GET", "/svc", &[], b""))).unwrap();
+        let r =
+            String::from_utf8(build_request(t.route(2), &parts("GET", "/svc", &[], b""))).unwrap();
         assert!(r.starts_with("GET / HTTP/1.1"));
-        let r = String::from_utf8(build_request(t.route(2), &parts("GET", "/svc/a/b", &[], b""))).unwrap();
+        let r = String::from_utf8(build_request(
+            t.route(2),
+            &parts("GET", "/svc/a/b", &[], b""),
+        ))
+        .unwrap();
         assert!(r.starts_with("GET /a/b HTTP/1.1"));
     }
 
@@ -738,7 +862,10 @@ mod tests {
         let t = table(false);
         let spec = make_spec(&t, 0, &parts("POST", "/api/x", &[], b"hello"));
         assert!(!spec.idempotent && !spec.head);
-        assert_eq!((spec.method.as_str(), spec.target.as_str()), ("POST", "/api/x"));
+        assert_eq!(
+            (spec.method.as_str(), spec.target.as_str()),
+            ("POST", "/api/x")
+        );
         let s = String::from_utf8(spec.request).unwrap();
         assert!(s.contains("Content-Length: 5\r\n") && s.ends_with("\r\n\r\nhello"));
         assert!(make_spec(&t, 0, &parts("GET", "/api/x", &[], b"")).idempotent);
@@ -785,7 +912,11 @@ mod tests {
         }
         assert!(b.is_down(0, 105));
         for _ in 0..5 {
-            assert_eq!(pick_ok(&mut b, 105, 0, 0), Some(1), "down upstream is skipped");
+            assert_eq!(
+                pick_ok(&mut b, 105, 0, 0),
+                Some(1),
+                "down upstream is skipped"
+            );
         }
         // After fail_timeout the upstream is a candidate again (a probe).
         assert!(!b.is_down(0, 110));
@@ -821,7 +952,11 @@ mod tests {
         all.sort();
         assert_eq!(all, [0, 1, 2], "spreads across idle upstreams first");
         b.release(second, true, 0);
-        assert_eq!(b.pick(0, 0, 0), Some(second), "the freed upstream is now least loaded");
+        assert_eq!(
+            b.pick(0, 0, 0),
+            Some(second),
+            "the freed upstream is now least loaded"
+        );
         assert_eq!(b.active(second), 1);
     }
 
@@ -834,8 +969,9 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(pick_ok(&mut b, 0, h, 0), Some(first));
         }
-        let distinct: std::collections::HashSet<_> =
-            (1..=60).map(|i| pick_ok(&mut b, 0, ip(&format!("10.0.0.{i}")), 0).unwrap()).collect();
+        let distinct: std::collections::HashSet<_> = (1..=60)
+            .map(|i| pick_ok(&mut b, 0, ip(&format!("10.0.0.{i}")), 0).unwrap())
+            .collect();
         assert!(distinct.len() >= 3, "{distinct:?}");
         // If the preferred upstream was already tried, the next one is used.
         assert_ne!(pick_ok(&mut b, 0, h, 1 << first), Some(first));
@@ -873,24 +1009,61 @@ mod tests {
             _ => panic!("not done: {s}"),
         };
         let r = h("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", false);
-        assert_eq!((r.status, r.framing, r.keepalive), (200, Framing::Length(5), true));
-        assert_eq!(r.head_len, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n".len());
-        assert_eq!(h("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", false).framing, Framing::Chunked);
+        assert_eq!(
+            (r.status, r.framing, r.keepalive),
+            (200, Framing::Length(5), true)
+        );
+        assert_eq!(
+            r.head_len,
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n".len()
+        );
+        assert_eq!(
+            h(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+                false
+            )
+            .framing,
+            Framing::Chunked
+        );
         let r = h("HTTP/1.1 200 OK\r\n\r\n", false);
         assert_eq!((r.framing, r.keepalive), (Framing::UntilClose, false));
-        assert_eq!(h("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", true).framing, Framing::None);
-        assert_eq!(h("HTTP/1.1 304 Not Modified\r\n\r\n", false).framing, Framing::None);
+        assert_eq!(
+            h("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", true).framing,
+            Framing::None
+        );
+        assert_eq!(
+            h("HTTP/1.1 304 Not Modified\r\n\r\n", false).framing,
+            Framing::None
+        );
         assert!(!h("HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n", false).keepalive);
-        assert!(!h("HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n", false).keepalive);
+        assert!(
+            !h(
+                "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n",
+                false
+            )
+            .keepalive
+        );
     }
 
     #[test]
     fn response_head_rejects_garbage() {
-        assert!(matches!(parse_response_head(b"HTTP/1.1 200 OK\r\nContent-Length: 5", false), HeadParse::Partial));
-        assert!(matches!(parse_response_head(b"garbage\r\n\r\n", false), HeadParse::Bad));
-        assert!(matches!(parse_response_head(b"HTTP/1.1 100 Continue\r\n\r\n", false), HeadParse::Bad));
         assert!(matches!(
-            parse_response_head(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", false),
+            parse_response_head(b"HTTP/1.1 200 OK\r\nContent-Length: 5", false),
+            HeadParse::Partial
+        ));
+        assert!(matches!(
+            parse_response_head(b"garbage\r\n\r\n", false),
+            HeadParse::Bad
+        ));
+        assert!(matches!(
+            parse_response_head(b"HTTP/1.1 100 Continue\r\n\r\n", false),
+            HeadParse::Bad
+        ));
+        assert!(matches!(
+            parse_response_head(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+                false
+            ),
             HeadParse::Bad
         ));
         assert!(matches!(

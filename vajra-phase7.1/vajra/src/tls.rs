@@ -21,13 +21,19 @@ use std::sync::Arc;
 /// ALPN protocols offered, in preference order.
 pub const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
 
-fn load_pems(cert: &Path, key: &Path) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), String> {
+fn load_pems(
+    cert: &Path,
+    key: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), String> {
     let cert_file = File::open(cert).map_err(|e| format!("tls.cert {}: {e}", cert.display()))?;
     let certs = rustls_pemfile::certs(&mut BufReader::new(cert_file))
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .map_err(|e| format!("tls.cert {}: {e}", cert.display()))?;
     if certs.is_empty() {
-        return Err(format!("tls.cert {}: no certificates found", cert.display()));
+        return Err(format!(
+            "tls.cert {}: no certificates found",
+            cert.display()
+        ));
     }
 
     let key_file = File::open(key).map_err(|e| format!("tls.key {}: {e}", key.display()))?;

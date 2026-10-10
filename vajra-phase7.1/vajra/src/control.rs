@@ -33,7 +33,10 @@ pub enum Cmd {
     Scrape(Sender<Snapshot>),
     /// Swap the reloadable configuration. The worker validates and builds
     /// everything first, then swaps, so a bad config leaves it untouched.
-    Reload { dynamic: Arc<Dynamic>, ack: Sender<Result<(), String>> },
+    Reload {
+        dynamic: Arc<Dynamic>,
+        ack: Sender<Result<(), String>>,
+    },
     /// Stop accepting, finish in-flight work, exit after the grace period.
     Shutdown,
 }
@@ -60,7 +63,13 @@ pub fn channel() -> io::Result<(Handle, Inbox)> {
     // SAFETY: `fd` is a fresh, valid descriptor we exclusively own.
     let efd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
     let (tx, rx) = mpsc::channel();
-    Ok((Handle { tx, efd: Arc::clone(&efd) }, Inbox { rx, efd }))
+    Ok((
+        Handle {
+            tx,
+            efd: Arc::clone(&efd),
+        },
+        Inbox { rx, efd },
+    ))
 }
 
 impl Handle {
@@ -72,7 +81,11 @@ impl Handle {
         let one: u64 = 1;
         // SAFETY: writing 8 bytes from a live u64 to an eventfd we own.
         unsafe {
-            libc::write(self.efd.as_raw_fd(), &one as *const u64 as *const libc::c_void, 8);
+            libc::write(
+                self.efd.as_raw_fd(),
+                &one as *const u64 as *const libc::c_void,
+                8,
+            );
         }
         true
     }
@@ -130,8 +143,14 @@ mod tests {
             }
         });
         let (ack, rx) = mpsc::channel();
-        assert!(h.send(Cmd::Reload { dynamic: Arc::new(Dynamic::default()), ack }));
-        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), Err("nope".to_string()));
+        assert!(h.send(Cmd::Reload {
+            dynamic: Arc::new(Dynamic::default()),
+            ack
+        }));
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+            Err("nope".to_string())
+        );
         t.join().unwrap();
     }
 }

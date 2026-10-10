@@ -18,8 +18,8 @@ use std::thread;
 use std::time::Duration;
 
 use vajra::admin::{self, Manager};
-use vajra::config::{Settings, StaticSettings};
 use vajra::config::TlsPaths;
+use vajra::config::{Settings, StaticSettings};
 use vajra::control;
 use vajra::quic::{self, QuicConfig};
 use vajra::sys::{self, Signal};
@@ -60,10 +60,30 @@ fn parse_cli() -> Cli {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--config" => cli.config = Some(it.next().map(PathBuf::from).unwrap_or_else(|| usage())),
-            "--listen" => cli.listen = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
-            "--admin" => cli.admin = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
-            "--workers" => cli.workers = Some(it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| usage())),
+            "--config" => {
+                cli.config = Some(it.next().map(PathBuf::from).unwrap_or_else(|| usage()))
+            }
+            "--listen" => {
+                cli.listen = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                )
+            }
+            "--admin" => {
+                cli.admin = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                )
+            }
+            "--workers" => {
+                cli.workers = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                )
+            }
             "--root" => cli.root = Some(it.next().map(PathBuf::from).unwrap_or_else(|| usage())),
             "--no-pin" => cli.no_pin = true,
             "--check" => cli.check = true,
@@ -149,12 +169,19 @@ fn main() {
     }
 
     let ncpu = sys::available_cpus();
-    println!("vajra: http  on {}  ({} worker(s))", settings.listen, settings.workers);
+    println!(
+        "vajra: http  on {}  ({} worker(s))",
+        settings.listen, settings.workers
+    );
     if let Some(t) = &settings.tls {
         println!("vajra: https on {}  (HTTP/2 via ALPN)", t.listen);
     }
     if let Some(q) = &settings.quic {
-        println!("vajra: http3 on {} (udp{})", q.listen, if q.retry { ", retry" } else { "" });
+        println!(
+            "vajra: http3 on {} (udp{})",
+            q.listen,
+            if q.retry { ", retry" } else { "" }
+        );
     }
     if let Some(s) = &settings.static_files {
         println!("vajra: static root {}", s.root.display());
@@ -215,10 +242,16 @@ fn main() {
                     }
                 }
 
-                let mut listeners = vec![Listener { fd: plain.as_raw_fd(), tls: false }];
+                let mut listeners = vec![Listener {
+                    fd: plain.as_raw_fd(),
+                    tls: false,
+                }];
                 let mut tls_cfg = None;
                 if let (Some(sock), Some(t)) = (&secure, &settings.tls) {
-                    listeners.push(Listener { fd: sock.as_raw_fd(), tls: true });
+                    listeners.push(Listener {
+                        fd: sock.as_raw_fd(),
+                        tls: true,
+                    });
                     match tls::build_server_config(&t.cert, &t.key) {
                         Ok(c) => tls_cfg = Some(c),
                         Err(e) => {
@@ -232,17 +265,31 @@ fn main() {
                 let mut w = match Worker::new(&listeners, settings.worker, &dynamic, tls_cfg) {
                     Ok(w) => w,
                     Err(e) => {
-                        let _ = ready.send(Err(format!("worker {core}: io_uring setup failed: {e}")));
+                        let _ =
+                            ready.send(Err(format!("worker {core}: io_uring setup failed: {e}")));
                         return;
                     }
                 };
                 w.attach_control(core, inbox, Duration::from_secs(settings.grace_secs));
-                if let (Some(sock), Some(q), Some(qc), Some(t)) = (&udp, &settings.quic, &quic_cfg, &settings.tls) {
+                if let (Some(sock), Some(q), Some(qc), Some(t)) =
+                    (&udp, &settings.quic, &quic_cfg, &settings.tls)
+                {
                     match quic::server_config(&t.cert, &t.key, qc) {
                         Ok(server) => {
-                            let alt = q.advertise.then(|| format!("h3=\":{}\"; ma=86400", q.listen.port()));
-                            let paths = TlsPaths { cert: t.cert.clone(), key: t.key.clone() };
-                            w.attach_quic(sock.as_raw_fd(), qc.clone(), server, Some(paths), alt.as_deref());
+                            let alt = q
+                                .advertise
+                                .then(|| format!("h3=\":{}\"; ma=86400", q.listen.port()));
+                            let paths = TlsPaths {
+                                cert: t.cert.clone(),
+                                key: t.key.clone(),
+                            };
+                            w.attach_quic(
+                                sock.as_raw_fd(),
+                                qc.clone(),
+                                server,
+                                Some(paths),
+                                alt.as_deref(),
+                            );
                         }
                         Err(e) => {
                             let _ = ready.send(Err(format!("worker {core}: {e}")));
@@ -275,7 +322,9 @@ fn main() {
     let manager = Arc::new(Manager::new(handles, cli.config.clone(), settings.clone()));
     if let Some(addr) = settings.admin {
         match admin::serve(addr, Arc::clone(&manager)) {
-            Ok((bound, _)) => println!("vajra: admin on http://{bound}  (/metrics /healthz POST /reload; no auth)"),
+            Ok((bound, _)) => println!(
+                "vajra: admin on http://{bound}  (/metrics /healthz POST /reload; no auth)"
+            ),
             Err(e) => die(format!("cannot bind admin {addr}: {e}")),
         }
     }
@@ -289,7 +338,10 @@ fn main() {
                 Err(e) => eprintln!("vajra: reload failed, keeping the running configuration: {e}"),
             },
             Signal::Shutdown => {
-                println!("vajra: shutting down (up to {}s grace)...", settings.grace_secs);
+                println!(
+                    "vajra: shutting down (up to {}s grace)...",
+                    settings.grace_secs
+                );
                 manager.shutdown();
                 break;
             }
@@ -297,12 +349,10 @@ fn main() {
     }
 
     // A second signal while draining means "now".
-    thread::spawn(|| {
-        loop {
-            if sys::wait_signal() == Signal::Shutdown {
-                eprintln!("vajra: forced exit");
-                exit(130);
-            }
+    thread::spawn(|| loop {
+        if sys::wait_signal() == Signal::Shutdown {
+            eprintln!("vajra: forced exit");
+            exit(130);
         }
     });
 

@@ -126,18 +126,31 @@ impl Cache {
         let size = ENTRY_OVERHEAD
             + key.len()
             + resp.body.len()
-            + resp.headers.iter().map(|(n, v)| n.len() + v.len()).sum::<usize>();
+            + resp
+                .headers
+                .iter()
+                .map(|(n, v)| n.len() + v.len())
+                .sum::<usize>();
         if self.max_entries == 0 || size > self.max_bytes {
             return;
         }
         self.remove(&key);
-        while !self.map.is_empty() && (self.map.len() >= self.max_entries || self.bytes + size > self.max_bytes) {
+        while !self.map.is_empty()
+            && (self.map.len() >= self.max_entries || self.bytes + size > self.max_bytes)
+        {
             self.evict_lru();
         }
         self.gen += 1;
         let k: Rc<str> = Rc::from(key.as_str());
         self.order.insert(self.gen, Rc::clone(&k));
-        self.map.insert(k, Slot { resp: Rc::new(resp), gen: self.gen, size });
+        self.map.insert(
+            k,
+            Slot {
+                resp: Rc::new(resp),
+                gen: self.gen,
+                size,
+            },
+        );
         self.bytes += size;
         self.stats.stores += 1;
     }
@@ -173,15 +186,25 @@ impl Cache {
 
 /// Cache key: lower-cased host + request target (path and query).
 pub fn cache_key(host: &[u8], target: &str) -> String {
-    format!("{}{}", String::from_utf8_lossy(host).to_ascii_lowercase(), target)
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(host).to_ascii_lowercase(),
+        target
+    )
 }
 
 fn strip_ci<'a>(d: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
-    (d.len() >= prefix.len() && d[..prefix.len()].eq_ignore_ascii_case(prefix)).then(|| &d[prefix.len()..])
+    (d.len() >= prefix.len() && d[..prefix.len()].eq_ignore_ascii_case(prefix))
+        .then(|| &d[prefix.len()..])
 }
 
 fn parse_secs(v: &[u8]) -> Option<u64> {
-    std::str::from_utf8(v).ok()?.trim().trim_matches('"').parse::<u64>().ok()
+    std::str::from_utf8(v)
+        .ok()?
+        .trim()
+        .trim_matches('"')
+        .parse::<u64>()
+        .ok()
 }
 
 /// Does the *request* forbid serving from (or storing to) the cache?
@@ -235,7 +258,10 @@ pub fn ttl_for(
             }
         }
     }
-    let ttl = s_maxage.or(max_age).unwrap_or(policy.default_ttl).min(MAX_TTL_SECS);
+    let ttl = s_maxage
+        .or(max_age)
+        .unwrap_or(policy.default_ttl)
+        .min(MAX_TTL_SECS);
     (ttl > 0).then_some(ttl)
 }
 
@@ -294,7 +320,11 @@ mod tests {
     use super::*;
 
     fn settings(entries: usize, bytes: usize) -> CacheSettings {
-        CacheSettings { max_entries: entries, max_bytes: bytes, max_object_bytes: 1 << 20 }
+        CacheSettings {
+            max_entries: entries,
+            max_bytes: bytes,
+            max_object_bytes: 1 << 20,
+        }
     }
 
     fn resp(body: &str, expires_at: u64) -> CachedResponse {
@@ -311,7 +341,10 @@ mod tests {
         (n.as_bytes().to_vec(), v.as_bytes().to_vec())
     }
 
-    const POLICY: CachePolicy = CachePolicy { default_ttl: 0, max_object_bytes: 1000 };
+    const POLICY: CachePolicy = CachePolicy {
+        default_ttl: 0,
+        max_object_bytes: 1000,
+    };
 
     #[test]
     fn hit_miss_and_expiry() {
@@ -321,7 +354,16 @@ mod tests {
         assert_eq!(c.get("a", 50).unwrap().body.as_slice(), b"x");
         assert!(c.get("a", 100).is_none(), "expired at exactly expires_at");
         assert_eq!(c.len(), 0);
-        assert_eq!(c.stats, CacheStats { hits: 1, misses: 2, stores: 1, evictions: 0, invalidations: 0 });
+        assert_eq!(
+            c.stats,
+            CacheStats {
+                hits: 1,
+                misses: 2,
+                stores: 1,
+                evictions: 0,
+                invalidations: 0
+            }
+        );
     }
 
     #[test]
@@ -375,17 +417,44 @@ mod tests {
 
     #[test]
     fn ttl_rules() {
-        let p = CachePolicy { default_ttl: 0, max_object_bytes: 1000 };
-        assert_eq!(ttl_for(200, &[h("Cache-Control", "max-age=60")], 10, &p), Some(60));
-        assert_eq!(ttl_for(200, &[h("cache-control", "public, max-age=60, s-maxage=5")], 10, &p), Some(5));
-        assert_eq!(ttl_for(200, &[], 10, &p), None, "no freshness info and default 0");
-        let p2 = CachePolicy { default_ttl: 30, ..p };
+        let p = CachePolicy {
+            default_ttl: 0,
+            max_object_bytes: 1000,
+        };
+        assert_eq!(
+            ttl_for(200, &[h("Cache-Control", "max-age=60")], 10, &p),
+            Some(60)
+        );
+        assert_eq!(
+            ttl_for(
+                200,
+                &[h("cache-control", "public, max-age=60, s-maxage=5")],
+                10,
+                &p
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            ttl_for(200, &[], 10, &p),
+            None,
+            "no freshness info and default 0"
+        );
+        let p2 = CachePolicy {
+            default_ttl: 30,
+            ..p
+        };
         assert_eq!(ttl_for(200, &[], 10, &p2), Some(30));
         assert_eq!(ttl_for(404, &[], 10, &p2), Some(30));
         assert_eq!(ttl_for(500, &[], 10, &p2), None);
         assert_eq!(ttl_for(200, &[], 5000, &p2), None, "too large");
-        assert_eq!(ttl_for(200, &[h("Cache-Control", "max-age=0")], 10, &p2), None);
-        assert_eq!(ttl_for(200, &[h("Cache-Control", "max-age=99999999999")], 10, &p), Some(MAX_TTL_SECS));
+        assert_eq!(
+            ttl_for(200, &[h("Cache-Control", "max-age=0")], 10, &p2),
+            None
+        );
+        assert_eq!(
+            ttl_for(200, &[h("Cache-Control", "max-age=99999999999")], 10, &p),
+            Some(MAX_TTL_SECS)
+        );
     }
 
     #[test]
@@ -400,7 +469,15 @@ mod tests {
             let hs = [h("Cache-Control", "max-age=60"), h(n, v)];
             assert_eq!(ttl_for(200, &hs, 10, &POLICY), None, "{n}: {v}");
         }
-        assert_eq!(ttl_for(200, &[h("Vary", ""), h("Cache-Control", "max-age=5")], 1, &POLICY), Some(5));
+        assert_eq!(
+            ttl_for(
+                200,
+                &[h("Vary", ""), h("Cache-Control", "max-age=5")],
+                1,
+                &POLICY
+            ),
+            Some(5)
+        );
     }
 
     #[test]
@@ -415,7 +492,10 @@ mod tests {
             h("ETag", "\"e\""),
         ];
         let kept = storable_headers(&hs);
-        let names: Vec<_> = kept.iter().map(|(n, _)| String::from_utf8_lossy(n).into_owned()).collect();
+        let names: Vec<_> = kept
+            .iter()
+            .map(|(n, _)| String::from_utf8_lossy(n).into_owned())
+            .collect();
         assert_eq!(names, ["Content-Type", "ETag"]);
     }
 
@@ -439,20 +519,31 @@ mod tests {
             Lookup::Miss(CacheMode::None)
         ));
         // GET miss -> Store(key)
-        let Lookup::Miss(CacheMode::Store(key)) = lookup_for_request(&mut c, true, "GET", b"Host", "/x?a=1", none, 0) else {
+        let Lookup::Miss(CacheMode::Store(key)) =
+            lookup_for_request(&mut c, true, "GET", b"Host", "/x?a=1", none, 0)
+        else {
             panic!("expected store")
         };
         assert_eq!(key, "host/x?a=1");
         c.put(key, resp("cached", 100));
-        assert!(matches!(lookup_for_request(&mut c, true, "GET", b"HOST", "/x?a=1", none, 5), Lookup::Hit(_)));
+        assert!(matches!(
+            lookup_for_request(&mut c, true, "GET", b"HOST", "/x?a=1", none, 5),
+            Lookup::Hit(_)
+        ));
         // HEAD never touches the cache; POST invalidates.
-        assert!(matches!(lookup_for_request(&mut c, true, "HEAD", b"host", "/x?a=1", none, 5), Lookup::Miss(CacheMode::None)));
+        assert!(matches!(
+            lookup_for_request(&mut c, true, "HEAD", b"host", "/x?a=1", none, 5),
+            Lookup::Miss(CacheMode::None)
+        ));
         assert!(matches!(
             lookup_for_request(&mut c, true, "POST", b"host", "/x?a=1", none, 5),
             Lookup::Miss(CacheMode::Invalidate(_))
         ));
         // Authorization bypasses entirely.
         let auth: &[(&[u8], &[u8])] = &[(b"authorization", b"x")];
-        assert!(matches!(lookup_for_request(&mut c, true, "GET", b"host", "/x?a=1", auth, 5), Lookup::Miss(CacheMode::None)));
+        assert!(matches!(
+            lookup_for_request(&mut c, true, "GET", b"host", "/x?a=1", auth, 5),
+            Lookup::Miss(CacheMode::None)
+        ));
     }
 }
