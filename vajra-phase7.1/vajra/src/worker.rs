@@ -59,20 +59,20 @@
 use crate::arena::{PoolBuf, SlabPool};
 use crate::cache::{self, Cache, CacheMode, CachedResponse};
 use crate::config::{Dynamic, StaticSettings, UpAddr};
-use crate::fastcgi;
 use crate::control::{Cmd, Inbox, Snapshot};
 use crate::date::{DateCache, DATE_LEN};
+use crate::fastcgi;
 use crate::h2::{FileRead, H2Conn, FILE_CHUNK};
 use crate::http::{self, Action, Ctx};
 use crate::observe::{Http, Observer};
 use crate::proxy::{self, Chunked, Framing, HeadParse, ProxySpec, ProxyState, ReqParts, RespHead};
-use crate::router::{self, Reply};
+use crate::quic::{QConnId, QuicConfig};
+use crate::router;
 use crate::static_files::{FileCache, OpenFile};
 use crate::sys;
 use crate::tls;
-use crate::quic::{QConnId, QuicConfig};
-use quinn_proto::StreamId;
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
+use quinn_proto::StreamId;
 use rustls::{ServerConfig, ServerConnection};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{self, Read, Write};
@@ -548,8 +548,19 @@ impl Worker {
         cfg: Config,
         static_cfg: Option<&StaticSettings>,
     ) -> io::Result<Self> {
-        let d = Dynamic { static_files: static_cfg.cloned(), ..Dynamic::default() };
-        Self::new(&[Listener { fd: listen_fd, tls: false }], cfg, &d, None)
+        let d = Dynamic {
+            static_files: static_cfg.cloned(),
+            ..Dynamic::default()
+        };
+        Self::new(
+            &[Listener {
+                fd: listen_fd,
+                tls: false,
+            }],
+            cfg,
+            &d,
+            None,
+        )
     }
 
     /// Build the ring. **Must be called on the thread that will run the loop**
@@ -561,7 +572,10 @@ impl Worker {
         tls_cfg: Option<Arc<ServerConfig>>,
     ) -> io::Result<Self> {
         if listeners.iter().any(|l| l.tls) && tls_cfg.is_none() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "TLS listener without TLS config"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TLS listener without TLS config",
+            ));
         }
 
         let mut builder = IoUring::builder();
@@ -575,6 +589,7 @@ impl Worker {
         };
 
         let mut obs = Observer::new();
+        obs.format = dynamic.log_format;
         let proxies = ProxyState::new(&dynamic.proxies, dynamic.cache.max_object_bytes, &mut obs.m);
         let log = open_log(dynamic.access_log.as_deref()).map_err(io::Error::other)?;
         obs.log_enabled = log.is_some();
@@ -592,7 +607,12 @@ impl Worker {
             cache: Cache::new(&dynamic.cache),
             cache_max_object: dynamic.cache.max_object_bytes,
             obs,
-            log: LogSink { fd: log_fd, owns: log_owns, inflight: None, retired: Vec::new() },
+            log: LogSink {
+                fd: log_fd,
+                owns: log_owns,
+                inflight: None,
+                retired: Vec::new(),
+            },
             tls_cfg,
             pipes: Vec::new(),
             date: DateCache::new(),
@@ -637,7 +657,11 @@ impl Worker {
 
             let mut batch = std::mem::take(&mut self.batch);
             batch.clear();
-            batch.extend(self.ring.completion().map(|c| (c.user_data(), c.result(), c.flags())));
+            batch.extend(
+                self.ring
+                    .completion()
+                    .map(|c| (c.user_data(), c.result(), c.flags())),
+            );
 
             for &(ud, res, flags) in &batch {
                 let op = ud >> OP_SHIFT;
@@ -686,7 +710,9 @@ impl Worker {
             None => self.ring.submit_and_wait(1),
             Some(deadline) => {
                 let left = deadline.saturating_duration_since(Instant::now());
-                let ts = types::Timespec::new().sec(left.as_secs()).nsec(left.subsec_nanos());
+                let ts = types::Timespec::new()
+                    .sec(left.as_secs())
+                    .nsec(left.subsec_nanos());
                 let args = types::SubmitArgs::new().timespec(&ts);
                 self.ring.submitter().submit_with_args(1, &args)
             }
@@ -708,7 +734,9 @@ impl Worker {
     // ───────────────────────── control plane ─────────────────────────
 
     fn arm_control(&mut self) {
-        let Some(fd) = self.ctl.as_ref().map(|i| i.fd()) else { return };
+        let Some(fd) = self.ctl.as_ref().map(|i| i.fd()) else {
+            return;
+        };
         let ptr = &mut *self.ctl_buf as *mut u64 as *mut u8;
         // SAFETY: `ctl_buf` is heap-allocated and owned by the worker; only one
         // control READ is ever in flight.
@@ -720,7 +748,11 @@ impl Worker {
 
     fn on_control(&mut self, res: i32) {
         if res < 0 && res != -libc::EINTR {
-            eprintln!("vajra[{}]: control channel read failed: {}", self.id, io::Error::from_raw_os_error(-res));
+            eprintln!(
+                "vajra[{}]: control channel read failed: {}",
+                self.id,
+                io::Error::from_raw_os_error(-res)
+            );
             return; // do not re-arm: a persistent error would spin
         }
         while let Some(cmd) = self.ctl.as_ref().and_then(|i| i.try_recv()) {
@@ -885,7 +917,11 @@ impl Worker {
             return;
         }
         let buf = std::mem::take(&mut self.obs.log);
-        self.log.inflight = Some(LogWrite { buf, pos: 0, fd: self.log.fd });
+        self.log.inflight = Some(LogWrite {
+            buf,
+            pos: 0,
+            fd: self.log.fd,
+        });
         self.submit_log();
     }
 
@@ -902,7 +938,9 @@ impl Worker {
     }
 
     fn on_log(&mut self, res: i32) {
-        let Some(w) = self.log.inflight.as_mut() else { return };
+        let Some(w) = self.log.inflight.as_mut() else {
+            return;
+        };
         if res > 0 {
             w.pos += res as usize;
             if w.pos < w.buf.len() {
@@ -932,8 +970,11 @@ impl Worker {
             if self.ring.submit_and_wait(1).is_err() {
                 break;
             }
-            let done: Vec<(u64, i32)> =
-                self.ring.completion().map(|c| (c.user_data(), c.result())).collect();
+            let done: Vec<(u64, i32)> = self
+                .ring
+                .completion()
+                .map(|c| (c.user_data(), c.result()))
+                .collect();
             for (ud, res) in done {
                 if ud >> OP_SHIFT == OP_LOG {
                     self.on_log(res);
@@ -946,7 +987,11 @@ impl Worker {
             while off < buf.len() {
                 // SAFETY: valid slice, fd owned/valid for the worker's lifetime.
                 let n = unsafe {
-                    libc::write(self.log.fd, buf[off..].as_ptr() as *const libc::c_void, buf.len() - off)
+                    libc::write(
+                        self.log.fd,
+                        buf[off..].as_ptr() as *const libc::c_void,
+                        buf.len() - off,
+                    )
                 };
                 if n <= 0 {
                     break;
@@ -996,7 +1041,10 @@ impl Worker {
             }
             return;
         } else if res != -libc::ECANCELED {
-            eprintln!("vajra: accept failed: {}", io::Error::from_raw_os_error(-res));
+            eprintln!(
+                "vajra: accept failed: {}",
+                io::Error::from_raw_os_error(-res)
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
 
@@ -1031,7 +1079,11 @@ impl Worker {
         c.out.clear();
         c.net.clear();
         c.npos = 0;
-        c.proto = if tls_conn.is_some() { Proto::Pending } else { Proto::Http1 };
+        c.proto = if tls_conn.is_some() {
+            Proto::Pending
+        } else {
+            Proto::Http1
+        };
         c.tls = tls_conn;
         c.close_after = false;
         c.peer_eof = false;
@@ -1161,7 +1213,8 @@ impl Worker {
         let consumed = outcome.consumed;
         if use_rbuf {
             if consumed < fast {
-                c.input.extend_from_slice(&c.rbuf.as_slice()[consumed..fast]);
+                c.input
+                    .extend_from_slice(&c.rbuf.as_slice()[consumed..fast]);
             }
         } else if consumed > 0 {
             c.input.drain(..consumed);
@@ -1170,10 +1223,21 @@ impl Worker {
         let partial_head = matches!(outcome.action, Action::None);
         match outcome.action {
             Action::File(f) => {
-                c.xfer = Some(Transfer { remaining: f.size, file: f, off: 0, in_pipe: 0, pipe: None });
+                c.xfer = Some(Transfer {
+                    remaining: f.size,
+                    file: f,
+                    off: 0,
+                    in_pipe: 0,
+                    pipe: None,
+                });
             }
             Action::Proxy(spec) => {
-                c.proxy = Some(Box::new(ProxyJob::new(spec, Rc::clone(&self.proxies), c.peer, 0)));
+                c.proxy = Some(Box::new(ProxyJob::new(
+                    spec,
+                    Rc::clone(&self.proxies),
+                    c.peer,
+                    0,
+                )));
             }
             Action::NeedBody | Action::None => {}
         }
@@ -1210,6 +1274,10 @@ impl Worker {
             ensure_peer(&mut self.conns[idx], need_peer);
             let peer = self.conns[idx].peer;
 
+            crate::req_id::set_opt(
+                crate::req_id::extract_from_h2(&req.headers)
+                    .or_else(|| Some(crate::req_id::RequestId::generate())),
+            );
             let path = req.path.split('?').next().unwrap_or("/");
             let head_only = req.method == "HEAD";
             let inm = req
@@ -1217,11 +1285,20 @@ impl Worker {
                 .iter()
                 .find(|(n, _)| n == b"if-none-match")
                 .map(|(_, v)| v.as_slice());
-            let reply = router::route(&req.method, path, inm, self.files.as_mut(), &self.proxies.table);
+            let reply = router::route(
+                &req.method,
+                path,
+                inm,
+                self.files.as_mut(),
+                &self.proxies.table,
+            );
 
             if let Some((ri, php_target)) = reply.proxy_parts() {
-                let hdrs: Vec<(&[u8], &[u8])> =
-                    req.headers.iter().map(|(n, v)| (n.as_slice(), v.as_slice())).collect();
+                let hdrs: Vec<(&[u8], &[u8])> = req
+                    .headers
+                    .iter()
+                    .map(|(n, v)| (n.as_slice(), v.as_slice()))
+                    .collect();
                 let cache_on = self.proxies.table.route(ri).cache.is_some();
                 let mode = match cache::lookup_for_request(
                     &mut self.cache,
@@ -1234,10 +1311,28 @@ impl Worker {
                 ) {
                     cache::Lookup::Hit(hit) => {
                         let bodyless = hit.status == 204 || hit.status == 304;
-                        let body = if bodyless { Vec::new() } else { (*hit.body).clone() };
-                        let resp = http::h2_proxy_response(hit.status, &hit.headers, body, false, date, Some("HIT"));
+                        let body = if bodyless {
+                            Vec::new()
+                        } else {
+                            (*hit.body).clone()
+                        };
+                        let resp = http::h2_proxy_response(
+                            hit.status,
+                            &hit.headers,
+                            body,
+                            false,
+                            date,
+                            Some("HIT"),
+                        );
                         let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
-                        self.obs.response(peer, Http::H2, &req.method, &req.path, hit.status, bytes);
+                        self.obs.response(
+                            peer,
+                            Http::H2,
+                            &req.method,
+                            &req.path,
+                            hit.status,
+                            bytes,
+                        );
                         let c = &mut self.conns[idx];
                         if let Proto::H2(h) = &mut c.proto {
                             h.respond(req.stream, resp, &mut c.out);
@@ -1253,7 +1348,11 @@ impl Worker {
                     &ReqParts {
                         method: &req.method,
                         target: &req.path,
-                        host: if req.authority.is_empty() { None } else { Some(req.authority.as_slice()) },
+                        host: if req.authority.is_empty() {
+                            None
+                        } else {
+                            Some(req.authority.as_slice())
+                        },
                         headers: &hdrs,
                         body: &req.body,
                         client_ip: peer,
@@ -1263,14 +1362,19 @@ impl Worker {
                     },
                 );
                 spec.cache = mode;
-                self.conns[idx].proxy =
-                    Some(Box::new(ProxyJob::new(spec, Rc::clone(&self.proxies), peer, req.stream)));
+                self.conns[idx].proxy = Some(Box::new(ProxyJob::new(
+                    spec,
+                    Rc::clone(&self.proxies),
+                    peer,
+                    req.stream,
+                )));
                 return; // one proxy job at a time; remaining frames wait in `input`
             }
 
             let resp = http::h2_response(&reply, head_only, date);
             let (status, bytes) = http::reply_meta(&reply, head_only);
-            self.obs.response(peer, Http::H2, &req.method, &req.path, status, bytes);
+            self.obs
+                .response(peer, Http::H2, &req.method, &req.path, status, bytes);
             let c = &mut self.conns[idx];
             if let Proto::H2(h) = &mut c.proto {
                 h.respond(req.stream, resp, &mut c.out);
@@ -1331,7 +1435,11 @@ impl Worker {
     fn submit_send(&mut self, idx: usize) {
         let c = &mut self.conns[idx];
         // Plain-TCP file bodies follow the headers: let TCP coalesce them.
-        let more = if c.xfer.is_some() && c.tls.is_none() { libc::MSG_MORE } else { 0 };
+        let more = if c.xfer.is_some() && c.tls.is_none() {
+            libc::MSG_MORE
+        } else {
+            0
+        };
         // SAFETY: `net` is not modified while the SEND is in flight.
         let ptr = unsafe { c.net.as_ptr().add(c.npos) };
         let len = (c.net.len() - c.npos) as u32;
@@ -1392,9 +1500,15 @@ impl Worker {
         let t = c.xfer.as_ref().expect("xfer in progress");
         let (_, pipe_w) = t.pipe.expect("pipe acquired");
         let len = t.remaining.min(SPLICE_CHUNK as u64) as u32;
-        let entry = opcode::Splice::new(types::Fd(t.file.fd()), t.off as i64, types::Fd(pipe_w), -1, len)
-            .build()
-            .user_data(user_data(OP_SPLICE_IN, idx));
+        let entry = opcode::Splice::new(
+            types::Fd(t.file.fd()),
+            t.off as i64,
+            types::Fd(pipe_w),
+            -1,
+            len,
+        )
+        .build()
+        .user_data(user_data(OP_SPLICE_IN, idx));
         push(&mut self.ring, entry);
     }
 
@@ -1494,7 +1608,11 @@ impl Worker {
         let c = &mut self.conns[idx];
         let (fd, off, len) = {
             let t = c.xfer.as_ref().expect("xfer in progress");
-            (t.file.fd(), t.off, t.remaining.min(FILE_CHUNK as u64) as u32)
+            (
+                t.file.fd(),
+                t.off,
+                t.remaining.min(FILE_CHUNK as u64) as u32,
+            )
         };
         if c.chunk.len() < FILE_CHUNK {
             c.chunk.resize(FILE_CHUNK, 0);
@@ -1585,7 +1703,11 @@ impl Worker {
         let upgrade = self.conns[idx].proxy.as_ref().expect("job").upgrade;
         // FastCGI connections are one-shot (no KEEP_CONN), so there is nothing to reuse.
         let fcgi = self.conns[idx].proxy.as_ref().expect("job").fcgi.is_some();
-        let idle = if upgrade || fcgi { None } else { state.take_idle(route, up) };
+        let idle = if upgrade || fcgi {
+            None
+        } else {
+            state.take_idle(route, up)
+        };
         if let Some(fd) = idle {
             let job = self.conns[idx].proxy.as_mut().expect("job");
             job.fd = fd;
@@ -1620,9 +1742,10 @@ impl Worker {
                     job.stage = PStage::Connecting;
                 }
                 // The pointers below live in `state`, which the job keeps alive.
-                let entry = opcode::Connect::new(types::Fd(fd), u.sockaddr.as_ptr(), u.sockaddr.len())
-                    .build()
-                    .user_data(user_data(OP_UP_CONNECT, idx));
+                let entry =
+                    opcode::Connect::new(types::Fd(fd), u.sockaddr.as_ptr(), u.sockaddr.len())
+                        .build()
+                        .user_data(user_data(OP_UP_CONNECT, idx));
                 push_linked(&mut self.ring, entry, &r.timeout);
             }
             Err(_) => {
@@ -1729,7 +1852,11 @@ impl Worker {
         // A WebSocket handshake answered `101 Switching Protocols` leaves HTTP for good.
         let switch = {
             let job = self.conns[idx].proxy.as_ref().expect("job");
-            if job.upgrade && job.head.is_none() { switching_head_len(&job.resp) } else { None }
+            if job.upgrade && job.head.is_none() {
+                switching_head_len(&job.resp)
+            } else {
+                None
+            }
         };
         if let Some(_head_len) = switch {
             self.start_tunnel(idx);
@@ -1774,12 +1901,19 @@ impl Worker {
             job.recv_base = 0;
             let head_req = job.head_req;
             let dec = job.fcgi.as_mut().expect("fcgi job");
-            let fed = if res > 0 { dec.feed(&buf[base..], max) } else { Ok(()) };
+            let fed = if res > 0 {
+                dec.feed(&buf[base..], max)
+            } else {
+                Ok(())
+            };
             buf.clear();
             job.resp = buf;
             let dec = job.fcgi.as_mut().expect("fcgi job");
             if !dec.stderr().is_empty() && (dec.is_done() || res <= 0) {
-                stderr_note = Some(String::from_utf8_lossy(&dec.stderr()[..dec.stderr().len().min(512)]).into_owned());
+                stderr_note = Some(
+                    String::from_utf8_lossy(&dec.stderr()[..dec.stderr().len().min(512)])
+                        .into_owned(),
+                );
             }
             if fed.is_err() {
                 Step::Bad
@@ -1792,7 +1926,9 @@ impl Worker {
                     Err(_) => Step::Bad,
                 }
             } else if res == 0 {
-                Step::Eof { seen: dec.bytes_seen() > 0 }
+                Step::Eof {
+                    seen: dec.bytes_seen() > 0,
+                }
             } else {
                 Step::More
             }
@@ -1806,7 +1942,11 @@ impl Worker {
             Step::Eof { seen: false } => self.up_error(idx, 0),
             Step::Done => {
                 self.obs.m.fcgi_requests += 1;
-                let prog = self.conns[idx].proxy.as_mut().expect("job").progress(usize::MAX);
+                let prog = self.conns[idx]
+                    .proxy
+                    .as_mut()
+                    .expect("job")
+                    .progress(usize::MAX);
                 match prog {
                     Prog::Done => self.proxy_done(idx),
                     Prog::More | Prog::Bad => self.up_bad(idx),
@@ -1830,9 +1970,15 @@ impl Worker {
         let (state, route, up, stage, reused, idempotent, got_bytes, stale_retried, fd) = {
             let j = self.conns[idx].proxy.as_ref().expect("job");
             (
-                Rc::clone(&j.state), j.route, j.up, j.stage, j.reused, j.idempotent,
+                Rc::clone(&j.state),
+                j.route,
+                j.up,
+                j.stage,
+                j.reused,
+                j.idempotent,
                 !j.resp.is_empty() || j.fcgi.as_ref().is_some_and(|d| d.bytes_seen() > 0),
-                j.stale_retried, j.fd,
+                j.stale_retried,
+                j.fd,
             )
         };
         if fd >= 0 {
@@ -1840,7 +1986,13 @@ impl Worker {
             self.conns[idx].proxy.as_mut().expect("job").fd = -1;
         }
 
-        if reused && idempotent && !stale_retried && !got_bytes && !timed_out && stage != PStage::Connecting {
+        if reused
+            && idempotent
+            && !stale_retried
+            && !got_bytes
+            && !timed_out
+            && stage != PStage::Connecting
+        {
             self.conns[idx].proxy.as_mut().expect("job").stale_retried = true;
             self.connect_upstream(idx);
             return;
@@ -1943,7 +2095,10 @@ impl Worker {
             Framing::Length(n) => {
                 job.resp.drain(..head.head_len);
                 job.resp.truncate(n);
-                (std::mem::take(&mut job.resp), head.keepalive && raw_len == n)
+                (
+                    std::mem::take(&mut job.resp),
+                    head.keepalive && raw_len == n,
+                )
             }
             Framing::Chunked => (
                 std::mem::take(&mut job.chunked.body),
@@ -1958,7 +2113,9 @@ impl Worker {
         // Health and latency.
         job.end_attempt(true, now);
         let mi = job.state.mids[job.route][job.up];
-        self.obs.m.ups[mi].latency.observe(job.t0.elapsed().as_micros() as u64);
+        self.obs.m.ups[mi]
+            .latency
+            .observe(job.t0.elapsed().as_micros() as u64);
 
         // Return the upstream socket to the pool of the table it came from.
         if job.fd >= 0 {
@@ -1975,7 +2132,9 @@ impl Worker {
             CacheMode::Store(key) => {
                 xcache = Some("MISS");
                 if let Some(policy) = job.state.table.route(job.route).cache {
-                    if let Some(ttl) = cache::ttl_for(head.status, &head.headers, body.len(), &policy) {
+                    if let Some(ttl) =
+                        cache::ttl_for(head.status, &head.headers, body.len(), &policy)
+                    {
                         self.cache.put(
                             key.clone(),
                             CachedResponse {
@@ -1998,13 +2157,24 @@ impl Worker {
         }
 
         let bodyless = head.status == 204 || head.status == 304;
-        let bytes = if job.head_req || bodyless { 0 } else { body.len() as u64 };
+        let bytes = if job.head_req || bodyless {
+            0
+        } else {
+            body.len() as u64
+        };
         let kind = match self.conns[idx].proto {
             Proto::H2(_) => Http::H2,
             Proto::Quic(_) => Http::H3,
             _ => Http::H1,
         };
-        self.obs.response(job.client_ip, kind, &job.method, &job.target, head.status, bytes);
+        self.obs.response(
+            job.client_ip,
+            kind,
+            &job.method,
+            &job.target,
+            head.status,
+            bytes,
+        );
 
         let mut quic_resp = None;
         {
@@ -2012,19 +2182,40 @@ impl Worker {
             match &mut c.proto {
                 Proto::Quic(q) => {
                     let owned = Rc::try_unwrap(body).unwrap_or_else(|rc| (*rc).clone());
-                    let resp = http::h2_proxy_response(head.status, &head.headers, owned, job.head_req, &date, xcache);
+                    let resp = http::h2_proxy_response(
+                        head.status,
+                        &head.headers,
+                        owned,
+                        job.head_req,
+                        &date,
+                        xcache,
+                    );
                     quic_resp = Some((*q, resp));
                 }
                 Proto::H2(h) => {
                     // Not shared with the cache => no copy.
                     let owned = Rc::try_unwrap(body).unwrap_or_else(|rc| (*rc).clone());
-                    let resp = http::h2_proxy_response(head.status, &head.headers, owned, job.head_req, &date, xcache);
+                    let resp = http::h2_proxy_response(
+                        head.status,
+                        &head.headers,
+                        owned,
+                        job.head_req,
+                        &date,
+                        xcache,
+                    );
                     h.respond(job.stream, resp, &mut c.out);
                 }
                 _ => {
                     let keep = !c.close_after;
                     http::write_proxy_response(
-                        &mut c.out, head.status, &head.headers, &body, job.head_req, keep, &date, xcache,
+                        &mut c.out,
+                        head.status,
+                        &head.headers,
+                        &body,
+                        job.head_req,
+                        keep,
+                        &date,
+                        xcache,
                     );
                 }
             }
@@ -2053,7 +2244,8 @@ impl Worker {
         let up_fd = job.fd;
         job.fd = -1;
         self.obs.m.ws_upgrades += 1;
-        self.obs.response(job.client_ip, Http::H1, &job.method, &job.target, 101, 0);
+        self.obs
+            .response(job.client_ip, Http::H1, &job.method, &job.target, 101, 0);
 
         let c = &mut self.conns[idx];
         c.out.extend_from_slice(&job.resp);
@@ -2147,7 +2339,12 @@ impl Worker {
         {
             let c = &mut self.conns[idx];
             let t = c.tunnel.as_mut().expect("tunnel");
-            if t.client_eof && !t.up_shut && !t.usend && t.c2u_pos >= t.c2u.len() && t.c2u_next.is_empty() {
+            if t.client_eof
+                && !t.up_shut
+                && !t.usend
+                && t.c2u_pos >= t.c2u.len()
+                && t.c2u_next.is_empty()
+            {
                 // SAFETY: plain syscall on the tunnel's upstream descriptor.
                 unsafe {
                     libc::shutdown(t.up_fd, libc::SHUT_WR);
@@ -2169,7 +2366,10 @@ impl Worker {
                 t.dying,
                 live && !t.usend && t.c2u_pos < t.c2u.len(),
                 live && !t.csend && c.npos < c.net.len(),
-                live && !c.in_recv && !t.client_eof && !t.closing && backlog_c2u < TUNNEL_HIGH_WATER,
+                live && !c.in_recv
+                    && !t.client_eof
+                    && !t.closing
+                    && backlog_c2u < TUNNEL_HIGH_WATER,
                 live && !t.urecv && !t.up_eof && !t.closing && pending_out < TUNNEL_HIGH_WATER,
             )
         };
@@ -2462,7 +2662,9 @@ fn new_upstream_socket(addr: &UpAddr) -> io::Result<RawFd> {
 
 /// Close an fd without tracking the completion.
 fn fire_close(ring: &mut IoUring, fd: RawFd) {
-    let entry = opcode::Close::new(types::Fd(fd)).build().user_data(user_data(OP_IGNORE, 0));
+    let entry = opcode::Close::new(types::Fd(fd))
+        .build()
+        .user_data(user_data(OP_IGNORE, 0));
     push(ring, entry);
 }
 
@@ -2513,7 +2715,9 @@ mod tests {
 
     fn state(n: usize) -> Rc<ProxyState> {
         let mut s = ProxySettings::simple("/", "127.0.0.1:1".parse().unwrap(), false, 5);
-        s.upstreams = (0..n).map(|i| UpAddr::Tcp(format!("127.0.0.1:{}", 7000 + i).parse().unwrap())).collect();
+        s.upstreams = (0..n)
+            .map(|i| UpAddr::Tcp(format!("127.0.0.1:{}", 7000 + i).parse().unwrap()))
+            .collect();
         let mut m = Metrics::default();
         Rc::new(ProxyState::new(&[s], 1024, &mut m))
     }
@@ -2540,7 +2744,8 @@ mod tests {
     #[test]
     fn progress_content_length() {
         let mut j = job(false);
-        j.resp.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe");
+        j.resp
+            .extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe");
         assert!(matches!(j.progress(1 << 20), Prog::More));
         j.resp.extend_from_slice(b"llo");
         assert!(matches!(j.progress(1 << 20), Prog::Done));
@@ -2549,21 +2754,28 @@ mod tests {
     #[test]
     fn progress_chunked_and_limits() {
         let mut j = job(false);
-        j.resp.extend_from_slice(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n");
+        j.resp.extend_from_slice(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n",
+        );
         assert!(matches!(j.progress(1 << 20), Prog::More));
         j.resp.extend_from_slice(b"0\r\n\r\n");
         assert!(matches!(j.progress(1 << 20), Prog::Done));
         assert_eq!(j.chunked.body, b"abc");
 
         let mut j = job(false);
-        j.resp.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n");
-        assert!(matches!(j.progress(10), Prog::Bad), "response over the cap is rejected");
+        j.resp
+            .extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n");
+        assert!(
+            matches!(j.progress(10), Prog::Bad),
+            "response over the cap is rejected"
+        );
     }
 
     #[test]
     fn progress_head_only_response() {
         let mut j = job(true);
-        j.resp.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n");
+        j.resp
+            .extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\n\r\n");
         assert!(matches!(j.progress(1 << 20), Prog::Done));
     }
 
@@ -2596,7 +2808,10 @@ mod tests {
         j.stale_retried = true;
         j.reset_attempt();
         assert!(j.resp.is_empty() && j.head.is_none());
-        assert_eq!((j.sent, j.fd, j.stage, j.stale_retried), (0, -1, PStage::Idle, false));
+        assert_eq!(
+            (j.sent, j.fd, j.stage, j.stale_retried),
+            (0, -1, PStage::Idle, false)
+        );
         assert_eq!(j.tried, 1, "history of tried upstreams survives");
         assert!(j.picked);
     }
@@ -2605,8 +2820,14 @@ mod tests {
     fn switching_protocols_head_detection() {
         let r = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n\x81\x00";
         assert_eq!(switching_head_len(r), Some(r.len() - 2));
-        assert_eq!(switching_head_len(b"HTTP/1.1 101 Switching Protocols\r\nUpgr"), None);
-        assert_eq!(switching_head_len(b"HTTP/1.1 400 Bad Request\r\n\r\n"), None);
+        assert_eq!(
+            switching_head_len(b"HTTP/1.1 101 Switching Protocols\r\nUpgr"),
+            None
+        );
+        assert_eq!(
+            switching_head_len(b"HTTP/1.1 400 Bad Request\r\n\r\n"),
+            None
+        );
         assert_eq!(switching_head_len(b"HTTP/1.1 101"), None);
     }
 

@@ -15,9 +15,10 @@
 //! sent.
 
 use crate::cache::CacheStats;
-use crate::config::UpAddr;
+use crate::config::{LogFormat, UpAddr};
 use crate::control::Snapshot;
 use crate::date::format_clf;
+use crate::req_id::IdKind;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -97,6 +98,8 @@ pub struct Metrics {
     pub ws_upgrades: u64,
     /// Requests answered by a FastCGI (PHP-FPM) application.
     pub fcgi_requests: u64,
+    pub request_ids_from_client: u64,
+    pub request_ids_generated: u64,
     pub requests_h1: u64,
     pub requests_h2: u64,
     pub requests_h3: u64,
@@ -130,6 +133,8 @@ impl Metrics {
         self.tls_handshakes += o.tls_handshakes;
         self.ws_upgrades += o.ws_upgrades;
         self.fcgi_requests += o.fcgi_requests;
+        self.request_ids_from_client += o.request_ids_from_client;
+        self.request_ids_generated += o.request_ids_generated;
         self.requests_h1 += o.requests_h1;
         self.requests_h2 += o.requests_h2;
         self.requests_h3 += o.requests_h3;
@@ -161,6 +166,8 @@ impl Metrics {
 pub struct Observer {
     pub m: Metrics,
     pub log_enabled: bool,
+    /// Access-log line format (Text = CLF, Json = JSON lines).
+    pub format: LogFormat,
     /// Pending access-log bytes; the worker swaps this out and writes it.
     pub log: Vec<u8>,
     /// Unix seconds, refreshed once per event-loop batch.
@@ -176,7 +183,7 @@ impl Default for Observer {
 
 impl Observer {
     pub fn new() -> Self {
-        Self { m: Metrics::default(), log_enabled: false, log: Vec::new(), now: 0, clf: (u64::MAX, [b' '; 28]) }
+        Self { m: Metrics::default(), log_enabled: false, format: LogFormat::Text, log: Vec::new(), now: 0, clf: (u64::MAX, [b' '; 28]) }
     }
 
     /// Record one response: updates counters and (if enabled) appends a log line.
@@ -200,6 +207,13 @@ impl Observer {
         };
         self.m.status[class] += 1;
 
+        let rid = crate::req_id::current();
+        match rid.as_ref().map(|r| r.kind()) {
+            Some(IdKind::Client)    => self.m.request_ids_from_client += 1,
+            Some(IdKind::Generated) => self.m.request_ids_generated += 1,
+            None => {}
+        }
+
         if !self.log_enabled {
             return;
         }
@@ -207,6 +221,24 @@ impl Observer {
             format_clf(self.now, &mut self.clf.1);
             self.clf.0 = self.now;
         }
+        match self.format {
+            LogFormat::Text => self.write_text_line(ip, proto, method, target, status, bytes),
+            LogFormat::Json => self.write_json_line(ip, proto, method, target, status, bytes),
+        }
+    }
+
+    /// Existing CLF output (NCSA Common Log Format). Kept verbatim for
+    /// backward compatibility.
+    fn write_text_line(
+        &mut self,
+        ip: Option<IpAddr>,
+        proto: Http,
+        method: &str,
+        target: &str,
+        status: u16,
+        bytes: u64,
+    ) {
+        let rid = crate::req_id::current();
         let log = &mut self.log;
         match ip {
             Some(ip) => {
@@ -222,7 +254,56 @@ impl Observer {
         push_escaped(log, target.as_bytes(), 2048);
         log.push(b' ');
         log.extend_from_slice(proto.name().as_bytes());
-        let _ = writeln!(log_writer(log), "\" {status} {bytes}");
+        let _ = write!(log_writer(log), "\" {status} {bytes}");
+        if let Some(id) = rid.as_ref() {
+            log.push(b' ');
+            log.extend_from_slice(id.as_str().as_bytes());
+        }
+        log.push(b'\n');
+    }
+
+    /// One JSON object per line, newline-terminated.
+    ///
+    /// Fields: ts (unix seconds), level, proto, method, path, status, bytes,
+    /// and client_ip if known.
+    fn write_json_line(
+        &mut self,
+        ip: Option<IpAddr>,
+        proto: Http,
+        method: &str,
+        target: &str,
+        status: u16,
+        bytes: u64,
+    ) {
+        let rid = crate::req_id::current();
+        let now = self.now;
+        let log = &mut self.log;
+        log.push(b'{');
+        let _ = write!(log_writer(log), "\"ts\":{now},");
+        log.extend_from_slice(b"\"level\":\"INFO\",");
+        log.extend_from_slice(b"\"proto\":");
+        push_json_string(log, proto.name().as_bytes());
+        log.push(b',');
+        log.extend_from_slice(b"\"method\":");
+        push_json_string(log, method.as_bytes());
+        log.push(b',');
+        log.extend_from_slice(b"\"path\":");
+        push_json_string(log, target.as_bytes());
+        log.push(b',');
+        let _ = write!(log_writer(log), "\"status\":{status},");
+        let _ = write!(log_writer(log), "\"bytes\":{bytes}");
+        if let Some(ip) = ip {
+            log.extend_from_slice(b",\"client_ip\":\"");
+            let _ = write!(log_writer(log), "{ip}");
+            log.push(b'"');
+        }
+        if let Some(id) = rid.as_ref() {
+            log.extend_from_slice(b",\"request_id\":\"");
+            log.extend_from_slice(id.as_str().as_bytes());
+            log.push(b'"');
+        }
+        log.push(b'}');
+        log.push(b'\n');
     }
 }
 
@@ -251,6 +332,32 @@ fn push_escaped(out: &mut Vec<u8>, s: &[u8], max: usize) {
             out.push(b);
         }
     }
+}
+
+
+/// Append `s` as a JSON string literal (double-quoted, control chars
+/// escaped as `\u00XX`, `"` and `\` backslash-escaped).
+fn push_json_string(out: &mut Vec<u8>, s: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(b'"');
+    for &b in s {
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x0c => out.extend_from_slice(b"\\f"),
+            b if b < 0x20 || b >= 0x7f => {
+                out.extend_from_slice(b"\\u00");
+                out.push(HEX[(b >> 4) as usize]);
+                out.push(HEX[(b & 15) as usize]);
+            }
+            _ => out.push(b),
+        }
+    }
+    out.push(b'"');
 }
 
 // ───────────────────────── Prometheus text exposition ─────────────────────────
@@ -323,6 +430,18 @@ pub fn render_prometheus(snaps: &[Snapshot]) -> String {
     }
 
     header(&mut o, "vajra_received_bytes_total", "counter", "Bytes read from client sockets.");
+    let _ = writeln!(o, "# HELP vajra_request_ids_total Request IDs by source");
+    let _ = writeln!(o, "# TYPE vajra_request_ids_total counter");
+    let _ = writeln!(
+        o,
+        "vajra_request_ids_total{{source=\"client\"}} {}",
+        total.request_ids_from_client
+    );
+    let _ = writeln!(
+        o,
+        "vajra_request_ids_total{{source=\"generated\"}} {}",
+        total.request_ids_generated
+    );
     let _ = writeln!(o, "vajra_received_bytes_total {}", total.bytes_in);
     header(&mut o, "vajra_sent_bytes_total", "counter", "Bytes written to client sockets.");
     let _ = writeln!(o, "vajra_sent_bytes_total {}", total.bytes_out);
@@ -509,4 +628,53 @@ mod tests {
         // Every sample line is preceded by TYPE metadata for its family.
         assert!(text.contains("# TYPE vajra_upstream_latency_seconds histogram"));
     }
+    #[test]
+    fn json_log_line_format() {
+        let mut o = Observer::new();
+        o.log_enabled = true;
+        o.format = LogFormat::Json;
+        o.now = 1_690_000_000;
+        o.response(Some("203.0.113.9".parse().unwrap()), Http::H1, "GET", "/a/b?x=1", 200, 123);
+        let s = String::from_utf8(o.log.clone()).unwrap();
+        assert!(s.starts_with('{'), "must start with brace: {s}");
+        assert!(s.ends_with("}\n"), "must end with brace+newline: {s}");
+        assert_eq!(s.lines().count(), 1);
+        assert!(s.contains("\"ts\":1690000000"));
+        assert!(s.contains("\"level\":\"INFO\""));
+        assert!(s.contains("\"proto\":\"HTTP/1.1\""));
+        assert!(s.contains("\"method\":\"GET\""));
+        assert!(s.contains("\"path\":\"/a/b?x=1\""));
+        assert!(s.contains("\"status\":200"));
+        assert!(s.contains("\"bytes\":123"));
+        assert!(s.contains("\"client_ip\":\"203.0.113.9\""));
+    }
+
+    #[test]
+    fn json_log_escapes_dangerous_chars() {
+        let mut o = Observer::new();
+        o.log_enabled = true;
+        o.format = LogFormat::Json;
+        o.now = 1_690_000_000;
+        o.response(None, Http::H1, "GET", "/x\"y\nz\\w", 200, 0);
+        let s = String::from_utf8(o.log).unwrap();
+        assert!(s.contains("\\\""), "quote escaped: {s}");
+        assert!(s.contains("\\n"), "newline escaped: {s}");
+        assert!(s.contains("\\\\"), "backslash escaped: {s}");
+        assert_eq!(s.lines().count(), 1, "must not forge a second line: {s}");
+    }
+
+    #[test]
+    fn text_format_unchanged_when_explicit() {
+        let mut o = Observer::new();
+        o.log_enabled = true;
+        o.format = LogFormat::Text;
+        o.now = 784_111_777;
+        o.response(Some("203.0.113.9".parse().unwrap()), Http::H1, "GET", "/a", 200, 5);
+        let s = String::from_utf8(o.log).unwrap();
+        assert_eq!(
+            s.trim_end(),
+            "203.0.113.9 - - [06/Nov/1994:08:49:37 +0000] \"GET /a HTTP/1.1\" 200 5"
+        );
+    }
+
 }

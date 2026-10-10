@@ -127,6 +127,10 @@ pub fn process(
 
         match req.parse(&input[consumed..]) {
             Ok(httparse::Status::Complete(n)) => {
+                crate::req_id::set_opt(
+                    crate::req_id::extract_from_h1(req.headers)
+                        .or_else(|| Some(crate::req_id::RequestId::generate())),
+                );
                 let method = req.method.unwrap_or("");
                 let target = req.path.unwrap_or("/");
                 let path = target.split('?').next().unwrap_or("/");
@@ -421,6 +425,11 @@ fn write_head(
     out.extend_from_slice(b"\r\nServer: Vajra\r\nDate: ");
     out.extend_from_slice(date);
     out.extend_from_slice(b"\r\n");
+    if let Some(id) = crate::req_id::current() {
+        out.extend_from_slice(b"X-Request-ID: ");
+        out.extend_from_slice(id.as_str().as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
     push_alt_svc_h1(out);
     out.extend_from_slice(b"Content-Type: ");
     out.extend_from_slice(content_type.as_bytes());
@@ -456,6 +465,11 @@ pub fn write_proxy_response(
     out.extend_from_slice(b"\r\nServer: Vajra\r\nDate: ");
     out.extend_from_slice(date);
     out.extend_from_slice(b"\r\n");
+    if let Some(id) = crate::req_id::current() {
+        out.extend_from_slice(b"X-Request-ID: ");
+        out.extend_from_slice(id.as_str().as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
     push_alt_svc_h1(out);
     for (n, v) in headers {
         if is_hop_by_hop(n)
@@ -515,6 +529,9 @@ fn h2_base(date: &[u8; DATE_LEN], ctype: &str, len: u64) -> Vec<(Vec<u8>, Vec<u8
         (b"content-type".to_vec(), ctype.as_bytes().to_vec()),
         (b"content-length".to_vec(), len.to_string().into_bytes()),
     ];
+    if let Some(id) = crate::req_id::current() {
+        v.push((b"x-request-id".to_vec(), id.as_str().as_bytes().to_vec()));
+    }
     push_alt_svc_h2(&mut v);
     v
 }
@@ -720,7 +737,7 @@ mod tests {
         let lines: Vec<_> = log.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("192.0.2.7 - - [06/Nov/1994:08:49:37 +0000] \"GET /health HTTP/1.1\" 200 3"), "{}", lines[0]);
-        assert!(lines[1].ends_with("\"GET /nope HTTP/1.1\" 404 10"), "{}", lines[1]);
+        assert!(lines[1].contains("\"GET /nope HTTP/1.1\" 404 10"), "{}", lines[1]);
         assert!(lines[2].contains("\"- - HTTP/1.1\" 400 12"), "{}", lines[2]);
     }
 
