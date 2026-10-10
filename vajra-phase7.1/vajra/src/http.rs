@@ -425,6 +425,11 @@ fn write_head(
     out.extend_from_slice(b"\r\nServer: Vajra\r\nDate: ");
     out.extend_from_slice(date);
     out.extend_from_slice(b"\r\n");
+    if let Some(id) = crate::req_id::current() {
+        out.extend_from_slice(b"X-Request-ID: ");
+        out.extend_from_slice(id.as_str().as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
     push_alt_svc_h1(out);
     out.extend_from_slice(b"Content-Type: ");
     out.extend_from_slice(content_type.as_bytes());
@@ -460,6 +465,11 @@ pub fn write_proxy_response(
     out.extend_from_slice(b"\r\nServer: Vajra\r\nDate: ");
     out.extend_from_slice(date);
     out.extend_from_slice(b"\r\n");
+    if let Some(id) = crate::req_id::current() {
+        out.extend_from_slice(b"X-Request-ID: ");
+        out.extend_from_slice(id.as_str().as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
     push_alt_svc_h1(out);
     for (n, v) in headers {
         if is_hop_by_hop(n)
@@ -625,6 +635,9 @@ mod tests {
 
     fn run_in(input: &str, t: &ProxyTable, e: &mut Env) -> (Outcome, String) {
         let mut out = Vec::new();
+    if let Some(id) = crate::req_id::current() {
+        out.push((b"x-request-id".to_vec(), id.as_str().as_bytes().to_vec()));
+    }
         let mut ctx = Ctx {
             files: None,
             proxies: t,
