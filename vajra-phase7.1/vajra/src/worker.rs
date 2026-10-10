@@ -575,6 +575,7 @@ impl Worker {
         };
 
         let mut obs = Observer::new();
+        obs.format = dynamic.log_format;
         let proxies = ProxyState::new(&dynamic.proxies, dynamic.cache.max_object_bytes, &mut obs.m);
         let log = open_log(dynamic.access_log.as_deref()).map_err(io::Error::other)?;
         obs.log_enabled = log.is_some();

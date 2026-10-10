@@ -64,6 +64,15 @@
 use crate::php::PhpConfig;
 use crate::worker::Config as WorkerConfig;
 use serde::Deserialize;
+
+/// Access-log line format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
@@ -85,6 +94,7 @@ pub struct Settings {
     pub proxies: Vec<ProxySettings>,
     pub cache: CacheSettings,
     pub access_log: Option<String>,
+    pub log_format: LogFormat,
     pub admin: Option<SocketAddr>,
 }
 
@@ -218,6 +228,7 @@ pub struct Dynamic {
     /// `None` leaves the current TLS configuration untouched.
     pub tls: Option<TlsPaths>,
     pub access_log: Option<String>,
+    pub log_format: LogFormat,
     pub cache: CacheSettings,
 }
 
@@ -256,6 +267,7 @@ impl Default for Settings {
             proxies: Vec::new(),
             cache: CacheSettings::default(),
             access_log: None,
+            log_format: LogFormat::Text,
             admin: None,
         }
     }
@@ -460,6 +472,7 @@ impl Default for RawCache {
 #[serde(default, deny_unknown_fields)]
 struct RawLogging {
     access_log: Option<String>,
+    format: LogFormat,
 }
 
 #[derive(Deserialize)]
@@ -722,6 +735,7 @@ impl Settings {
                 resolve(base_dir, &p).to_string_lossy().into_owned()
             }
         });
+        let log_format = raw.logging.format;
         let admin = match raw.admin {
             None => None,
             Some(a) => Some(resolve_addr("admin.listen", &a.listen)?),
@@ -749,6 +763,7 @@ impl Settings {
                 max_object_bytes: c.max_object_bytes,
             },
             access_log,
+            log_format,
             admin,
         })
     }
@@ -760,6 +775,7 @@ impl Settings {
             proxies: self.proxies.clone(),
             tls: self.tls.as_ref().map(|t| TlsPaths { cert: t.cert.clone(), key: t.key.clone() }),
             access_log: self.access_log.clone(),
+            log_format: self.log_format,
             cache: self.cache,
         }
     }
@@ -1036,4 +1052,12 @@ mod tests {
         c.access_log = Some("-".into());
         assert!(a.restart_required(&c).is_empty());
     }
+    #[test]
+    fn log_format_parsed() {
+        assert_eq!(parse("[logging]\nformat = \"json\"").unwrap().log_format, LogFormat::Json);
+        assert_eq!(parse("[logging]\nformat = \"text\"").unwrap().log_format, LogFormat::Text);
+        assert_eq!(parse("").unwrap().log_format, LogFormat::Text);
+        assert!(parse("[logging]\nformat = \"xml\"").is_err());
+    }
+
 }
