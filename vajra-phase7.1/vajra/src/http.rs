@@ -1326,3 +1326,149 @@ mod tests {
         assert_eq!(h2_error(502, DATE).status, 502);
     }
 }
+
+#[cfg(test)]
+mod compress_hot_path_tests {
+    use super::*;
+    use crate::compress::CompressionSettings;
+
+    const DATE: &[u8; DATE_LEN] = b"Thu, 01 Jan 1970 00:00:00 GMT";
+    static BIG: [u8; 4096] = [b'A'; 4096];
+    const SMALL: &[u8] = b"tiny";
+
+    fn settings(on: bool, min_size: usize) -> CompressionSettings {
+        CompressionSettings {
+            enabled: on,
+            level: 6,
+            min_size,
+        }
+    }
+
+    fn render_mem(
+        body: &'static [u8],
+        ctype: &'static str,
+        head_only: bool,
+        comp: Option<&CompressionSettings>,
+        accept: Option<&str>,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        let reply = Reply::Mem {
+            status: 200,
+            ctype,
+            body,
+            allow: false,
+        };
+        let _ = write_reply(&mut out, &reply, head_only, true, DATE, comp, accept);
+        out
+    }
+
+    /// Header block of an HTTP/1.1 response (up to the first CRLFCRLF).
+    fn head_str(resp: &[u8]) -> &str {
+        let end = resp
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("no CRLFCRLF");
+        std::str::from_utf8(&resp[..end]).expect("headers not UTF-8")
+    }
+
+    fn header_value<'a>(resp: &'a [u8], name: &str) -> Option<&'a str> {
+        for line in head_str(resp).split("\r\n") {
+            if let Some((k, v)) = line.split_once(": ") {
+                if k.eq_ignore_ascii_case(name) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    }
+
+    fn content_length(resp: &[u8]) -> u64 {
+        header_value(resp, "Content-Length")
+            .expect("no Content-Length")
+            .parse()
+            .expect("Content-Length not numeric")
+    }
+
+    #[test]
+    fn br_negotiated_compresses_mem_body() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("br"));
+        assert_eq!(header_value(&resp, "Content-Encoding"), Some("br"));
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert!(
+            content_length(&resp) < BIG.len() as u64,
+            "compressed size {} should be < {}",
+            content_length(&resp),
+            BIG.len()
+        );
+    }
+
+    #[test]
+    fn no_accept_encoding_serves_identity() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), None);
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+
+    #[test]
+    fn gzip_only_serves_identity() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("gzip"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+
+    #[test]
+    fn br_with_q0_serves_identity() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("br;q=0"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+
+    #[test]
+    fn body_below_min_size_serves_identity() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(SMALL, "text/html", false, Some(&comp), Some("br"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert_eq!(content_length(&resp), SMALL.len() as u64);
+    }
+
+    #[test]
+    fn pre_compressed_content_type_skipped() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(&BIG, "image/png", false, Some(&comp), Some("br"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        // is_pre_compressed → skip entirely; no Vary either.
+        assert!(header_value(&resp, "Vary").is_none());
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+
+    #[test]
+    fn disabled_settings_serve_identity() {
+        let comp = settings(false, 1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("br"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert!(header_value(&resp, "Vary").is_none());
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+
+        // And with no settings at all:
+        let resp = render_mem(&BIG, "text/html", false, None, Some("br"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert!(header_value(&resp, "Vary").is_none());
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+
+    #[test]
+    fn head_request_not_compressed() {
+        let comp = settings(true, 1024);
+        let resp = render_mem(&BIG, "text/html", true, Some(&comp), Some("br"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+}

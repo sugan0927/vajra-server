@@ -32,3 +32,53 @@ Skip; Content-Length stays uncompressed.
 ## Metrics
 
 Not in Day 15.
+
+## Hot path (Day 15)
+
+Compression is wired into `write_reply()` for `Reply::Mem` only.
+`Reply::File` (streamed static files) and proxy responses pass through
+unchanged.
+
+- `Ctx.compression: Option<&CompressionSettings>` is set by the worker
+  from its live settings; `None` disables compression for that request
+  (used by unit tests).
+- `Accept-Encoding` is parsed once per request in the header loop.
+- `maybe_compress()` returns `(bytes, extra_headers)`:
+  * `enabled == false` or `None` → identity, no headers.
+  * `is_pre_compressed(ctype)` → identity, no headers (the CT is a
+    signal to *all* intermediaries to skip, not just us).
+  * Otherwise, `Vary: Accept-Encoding` is added unconditionally, and
+    `Content-Encoding: br` is added only when the body actually got
+    smaller. `Content-Length` always matches the bytes on the wire.
+
+## Scope and follow-ups
+
+Not in Day 15:
+
+- **File / proxy responses.** A future pass could compress at the
+  source (a brotli writer around `OpenFile`) or in `write_proxy_response`.
+- **Streaming.** Vajra buffers Mem replies fully; the compressed length
+  is known before the head is written.
+- **Chunked transfer.** Not used for Mem replies today.
+- **Zstd.** Title says Zstd, spec says Brotli — we shipped Brotli. Zstd
+  would be a parallel `negotiate()` arm and a second encoder.
+- **Metrics.** See the "Metrics" section above.
+
+## Testing plan (Day 15)
+
+Unit tests (`src/compress.rs`): negotiation, skip-list, gate matrix,
+round-trip, config validation.
+
+Hot-path tests (`src/http.rs::compress_hot_path_tests`, 8 tests):
+
+1. `br_negotiated_compresses_mem_body` — br → Content-Encoding: br,
+   Vary, smaller Content-Length.
+2. `no_accept_encoding_serves_identity` — no header → identity + Vary.
+3. `gzip_only_serves_identity` — gzip only → identity + Vary.
+4. `br_with_q0_serves_identity` — explicit q=0 → identity.
+5. `body_below_min_size_serves_identity` — small body → identity + Vary.
+6. `pre_compressed_content_type_skipped` — image/png → identity, no Vary.
+7. `disabled_settings_serve_identity` — disabled / None → identity, no
+   Vary.
+8. `head_request_not_compressed` — HEAD → identity + Vary, uncompressed
+   Content-Length.
