@@ -46,6 +46,8 @@ pub struct Ctx<'a> {
     /// `None` disables the check (used by tests).
     pub access: Option<&'a crate::access::AccessSettings>,
     pub rate_limit: Option<&'a mut crate::rate_limit::RateLimiter>,
+    /// Compression policy from the running config. `None` disables.
+    pub compression: Option<&'a crate::compress::CompressionSettings>,
 }
 
 /// Case-insensitive lookup of a header value as `&str`.
@@ -260,6 +262,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 let mut chunked = false;
                 let mut if_none_match: Option<&[u8]> = None;
                 let mut host: Option<&[u8]> = None;
+                let mut accept_encoding: Option<&str> = None;
 
                 for h in req.headers.iter() {
                     if h.name.eq_ignore_ascii_case("connection") {
@@ -289,6 +292,8 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                         if_none_match = Some(h.value);
                     } else if h.name.eq_ignore_ascii_case("host") {
                         host = Some(h.value);
+                    } else if h.name.eq_ignore_ascii_case("accept-encoding") {
+                        accept_encoding = std::str::from_utf8(h.value).ok();
                     }
                 }
 
@@ -464,7 +469,15 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 ctx.obs
                     .response(ctx.client_ip, Http::H1, method, target, status, bytes);
                 crate::metrics::request_end(method, status);
-                let file = write_reply(out, &reply, head_only, keep_alive, date);
+                let file = write_reply(
+                    out,
+                    &reply,
+                    head_only,
+                    keep_alive,
+                    date,
+                    ctx.compression,
+                    accept_encoding,
+                );
                 if bad {
                     return done(input.len(), true);
                 }
@@ -508,6 +521,39 @@ pub fn reply_meta(reply: &Reply, head_only: bool) -> (u16, u64) {
     }
 }
 
+/// For a Mem reply, decide whether to compress and return the bytes to
+/// send alongside any extra headers the caller must append. Adds
+/// `Vary: Accept-Encoding` on every compressible type so shared caches
+/// key correctly, whether or not this instance compressed.
+fn maybe_compress<'a>(
+    body: &'a [u8],
+    ctype: &str,
+    head_only: bool,
+    comp: Option<&crate::compress::CompressionSettings>,
+    accept: Option<&str>,
+) -> (std::borrow::Cow<'a, [u8]>, &'static str) {
+    use crate::compress::{brotli_compress, is_pre_compressed, negotiate, Encoding};
+    use std::borrow::Cow;
+
+    let Some(comp) = comp else {
+        return (Cow::Borrowed(body), "");
+    };
+    if !comp.enabled || is_pre_compressed(ctype) {
+        return (Cow::Borrowed(body), "");
+    }
+    let vary = "Vary: Accept-Encoding\r\n";
+    if head_only || body.len() < comp.min_size || negotiate(accept) != Encoding::Brotli {
+        return (Cow::Borrowed(body), vary);
+    }
+    match brotli_compress(body, comp.level) {
+        Some(c) if c.len() < body.len() => (
+            Cow::Owned(c),
+            "Vary: Accept-Encoding\r\nContent-Encoding: br\r\n",
+        ),
+        _ => (Cow::Borrowed(body), vary),
+    }
+}
+
 // ───────────────────────── HTTP/1.1 renderers ─────────────────────────
 
 /// Render a router reply. Returns the file to stream when there is a body.
@@ -517,6 +563,8 @@ fn write_reply(
     head_only: bool,
     keep_alive: bool,
     date: &[u8; DATE_LEN],
+    compress: Option<&crate::compress::CompressionSettings>,
+    accept_encoding: Option<&str>,
 ) -> Option<Rc<OpenFile>> {
     match reply {
         Reply::Mem {
@@ -525,18 +573,24 @@ fn write_reply(
             body,
             allow,
         } => {
-            let extra: &[u8] = if *allow { b"Allow: GET, HEAD\r\n" } else { b"" };
+            let (out_body, comp_hdr) =
+                maybe_compress(body, ctype, head_only, compress, accept_encoding);
+            let mut hdr_buf: Vec<u8> = Vec::with_capacity(96);
+            if *allow {
+                hdr_buf.extend_from_slice(b"Allow: GET, HEAD\r\n");
+            }
+            hdr_buf.extend_from_slice(comp_hdr.as_bytes());
             write_head(
                 out,
                 *status,
-                extra,
+                &hdr_buf,
                 ctype,
-                body.len() as u64,
+                out_body.len() as u64,
                 keep_alive,
                 date,
             );
             if !head_only {
-                out.extend_from_slice(body);
+                out.extend_from_slice(&out_body);
             }
             None
         }
@@ -918,6 +972,7 @@ mod tests {
             sec: None,
             access: None,
             rate_limit: None,
+            compression: None,
         };
         let o = process(input.as_bytes(), &mut out, DATE, &mut ctx);
         (o, String::from_utf8(out).unwrap())

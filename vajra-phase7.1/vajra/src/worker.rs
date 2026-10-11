@@ -539,6 +539,8 @@ pub struct Worker {
     access: crate::access::AccessSettings,
     /// Rate limiter (per-worker). Settings refreshed on reload; buckets persist.
     rate_limit: crate::rate_limit::RateLimiter,
+    /// Compression policy. Stateless; refreshed on reload.
+    compression: crate::compress::CompressionSettings,
     // control plane
     id: usize,
     ctl: Option<Inbox>,
@@ -624,6 +626,7 @@ impl Worker {
                     .map(|n| n.get() as u32)
                     .unwrap_or(1),
             ),
+            compression: dynamic.compression.clone(),
             obs,
             log: LogSink {
                 fd: log_fd,
@@ -828,6 +831,7 @@ impl Worker {
         self.sec = d.headers.clone();
         self.access = d.access.clone();
         self.rate_limit.settings = d.rate_limit.clone();
+        self.compression = d.compression.clone();
         if self.draining.is_some() {
             return Err("worker is shutting down".into());
         }
@@ -1230,6 +1234,7 @@ impl Worker {
             sec: Some(&self.sec),
             access: Some(&self.access),
             rate_limit: Some(&mut self.rate_limit),
+            compression: Some(&self.compression),
         };
         let outcome = if use_rbuf {
             http::process(&c.rbuf.as_slice()[..fast], &mut c.out, date, &mut ctx)

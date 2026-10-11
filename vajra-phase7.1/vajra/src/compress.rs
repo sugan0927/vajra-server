@@ -171,8 +171,10 @@ pub fn decide(
 /// identity and the response is served as-is.
 pub fn brotli_compress(body: &[u8], level: u32) -> Option<Vec<u8>> {
     use brotli::enc::BrotliEncoderParams;
-    let mut params = BrotliEncoderParams::default();
-    params.quality = level.min(11) as i32;
+    let params = BrotliEncoderParams {
+        quality: level.min(11) as i32,
+        ..Default::default()
+    };
     let mut out = Vec::with_capacity(body.len() / 2 + 16);
     if brotli::BrotliCompress(&mut &body[..], &mut out, &params).is_err() {
         return None;

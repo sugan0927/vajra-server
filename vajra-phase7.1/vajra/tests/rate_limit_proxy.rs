@@ -69,6 +69,7 @@ fn drive(
         sec: None,
         access: Some(access),
         rate_limit: Some(rl),
+        compression: None,
     };
     let mut out = Vec::new();
     let _ = http::process(req, &mut out, &DATE, &mut ctx);

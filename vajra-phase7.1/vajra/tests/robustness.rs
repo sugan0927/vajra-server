@@ -94,6 +94,7 @@ fn http1_requests_never_panic_and_consumption_is_bounded() {
                 sec: None,
                 access: None,
                 rate_limit: None,
+                compression: None,
             };
             let o = http::process(&buf, &mut out, &date, &mut ctx);
             assert!(o.consumed <= buf.len());
