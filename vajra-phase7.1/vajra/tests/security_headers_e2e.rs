@@ -188,7 +188,7 @@ fn h1_top_level_headers_land_on_the_wire() {
         "{r}"
     );
 
-    let _ = s.mgr.shutdown();
+    s.mgr.shutdown();
     let _ = s.done.recv_timeout(Duration::from_secs(5));
 }
 
@@ -231,7 +231,7 @@ fn h1_override_and_remove_take_effect_on_the_wire() {
     assert_eq!(find(&h, "x-frame-options"), None, "removed header leaked");
     assert_eq!(find(&h, "strict-transport-security"), Some("max-age=100"));
 
-    let _ = s.mgr.shutdown();
+    s.mgr.shutdown();
     let _ = s.done.recv_timeout(Duration::from_secs(5));
 }
 
@@ -265,6 +265,6 @@ fn h1_managed_header_replaces_upstream_value() {
     // Unmanaged upstream headers still flow through.
     assert_eq!(find(&h, "x-upstream-only"), Some("keep-me"), "{r}");
 
-    let _ = s.mgr.shutdown();
+    s.mgr.shutdown();
     let _ = s.done.recv_timeout(Duration::from_secs(5));
 }
