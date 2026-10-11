@@ -453,6 +453,45 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                         },
                     );
                     spec.cache = mode;
+
+                    // FastCGI cache: gate + arm the write path. On an
+                    // eligible request we compute the key and hand it to
+                    // `proxy_done`, which stores the response body if it's
+                    // cacheable. HIT replay (with headers) lands later;
+                    // today every FastCGI request is treated as a MISS.
+                    if php_target.is_some() {
+                        if let Some(fc) = ctx.fastcgi_cache.as_ref() {
+                            let m_ok = method == "GET" || method == "HEAD";
+                            let path_only = target.split('?').next().unwrap_or("/");
+                            let host_lc = host
+                                .and_then(|h| std::str::from_utf8(h).ok())
+                                .map(|h| h.to_ascii_lowercase());
+                            let host_str = host_lc.as_deref().unwrap_or("");
+                            let cookie = hdrs.iter().find_map(|&(n, v)| {
+                                if n.eq_ignore_ascii_case(b"cookie") {
+                                    std::str::from_utf8(v).ok()
+                                } else {
+                                    None
+                                }
+                            });
+                            let excluded = crate::cache::fastcgi::any_glob_matches(
+                                &fc.settings.exclude_paths,
+                                path_only,
+                            );
+                            let bypassed = crate::cache::fastcgi::cookie_name_matches(
+                                cookie,
+                                &fc.settings.bypass_cookie,
+                            );
+                            if m_ok && !excluded && !bypassed {
+                                let query = target.split_once('?').map(|(_, q)| q);
+                                let key = crate::cache::fastcgi::build_cache_key(
+                                    method, host_str, path_only, query,
+                                );
+                                spec.fcgi_cache_key = Some(key);
+                            }
+                        }
+                    }
+
                     return Outcome {
                         consumed: consumed + n + cl,
                         // An upgrade never keeps HTTP semantics: the tunnel owns the socket.

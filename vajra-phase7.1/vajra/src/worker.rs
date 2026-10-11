@@ -1425,6 +1425,46 @@ impl Worker {
                     },
                 );
                 spec.cache = mode;
+
+                // FastCGI cache: same gate as H1. Arm the write path with
+                // the key on an eligible request; the actual store happens
+                // in `proxy_done` once the upstream answers.
+                if php_target.is_some() && self.fastcgi_cache.is_enabled() {
+                    {
+                        let m_ok = req.method == "GET" || req.method == "HEAD";
+                        let path_only = req.path.split('?').next().unwrap_or("/");
+                        let host_lc = std::str::from_utf8(req.authority.as_slice())
+                            .ok()
+                            .map(|h| h.to_ascii_lowercase());
+                        let host_str = host_lc.as_deref().unwrap_or("");
+                        let cookie = hdrs.iter().find_map(|&(n, v)| {
+                            if n.eq_ignore_ascii_case(b"cookie") {
+                                std::str::from_utf8(v).ok()
+                            } else {
+                                None
+                            }
+                        });
+                        let excluded = crate::cache::fastcgi::any_glob_matches(
+                            &self.fastcgi_cache.settings.exclude_paths,
+                            path_only,
+                        );
+                        let bypassed = crate::cache::fastcgi::cookie_name_matches(
+                            cookie,
+                            &self.fastcgi_cache.settings.bypass_cookie,
+                        );
+                        if m_ok && !excluded && !bypassed {
+                            let query = req.path.split_once('?').map(|(_, q)| q);
+                            let key = crate::cache::fastcgi::build_cache_key(
+                                &req.method,
+                                host_str,
+                                path_only,
+                                query,
+                            );
+                            spec.fcgi_cache_key = Some(key);
+                        }
+                    }
+                }
+
                 self.conns[idx].proxy = Some(Box::new(ProxyJob::new(
                     spec,
                     Rc::clone(&self.proxies),
