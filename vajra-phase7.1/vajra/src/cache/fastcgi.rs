@@ -173,7 +173,7 @@ pub fn cookie_name_matches(cookie_header: Option<&str>, patterns: &[String]) -> 
 /// Canonical FastCGI cache key.
 ///
 /// ```text
-/// "v1\0" + method + "\0" + host + "\0" + path [+ "\0" + query]
+/// "v2\0" + method + "\0" + host + "\0" + path [+ "\0" + query]
 /// ```
 ///
 /// The `v1\0` prefix is a format version: bumping it invalidates the
@@ -183,7 +183,7 @@ pub fn build_cache_key(method: &str, host: &str, path: &str, query: Option<&str>
     let mut k = Vec::with_capacity(
         4 + method.len() + host.len() + path.len() + query.map_or(0, |q| q.len() + 1),
     );
-    k.extend_from_slice(b"v1\0");
+    k.extend_from_slice(b"v2\0");
     k.extend_from_slice(method.as_bytes());
     k.push(0);
     k.extend_from_slice(host.as_bytes());
@@ -196,6 +196,39 @@ pub fn build_cache_key(method: &str, host: &str, path: &str, query: Option<&str>
         }
     }
     k
+}
+
+/// Decode the header block of an on-disk v2 entry. Returns `None` on
+/// any structural mismatch (truncated, invalid lengths, non-UTF8 names
+/// are tolerated as raw bytes since we round-trip `Vec<u8>` pairs).
+fn decode_headers(buf: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let n = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let mut p = 4;
+    let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(n);
+    for _ in 0..n {
+        if p + 4 > buf.len() {
+            return None;
+        }
+        let nlen = u32::from_le_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]]) as usize;
+        p += 4;
+        if p + nlen + 4 > buf.len() {
+            return None;
+        }
+        let name = buf[p..p + nlen].to_vec();
+        p += nlen;
+        let vlen = u32::from_le_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]]) as usize;
+        p += 4;
+        if p + vlen > buf.len() {
+            return None;
+        }
+        let value = buf[p..p + vlen].to_vec();
+        p += vlen;
+        out.push((name, value));
+    }
+    Some(out)
 }
 
 // ─── Index entry ────────────────────────────────────────────────────
@@ -268,8 +301,13 @@ impl FastcgiCache {
         self.settings.path.join("data").join(shard).join(name)
     }
 
-    /// Look up `key`. Returns `None` on miss or expiry.
-    pub fn get(&mut self, key: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    /// Look up `key`. Returns `None` on miss, expiry, or a corrupt entry.
+    /// On success returns `(status, storable_headers, body)`.
+    #[allow(clippy::type_complexity)]
+    pub fn get(
+        &mut self,
+        key: &[u8],
+    ) -> std::io::Result<Option<(u16, Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>)>> {
         if !self.settings.enabled {
             return Ok(None);
         }
@@ -282,7 +320,7 @@ impl FastcgiCache {
             return Ok(None);
         }
         let path = self.data_path(key);
-        let body = match fs::read(&path) {
+        let buf = match fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.remove_at(idx)?;
@@ -293,15 +331,73 @@ impl FastcgiCache {
         if let Some(&i2) = self.by_key.get(key) {
             self.index[i2].last_access = now;
         }
-        Ok(Some(body))
+
+        // Decode format v2.
+        if buf.len() < 6 {
+            self.remove_at(idx)?;
+            return Ok(None);
+        }
+        let status = u16::from_le_bytes([buf[0], buf[1]]);
+        let hdr_len = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize;
+        if buf.len() < 6 + hdr_len {
+            self.remove_at(idx)?;
+            return Ok(None);
+        }
+        let hdr_bytes = &buf[6..6 + hdr_len];
+        let body = buf[6 + hdr_len..].to_vec();
+
+        // Decode header blob.
+        let Some(headers) = decode_headers(hdr_bytes) else {
+            self.remove_at(idx)?;
+            return Ok(None);
+        };
+        Ok(Some((status, headers, body)))
     }
 
-    /// Store `body` under `key` with `ttl_secs` lifetime.
-    pub fn put(&mut self, key: &[u8], body: &[u8], ttl_secs: u64) -> std::io::Result<()> {
+    /// Store a full response (status + storable headers + body) under
+    /// `key` with `ttl_secs` lifetime.
+    ///
+    /// On-disk entry format v2:
+    ///
+    /// ```text
+    /// [u16 status LE]
+    /// [u32 hdr_len LE][hdr bytes]
+    /// [body bytes]
+    ///
+    /// hdr bytes =
+    ///   [u32 n_headers LE]
+    ///   repeated n_headers times:
+    ///     [u32 nlen LE][name][u32 vlen LE][value]
+    /// ```
+    pub fn put(
+        &mut self,
+        key: &[u8],
+        status: u16,
+        headers: &[(Vec<u8>, Vec<u8>)],
+        body: &[u8],
+        ttl_secs: u64,
+    ) -> std::io::Result<()> {
         if !self.settings.enabled {
             return Ok(());
         }
-        if body.len() as u64 > self.settings.max_entry_size {
+
+        let mut buf = Vec::with_capacity(body.len() + 64);
+        buf.extend_from_slice(&status.to_le_bytes());
+        let hdr_len_pos = buf.len();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        let hdr_start = buf.len();
+        buf.extend_from_slice(&(headers.len() as u32).to_le_bytes());
+        for (n, v) in headers {
+            buf.extend_from_slice(&(n.len() as u32).to_le_bytes());
+            buf.extend_from_slice(n);
+            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(v);
+        }
+        let hdr_len = (buf.len() - hdr_start) as u32;
+        buf[hdr_len_pos..hdr_len_pos + 4].copy_from_slice(&hdr_len.to_le_bytes());
+        buf.extend_from_slice(body);
+
+        if buf.len() as u64 > self.settings.max_entry_size {
             return Ok(());
         }
 
@@ -309,7 +405,7 @@ impl FastcgiCache {
             self.remove_at(idx)?;
         }
 
-        let need = body.len() as u64;
+        let need = buf.len() as u64;
         self.evict_until_fits(need)?;
 
         let path = self.data_path(key);
@@ -319,7 +415,7 @@ impl FastcgiCache {
         let tmp = path.with_extension("tmp");
         {
             let mut f = fs::File::create(&tmp)?;
-            f.write_all(body)?;
+            f.write_all(&buf)?;
             f.sync_all().ok();
         }
         fs::rename(&tmp, &path)?;
@@ -493,11 +589,17 @@ mod tests {
     fn roundtrip_get_put() {
         let dir = scratch("rt");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"k1", b"hello world", 60).unwrap();
-        let got = c.get(b"k1").unwrap();
-        assert_eq!(got.as_deref(), Some(&b"hello world"[..]));
+        let hdrs: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"content-type".to_vec(), b"text/html".to_vec()),
+            (b"x-test".to_vec(), b"yes".to_vec()),
+        ];
+        c.put(b"k1", 200, &hdrs, b"hello world", 60).unwrap();
+        let got = c.get(b"k1").unwrap().expect("hit");
+        assert_eq!(got.0, 200);
+        assert_eq!(got.1, hdrs);
+        assert_eq!(got.2, b"hello world");
         assert_eq!(c.entries(), 1);
-        assert_eq!(c.total_bytes(), 11);
+        assert!(c.total_bytes() > 11); // header blob adds overhead
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -513,11 +615,11 @@ mod tests {
     fn overwrite_replaces_entry() {
         let dir = scratch("ow");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"k", b"aa", 60).unwrap();
-        c.put(b"k", b"bbbb", 60).unwrap();
+        c.put(b"k", 200, &[], b"aa", 60).unwrap();
+        c.put(b"k", 200, &[], b"bbbb", 60).unwrap();
         assert_eq!(c.entries(), 1);
-        assert_eq!(c.total_bytes(), 4);
-        assert_eq!(c.get(b"k").unwrap().as_deref(), Some(&b"bbbb"[..]));
+        let (_, _, body) = c.get(b"k").unwrap().expect("hit");
+        assert_eq!(body, b"bbbb");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -525,7 +627,7 @@ mod tests {
     fn expiry_on_read() {
         let dir = scratch("expiry");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"k", b"payload", 0).unwrap();
+        c.put(b"k", 200, &[], b"payload", 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(c.get(b"k").unwrap().is_none());
         assert_eq!(c.entries(), 0);
@@ -537,11 +639,11 @@ mod tests {
         let dir = scratch("lru");
         let mut c = FastcgiCache::open(settings(&dir, 1)).unwrap();
         let big = vec![b'A'; 400 * 1024];
-        c.put(b"first", &big, 60).unwrap();
+        c.put(b"first", 200, &[], &big, 60).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        c.put(b"second", &big, 60).unwrap();
+        c.put(b"second", 200, &[], &big, 60).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        c.put(b"third", &big, 60).unwrap();
+        c.put(b"third", 200, &[], &big, 60).unwrap();
 
         assert!(
             c.get(b"first").unwrap().is_none(),
@@ -558,7 +660,7 @@ mod tests {
         let mut s = settings(&dir, 16);
         s.max_entry_size = 4;
         let mut c = FastcgiCache::open(s).unwrap();
-        c.put(b"k", b"0123456789", 60).unwrap();
+        c.put(b"k", 200, &[], b"0123456789", 60).unwrap();
         assert_eq!(c.entries(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -568,14 +670,14 @@ mod tests {
         let dir = scratch("persist");
         {
             let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-            c.put(b"k1", b"v1", 60).unwrap();
-            c.put(b"k2", b"v2", 60).unwrap();
+            c.put(b"k1", 200, &[], b"v1", 60).unwrap();
+            c.put(b"k2", 200, &[], b"v2", 60).unwrap();
             c.save_index().unwrap();
         }
         let mut c2 = FastcgiCache::open(settings(&dir, 16)).unwrap();
         assert_eq!(c2.entries(), 2);
-        assert_eq!(c2.get(b"k1").unwrap().as_deref(), Some(&b"v1"[..]));
-        assert_eq!(c2.get(b"k2").unwrap().as_deref(), Some(&b"v2"[..]));
+        assert_eq!(c2.get(b"k1").unwrap().unwrap().2, b"v1");
+        assert_eq!(c2.get(b"k2").unwrap().unwrap().2, b"v2");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -583,10 +685,10 @@ mod tests {
     fn cleanup_expired_sweeps_stale_entries() {
         let dir = scratch("cleanup");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"a", b"payload", 0).unwrap();
-        c.put(b"b", b"payload", 0).unwrap();
+        c.put(b"a", 200, &[], b"payload", 0).unwrap();
+        c.put(b"b", 200, &[], b"payload", 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        c.put(b"c", b"payload", 600).unwrap();
+        c.put(b"c", 200, &[], b"payload", 600).unwrap();
         let removed = c.cleanup_expired().unwrap();
         assert_eq!(removed, 2);
         assert_eq!(c.entries(), 1);
@@ -641,7 +743,7 @@ mod tests {
     #[test]
     fn cache_key_shape() {
         let k = build_cache_key("GET", "example.com", "/", None);
-        assert_eq!(&k[..3], b"v1\0");
+        assert_eq!(&k[..3], b"v2\0");
         assert!(k.windows(4).any(|w| w == b"GET\0"));
         assert!(k.windows(12).any(|w| w == b"example.com\0"));
 

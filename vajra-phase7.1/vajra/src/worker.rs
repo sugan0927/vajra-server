@@ -304,7 +304,7 @@ impl ProxyJob {
             t0: Instant::now(),
             upgrade: spec.upgrade,
             fcgi: spec.fcgi.then(|| Box::new(fastcgi::Decoder::new())),
-            fcgi_cache_key: None,
+            fcgi_cache_key: spec.fcgi_cache_key,
         }
     }
 
@@ -1460,7 +1460,38 @@ impl Worker {
                                 path_only,
                                 query,
                             );
-                            spec.fcgi_cache_key = Some(key);
+                            match self.fastcgi_cache.get(&key) {
+                                Ok(Some((status, headers, cached))) => {
+                                    let bodyless = status == 204 || status == 304;
+                                    let bytes = if bodyless { 0 } else { cached.len() as u64 };
+                                    let owned = if bodyless { Vec::new() } else { cached };
+                                    let resp = http::h2_proxy_response(
+                                        status,
+                                        &headers,
+                                        owned,
+                                        false,
+                                        date,
+                                        None,
+                                        Some("HIT"),
+                                    );
+                                    self.obs.response(
+                                        peer,
+                                        Http::H2,
+                                        &req.method,
+                                        &req.path,
+                                        status,
+                                        bytes,
+                                    );
+                                    let c = &mut self.conns[idx];
+                                    if let Proto::H2(h) = &mut c.proto {
+                                        h.respond(req.stream, resp, &mut c.out);
+                                    }
+                                    continue;
+                                }
+                                _ => {
+                                    spec.fcgi_cache_key = Some(key);
+                                }
+                            }
                         }
                     }
                 }
@@ -2281,7 +2312,11 @@ impl Worker {
                 && !no_store;
             if cacheable {
                 let ttl = self.fastcgi_cache.settings.ttl_secs;
-                if let Err(e) = self.fastcgi_cache.put(key, body.as_slice(), ttl) {
+                let storable = cache::storable_headers(&head.headers);
+                if let Err(e) =
+                    self.fastcgi_cache
+                        .put(key, head.status, &storable, body.as_slice(), ttl)
+                {
                     eprintln!("vajra: fastcgi_cache put: {e}");
                 } else if let Err(e) = self.fastcgi_cache.save_index() {
                     eprintln!("vajra: fastcgi_cache save_index: {e}");

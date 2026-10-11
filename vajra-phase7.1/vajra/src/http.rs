@@ -460,7 +460,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                     // cacheable. HIT replay (with headers) lands later;
                     // today every FastCGI request is treated as a MISS.
                     if php_target.is_some() {
-                        if let Some(fc) = ctx.fastcgi_cache.as_ref() {
+                        if let Some(fc) = ctx.fastcgi_cache.as_deref_mut() {
                             let m_ok = method == "GET" || method == "HEAD";
                             let path_only = target.split('?').next().unwrap_or("/");
                             let host_lc = host
@@ -487,7 +487,43 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 let key = crate::cache::fastcgi::build_cache_key(
                                     method, host_str, path_only, query,
                                 );
-                                spec.fcgi_cache_key = Some(key);
+                                match fc.get(&key) {
+                                    Ok(Some((status, headers, cached))) => {
+                                        write_proxy_response(
+                                            out,
+                                            status,
+                                            &headers,
+                                            &cached,
+                                            false,
+                                            keep_alive,
+                                            date,
+                                            None,
+                                            Some("HIT"),
+                                        );
+                                        let bytes = if status == 204 || status == 304 {
+                                            0
+                                        } else {
+                                            cached.len() as u64
+                                        };
+                                        ctx.obs.response(
+                                            ctx.client_ip,
+                                            Http::H1,
+                                            method,
+                                            target,
+                                            status,
+                                            bytes,
+                                        );
+                                        crate::metrics::request_end(method, status);
+                                        consumed += n + cl;
+                                        if !keep_alive {
+                                            return done(consumed, true);
+                                        }
+                                        continue;
+                                    }
+                                    _ => {
+                                        spec.fcgi_cache_key = Some(key);
+                                    }
+                                }
                             }
                         }
                     }
