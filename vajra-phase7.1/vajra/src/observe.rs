@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // struct-update in tests/init is fine
 //! Observability: per-worker metrics, access-log formatting, and the
 //! Prometheus text renderer.
 //!
@@ -15,9 +16,10 @@
 //! sent.
 
 use crate::cache::CacheStats;
-use crate::config::UpAddr;
+use crate::config::{LogFormat, UpAddr};
 use crate::control::Snapshot;
 use crate::date::format_clf;
+use crate::req_id::IdKind;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -84,7 +86,15 @@ pub struct UpMetrics {
 
 impl UpMetrics {
     fn new(addr: UpAddr) -> Self {
-        Self { addr, requests: 0, connect_errors: 0, io_errors: 0, timeouts: 0, active: 0, latency: Hist::default() }
+        Self {
+            addr,
+            requests: 0,
+            connect_errors: 0,
+            io_errors: 0,
+            timeouts: 0,
+            active: 0,
+            latency: Hist::default(),
+        }
     }
 }
 
@@ -97,6 +107,8 @@ pub struct Metrics {
     pub ws_upgrades: u64,
     /// Requests answered by a FastCGI (PHP-FPM) application.
     pub fcgi_requests: u64,
+    pub request_ids_from_client: u64,
+    pub request_ids_generated: u64,
     pub requests_h1: u64,
     pub requests_h2: u64,
     pub requests_h3: u64,
@@ -130,6 +142,8 @@ impl Metrics {
         self.tls_handshakes += o.tls_handshakes;
         self.ws_upgrades += o.ws_upgrades;
         self.fcgi_requests += o.fcgi_requests;
+        self.request_ids_from_client += o.request_ids_from_client;
+        self.request_ids_generated += o.request_ids_generated;
         self.requests_h1 += o.requests_h1;
         self.requests_h2 += o.requests_h2;
         self.requests_h3 += o.requests_h3;
@@ -161,6 +175,8 @@ impl Metrics {
 pub struct Observer {
     pub m: Metrics,
     pub log_enabled: bool,
+    /// Access-log line format (Text = CLF, Json = JSON lines).
+    pub format: LogFormat,
     /// Pending access-log bytes; the worker swaps this out and writes it.
     pub log: Vec<u8>,
     /// Unix seconds, refreshed once per event-loop batch.
@@ -176,7 +192,14 @@ impl Default for Observer {
 
 impl Observer {
     pub fn new() -> Self {
-        Self { m: Metrics::default(), log_enabled: false, log: Vec::new(), now: 0, clf: (u64::MAX, [b' '; 28]) }
+        Self {
+            m: Metrics::default(),
+            log_enabled: false,
+            format: LogFormat::Text,
+            log: Vec::new(),
+            now: 0,
+            clf: (u64::MAX, [b' '; 28]),
+        }
     }
 
     /// Record one response: updates counters and (if enabled) appends a log line.
@@ -200,6 +223,13 @@ impl Observer {
         };
         self.m.status[class] += 1;
 
+        let rid = crate::req_id::current();
+        match rid.as_ref().map(|r| r.kind()) {
+            Some(IdKind::Client) => self.m.request_ids_from_client += 1,
+            Some(IdKind::Generated) => self.m.request_ids_generated += 1,
+            None => {}
+        }
+
         if !self.log_enabled {
             return;
         }
@@ -207,6 +237,24 @@ impl Observer {
             format_clf(self.now, &mut self.clf.1);
             self.clf.0 = self.now;
         }
+        match self.format {
+            LogFormat::Text => self.write_text_line(ip, proto, method, target, status, bytes),
+            LogFormat::Json => self.write_json_line(ip, proto, method, target, status, bytes),
+        }
+    }
+
+    /// Existing CLF output (NCSA Common Log Format). Kept verbatim for
+    /// backward compatibility.
+    fn write_text_line(
+        &mut self,
+        ip: Option<IpAddr>,
+        proto: Http,
+        method: &str,
+        target: &str,
+        status: u16,
+        bytes: u64,
+    ) {
+        let rid = crate::req_id::current();
         let log = &mut self.log;
         match ip {
             Some(ip) => {
@@ -222,7 +270,56 @@ impl Observer {
         push_escaped(log, target.as_bytes(), 2048);
         log.push(b' ');
         log.extend_from_slice(proto.name().as_bytes());
-        let _ = writeln!(log_writer(log), "\" {status} {bytes}");
+        let _ = write!(log_writer(log), "\" {status} {bytes}");
+        if let Some(id) = rid.as_ref() {
+            log.push(b' ');
+            log.extend_from_slice(id.as_str().as_bytes());
+        }
+        log.push(b'\n');
+    }
+
+    /// One JSON object per line, newline-terminated.
+    ///
+    /// Fields: ts (unix seconds), level, proto, method, path, status, bytes,
+    /// and client_ip if known.
+    fn write_json_line(
+        &mut self,
+        ip: Option<IpAddr>,
+        proto: Http,
+        method: &str,
+        target: &str,
+        status: u16,
+        bytes: u64,
+    ) {
+        let rid = crate::req_id::current();
+        let now = self.now;
+        let log = &mut self.log;
+        log.push(b'{');
+        let _ = write!(log_writer(log), "\"ts\":{now},");
+        log.extend_from_slice(b"\"level\":\"INFO\",");
+        log.extend_from_slice(b"\"proto\":");
+        push_json_string(log, proto.name().as_bytes());
+        log.push(b',');
+        log.extend_from_slice(b"\"method\":");
+        push_json_string(log, method.as_bytes());
+        log.push(b',');
+        log.extend_from_slice(b"\"path\":");
+        push_json_string(log, target.as_bytes());
+        log.push(b',');
+        let _ = write!(log_writer(log), "\"status\":{status},");
+        let _ = write!(log_writer(log), "\"bytes\":{bytes}");
+        if let Some(ip) = ip {
+            log.extend_from_slice(b",\"client_ip\":\"");
+            let _ = write!(log_writer(log), "{ip}");
+            log.push(b'"');
+        }
+        if let Some(id) = rid.as_ref() {
+            log.extend_from_slice(b",\"request_id\":\"");
+            log.extend_from_slice(id.as_str().as_bytes());
+            log.push(b'"');
+        }
+        log.push(b'}');
+        log.push(b'\n');
     }
 }
 
@@ -245,12 +342,37 @@ fn log_writer(v: &mut Vec<u8>) -> VecWriter<'_> {
 fn push_escaped(out: &mut Vec<u8>, s: &[u8], max: usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for &b in s.iter().take(max) {
-        if b < 0x20 || b >= 0x7f || b == b'"' || b == b'\\' {
+        if !(0x20..0x7f).contains(&b) || b == b'"' || b == b'\\' {
             out.extend_from_slice(&[b'\\', b'x', HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
         } else {
             out.push(b);
         }
     }
+}
+
+/// Append `s` as a JSON string literal (double-quoted, control chars
+/// escaped as `\u00XX`, `"` and `\` backslash-escaped).
+fn push_json_string(out: &mut Vec<u8>, s: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(b'"');
+    for &b in s {
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x0c => out.extend_from_slice(b"\\f"),
+            b if !(0x20..0x7f).contains(&b) => {
+                out.extend_from_slice(b"\\u00");
+                out.push(HEX[(b >> 4) as usize]);
+                out.push(HEX[(b & 15) as usize]);
+            }
+            _ => out.push(b),
+        }
+    }
+    out.push(b'"');
 }
 
 // ───────────────────────── Prometheus text exposition ─────────────────────────
@@ -273,6 +395,7 @@ fn upstream_counter(
 }
 
 /// Sum per-worker snapshots into the Prometheus text format (version 0.0.4).
+#[allow(clippy::field_reassign_with_default)] // test-only; simpler than struct literal
 pub fn render_prometheus(snaps: &[Snapshot]) -> String {
     let mut total = Metrics::default();
     let mut cache = CacheStats::default();
@@ -287,77 +410,272 @@ pub fn render_prometheus(snaps: &[Snapshot]) -> String {
 
     let mut o = String::with_capacity(4096);
 
-    header(&mut o, "vajra_workers", "gauge", "Number of worker threads that answered the scrape.");
+    header(
+        &mut o,
+        "vajra_workers",
+        "gauge",
+        "Number of worker threads that answered the scrape.",
+    );
     let _ = writeln!(o, "vajra_workers {}", snaps.len());
 
-    header(&mut o, "vajra_connections_total", "counter", "Connections accepted.");
+    header(
+        &mut o,
+        "vajra_connections_total",
+        "counter",
+        "Connections accepted.",
+    );
     let _ = writeln!(o, "vajra_connections_total {}", total.conns_accepted);
-    header(&mut o, "vajra_connections_closed_total", "counter", "Connections closed.");
+    header(
+        &mut o,
+        "vajra_connections_closed_total",
+        "counter",
+        "Connections closed.",
+    );
     let _ = writeln!(o, "vajra_connections_closed_total {}", total.conns_closed);
-    header(&mut o, "vajra_connections_active", "gauge", "Open connections per worker.");
+    header(
+        &mut o,
+        "vajra_connections_active",
+        "gauge",
+        "Open connections per worker.",
+    );
     for s in snaps {
-        let _ = writeln!(o, "vajra_connections_active{{worker=\"{}\"}} {}", s.worker, s.active_conns);
+        let _ = writeln!(
+            o,
+            "vajra_connections_active{{worker=\"{}\"}} {}",
+            s.worker, s.active_conns
+        );
     }
-    header(&mut o, "vajra_tls_handshakes_total", "counter", "Completed TLS handshakes.");
+    header(
+        &mut o,
+        "vajra_tls_handshakes_total",
+        "counter",
+        "Completed TLS handshakes.",
+    );
     let _ = writeln!(o, "vajra_tls_handshakes_total {}", total.tls_handshakes);
 
-    header(&mut o, "vajra_websocket_upgrades_total", "counter", "WebSocket tunnels established.");
+    header(
+        &mut o,
+        "vajra_websocket_upgrades_total",
+        "counter",
+        "WebSocket tunnels established.",
+    );
     let _ = writeln!(o, "vajra_websocket_upgrades_total {}", total.ws_upgrades);
 
-    header(&mut o, "vajra_fastcgi_requests_total", "counter", "Requests answered by a FastCGI (PHP-FPM) application.");
+    header(
+        &mut o,
+        "vajra_fastcgi_requests_total",
+        "counter",
+        "Requests answered by a FastCGI (PHP-FPM) application.",
+    );
     let _ = writeln!(o, "vajra_fastcgi_requests_total {}", total.fcgi_requests);
 
-    header(&mut o, "vajra_http_requests_total", "counter", "Responses produced, by protocol.");
-    let _ = writeln!(o, "vajra_http_requests_total{{protocol=\"http1\"}} {}", total.requests_h1);
-    let _ = writeln!(o, "vajra_http_requests_total{{protocol=\"http2\"}} {}", total.requests_h2);
-    let _ = writeln!(o, "vajra_http_requests_total{{protocol=\"http3\"}} {}", total.requests_h3);
-    header(&mut o, "vajra_quic_connections_total", "counter", "QUIC connections accepted.");
-    let _ = writeln!(o, "vajra_quic_connections_total {}", total.quic_conns_accepted);
-    header(&mut o, "vajra_quic_retries_total", "counter", "QUIC Retry packets sent (address validation).");
+    header(
+        &mut o,
+        "vajra_http_requests_total",
+        "counter",
+        "Responses produced, by protocol.",
+    );
+    let _ = writeln!(
+        o,
+        "vajra_http_requests_total{{protocol=\"http1\"}} {}",
+        total.requests_h1
+    );
+    let _ = writeln!(
+        o,
+        "vajra_http_requests_total{{protocol=\"http2\"}} {}",
+        total.requests_h2
+    );
+    let _ = writeln!(
+        o,
+        "vajra_http_requests_total{{protocol=\"http3\"}} {}",
+        total.requests_h3
+    );
+    header(
+        &mut o,
+        "vajra_quic_connections_total",
+        "counter",
+        "QUIC connections accepted.",
+    );
+    let _ = writeln!(
+        o,
+        "vajra_quic_connections_total {}",
+        total.quic_conns_accepted
+    );
+    header(
+        &mut o,
+        "vajra_quic_retries_total",
+        "counter",
+        "QUIC Retry packets sent (address validation).",
+    );
     let _ = writeln!(o, "vajra_quic_retries_total {}", total.quic_retries);
-    header(&mut o, "vajra_quic_protocol_errors_total", "counter", "QUIC/HTTP3 connections closed for protocol violations.");
-    let _ = writeln!(o, "vajra_quic_protocol_errors_total {}", total.quic_protocol_errors);
-    header(&mut o, "vajra_http_responses_total", "counter", "Responses produced, by status class.");
-    for (i, class) in ["other", "1xx", "2xx", "3xx", "4xx", "5xx"].iter().enumerate() {
-        let _ = writeln!(o, "vajra_http_responses_total{{class=\"{class}\"}} {}", total.status[i]);
+    header(
+        &mut o,
+        "vajra_quic_protocol_errors_total",
+        "counter",
+        "QUIC/HTTP3 connections closed for protocol violations.",
+    );
+    let _ = writeln!(
+        o,
+        "vajra_quic_protocol_errors_total {}",
+        total.quic_protocol_errors
+    );
+    header(
+        &mut o,
+        "vajra_http_responses_total",
+        "counter",
+        "Responses produced, by status class.",
+    );
+    for (i, class) in ["other", "1xx", "2xx", "3xx", "4xx", "5xx"]
+        .iter()
+        .enumerate()
+    {
+        let _ = writeln!(
+            o,
+            "vajra_http_responses_total{{class=\"{class}\"}} {}",
+            total.status[i]
+        );
     }
 
-    header(&mut o, "vajra_received_bytes_total", "counter", "Bytes read from client sockets.");
+    header(
+        &mut o,
+        "vajra_received_bytes_total",
+        "counter",
+        "Bytes read from client sockets.",
+    );
+    let _ = writeln!(o, "# HELP vajra_request_ids_total Request IDs by source");
+    let _ = writeln!(o, "# TYPE vajra_request_ids_total counter");
+    let _ = writeln!(
+        o,
+        "vajra_request_ids_total{{source=\"client\"}} {}",
+        total.request_ids_from_client
+    );
+    let _ = writeln!(
+        o,
+        "vajra_request_ids_total{{source=\"generated\"}} {}",
+        total.request_ids_generated
+    );
     let _ = writeln!(o, "vajra_received_bytes_total {}", total.bytes_in);
-    header(&mut o, "vajra_sent_bytes_total", "counter", "Bytes written to client sockets.");
+    header(
+        &mut o,
+        "vajra_sent_bytes_total",
+        "counter",
+        "Bytes written to client sockets.",
+    );
     let _ = writeln!(o, "vajra_sent_bytes_total {}", total.bytes_out);
 
-    header(&mut o, "vajra_cache_hits_total", "counter", "Proxy cache hits.");
+    header(
+        &mut o,
+        "vajra_cache_hits_total",
+        "counter",
+        "Proxy cache hits.",
+    );
     let _ = writeln!(o, "vajra_cache_hits_total {}", cache.hits);
-    header(&mut o, "vajra_cache_misses_total", "counter", "Proxy cache misses.");
+    header(
+        &mut o,
+        "vajra_cache_misses_total",
+        "counter",
+        "Proxy cache misses.",
+    );
     let _ = writeln!(o, "vajra_cache_misses_total {}", cache.misses);
-    header(&mut o, "vajra_cache_stores_total", "counter", "Responses stored in the proxy cache.");
+    header(
+        &mut o,
+        "vajra_cache_stores_total",
+        "counter",
+        "Responses stored in the proxy cache.",
+    );
     let _ = writeln!(o, "vajra_cache_stores_total {}", cache.stores);
-    header(&mut o, "vajra_cache_evictions_total", "counter", "LRU evictions.");
+    header(
+        &mut o,
+        "vajra_cache_evictions_total",
+        "counter",
+        "LRU evictions.",
+    );
     let _ = writeln!(o, "vajra_cache_evictions_total {}", cache.evictions);
-    header(&mut o, "vajra_cache_invalidations_total", "counter", "Entries dropped by unsafe methods.");
+    header(
+        &mut o,
+        "vajra_cache_invalidations_total",
+        "counter",
+        "Entries dropped by unsafe methods.",
+    );
     let _ = writeln!(o, "vajra_cache_invalidations_total {}", cache.invalidations);
-    header(&mut o, "vajra_cache_entries", "gauge", "Cached responses per worker.");
+    header(
+        &mut o,
+        "vajra_cache_entries",
+        "gauge",
+        "Cached responses per worker.",
+    );
     for s in snaps {
-        let _ = writeln!(o, "vajra_cache_entries{{worker=\"{}\"}} {}", s.worker, s.cache_entries);
+        let _ = writeln!(
+            o,
+            "vajra_cache_entries{{worker=\"{}\"}} {}",
+            s.worker, s.cache_entries
+        );
     }
-    header(&mut o, "vajra_cache_bytes", "gauge", "Cache memory accounted per worker.");
+    header(
+        &mut o,
+        "vajra_cache_bytes",
+        "gauge",
+        "Cache memory accounted per worker.",
+    );
     for s in snaps {
-        let _ = writeln!(o, "vajra_cache_bytes{{worker=\"{}\"}} {}", s.worker, s.cache_bytes);
+        let _ = writeln!(
+            o,
+            "vajra_cache_bytes{{worker=\"{}\"}} {}",
+            s.worker, s.cache_bytes
+        );
     }
 
     // Per-upstream series, in a stable order.
     let mut ups: Vec<_> = total.ups.iter().collect();
     ups.sort_by(|a, b| a.addr.cmp(&b.addr));
-    upstream_counter(&mut o, "vajra_upstream_requests_total", "Proxy attempts started.", &ups, |u| u.requests);
-    upstream_counter(&mut o, "vajra_upstream_connect_errors_total", "Failed upstream connects.", &ups, |u| u.connect_errors);
-    upstream_counter(&mut o, "vajra_upstream_io_errors_total", "Upstream send/recv failures.", &ups, |u| u.io_errors);
-    upstream_counter(&mut o, "vajra_upstream_timeouts_total", "Upstream operations that timed out.", &ups, |u| u.timeouts);
-    header(&mut o, "vajra_upstream_active", "gauge", "Proxy attempts in flight.");
+    upstream_counter(
+        &mut o,
+        "vajra_upstream_requests_total",
+        "Proxy attempts started.",
+        &ups,
+        |u| u.requests,
+    );
+    upstream_counter(
+        &mut o,
+        "vajra_upstream_connect_errors_total",
+        "Failed upstream connects.",
+        &ups,
+        |u| u.connect_errors,
+    );
+    upstream_counter(
+        &mut o,
+        "vajra_upstream_io_errors_total",
+        "Upstream send/recv failures.",
+        &ups,
+        |u| u.io_errors,
+    );
+    upstream_counter(
+        &mut o,
+        "vajra_upstream_timeouts_total",
+        "Upstream operations that timed out.",
+        &ups,
+        |u| u.timeouts,
+    );
+    header(
+        &mut o,
+        "vajra_upstream_active",
+        "gauge",
+        "Proxy attempts in flight.",
+    );
     for u in &ups {
-        let _ = writeln!(o, "vajra_upstream_active{{upstream=\"{}\"}} {}", u.addr, u.active.max(0));
+        let _ = writeln!(
+            o,
+            "vajra_upstream_active{{upstream=\"{}\"}} {}",
+            u.addr,
+            u.active.max(0)
+        );
     }
-    header(&mut o, "vajra_upstream_latency_seconds", "histogram", "Time from starting an upstream attempt to a complete response.");
+    header(
+        &mut o,
+        "vajra_upstream_latency_seconds",
+        "histogram",
+        "Time from starting an upstream attempt to a complete response.",
+    );
     for u in &ups {
         let mut cum = 0u64;
         for (i, &b) in LAT_BOUNDS_US.iter().enumerate() {
@@ -370,23 +688,62 @@ pub fn render_prometheus(snaps: &[Snapshot]) -> String {
             );
         }
         cum += u.latency.buckets[12];
-        let _ = writeln!(o, "vajra_upstream_latency_seconds_bucket{{upstream=\"{}\",le=\"+Inf\"}} {cum}", u.addr);
-        let _ = writeln!(o, "vajra_upstream_latency_seconds_sum{{upstream=\"{}\"}} {}", u.addr, u.latency.sum_us as f64 / 1e6);
-        let _ = writeln!(o, "vajra_upstream_latency_seconds_count{{upstream=\"{}\"}} {}", u.addr, u.latency.count);
+        let _ = writeln!(
+            o,
+            "vajra_upstream_latency_seconds_bucket{{upstream=\"{}\",le=\"+Inf\"}} {cum}",
+            u.addr
+        );
+        let _ = writeln!(
+            o,
+            "vajra_upstream_latency_seconds_sum{{upstream=\"{}\"}} {}",
+            u.addr,
+            u.latency.sum_us as f64 / 1e6
+        );
+        let _ = writeln!(
+            o,
+            "vajra_upstream_latency_seconds_count{{upstream=\"{}\"}} {}",
+            u.addr, u.latency.count
+        );
     }
 
-    header(&mut o, "vajra_config_reloads_total", "counter", "Configuration reload attempts applied by workers.");
-    let _ = writeln!(o, "vajra_config_reloads_total{{result=\"ok\"}} {}", total.reloads_ok);
-    let _ = writeln!(o, "vajra_config_reloads_total{{result=\"error\"}} {}", total.reloads_failed);
-    header(&mut o, "vajra_access_log_write_errors_total", "counter", "Failed access-log writes.");
-    let _ = writeln!(o, "vajra_access_log_write_errors_total {}", total.log_write_errors);
+    header(
+        &mut o,
+        "vajra_config_reloads_total",
+        "counter",
+        "Configuration reload attempts applied by workers.",
+    );
+    let _ = writeln!(
+        o,
+        "vajra_config_reloads_total{{result=\"ok\"}} {}",
+        total.reloads_ok
+    );
+    let _ = writeln!(
+        o,
+        "vajra_config_reloads_total{{result=\"error\"}} {}",
+        total.reloads_failed
+    );
+    header(
+        &mut o,
+        "vajra_access_log_write_errors_total",
+        "counter",
+        "Failed access-log writes.",
+    );
+    let _ = writeln!(
+        o,
+        "vajra_access_log_write_errors_total {}",
+        total.log_write_errors
+    );
 
     o
 }
 
 /// Group helper used by tests and the admin endpoint.
 pub fn sum_by_class(m: &Metrics) -> HashMap<&'static str, u64> {
-    ["other", "1xx", "2xx", "3xx", "4xx", "5xx"].iter().copied().zip(m.status.iter().copied()).collect()
+    ["other", "1xx", "2xx", "3xx", "4xx", "5xx"]
+        .iter()
+        .copied()
+        .zip(m.status.iter().copied())
+        .collect()
 }
 
 #[cfg(test)]
@@ -445,7 +802,14 @@ mod tests {
         let mut o = Observer::new();
         o.log_enabled = true;
         o.now = 784_111_777; // 1994-11-06 08:49:37 UTC
-        o.response(Some("203.0.113.9".parse().unwrap()), Http::H1, "GET", "/a/b?x=1", 200, 123);
+        o.response(
+            Some("203.0.113.9".parse().unwrap()),
+            Http::H1,
+            "GET",
+            "/a/b?x=1",
+            200,
+            123,
+        );
         o.response(None, Http::H2, "POST", "/up", 502, 0);
         let s = String::from_utf8(o.log.clone()).unwrap();
         let mut lines = s.lines();
@@ -453,7 +817,10 @@ mod tests {
             lines.next().unwrap(),
             "203.0.113.9 - - [06/Nov/1994:08:49:37 +0000] \"GET /a/b?x=1 HTTP/1.1\" 200 123"
         );
-        assert_eq!(lines.next().unwrap(), "- - - [06/Nov/1994:08:49:37 +0000] \"POST /up HTTP/2\" 502 0");
+        assert_eq!(
+            lines.next().unwrap(),
+            "- - - [06/Nov/1994:08:49:37 +0000] \"POST /up HTTP/2\" 502 0"
+        );
         assert_eq!((o.m.requests_h1, o.m.requests_h2), (1, 1));
         assert_eq!((o.m.status[2], o.m.status[5]), (1, 1));
     }
@@ -462,7 +829,14 @@ mod tests {
     fn access_log_cannot_be_forged() {
         let mut o = Observer::new();
         o.log_enabled = true;
-        o.response(None, Http::H1, "GET", "/x\" 200 0\n1.2.3.4 - - \"GET /evil", 200, 1);
+        o.response(
+            None,
+            Http::H1,
+            "GET",
+            "/x\" 200 0\n1.2.3.4 - - \"GET /evil",
+            200,
+            1,
+        );
         let s = String::from_utf8(o.log).unwrap();
         assert_eq!(s.lines().count(), 1, "newline must be escaped: {s}");
         assert!(s.contains("\\x22") && s.contains("\\x0a"));
@@ -488,8 +862,28 @@ mod tests {
         m1.ups[i].latency.observe(40_000);
         let mut m2 = Metrics::default();
         m2.conns_accepted = 1;
-        let s1 = Snapshot { worker: 0, metrics: m1, active_conns: 4, cache: CacheStats { hits: 2, ..Default::default() }, cache_entries: 7, cache_bytes: 700 };
-        let s2 = Snapshot { worker: 1, metrics: m2, active_conns: 1, cache: CacheStats { hits: 1, ..Default::default() }, cache_entries: 0, cache_bytes: 0 };
+        let s1 = Snapshot {
+            worker: 0,
+            metrics: m1,
+            active_conns: 4,
+            cache: CacheStats {
+                hits: 2,
+                ..Default::default()
+            },
+            cache_entries: 7,
+            cache_bytes: 700,
+        };
+        let s2 = Snapshot {
+            worker: 1,
+            metrics: m2,
+            active_conns: 1,
+            cache: CacheStats {
+                hits: 1,
+                ..Default::default()
+            },
+            cache_entries: 0,
+            cache_bytes: 0,
+        };
 
         let text = render_prometheus(&[s1, s2]);
         assert!(text.contains("vajra_workers 2\n"));
@@ -502,11 +896,81 @@ mod tests {
         assert!(text.contains("vajra_cache_entries{worker=\"0\"} 7\n"));
         assert!(text.contains("vajra_upstream_requests_total{upstream=\"127.0.0.1:9000\"} 5\n"));
         // Histogram buckets are cumulative.
-        assert!(text.contains("vajra_upstream_latency_seconds_bucket{upstream=\"127.0.0.1:9000\",le=\"0.005\"} 1\n"));
-        assert!(text.contains("vajra_upstream_latency_seconds_bucket{upstream=\"127.0.0.1:9000\",le=\"0.05\"} 2\n"));
-        assert!(text.contains("vajra_upstream_latency_seconds_bucket{upstream=\"127.0.0.1:9000\",le=\"+Inf\"} 2\n"));
-        assert!(text.contains("vajra_upstream_latency_seconds_count{upstream=\"127.0.0.1:9000\"} 2\n"));
+        assert!(text.contains(
+            "vajra_upstream_latency_seconds_bucket{upstream=\"127.0.0.1:9000\",le=\"0.005\"} 1\n"
+        ));
+        assert!(text.contains(
+            "vajra_upstream_latency_seconds_bucket{upstream=\"127.0.0.1:9000\",le=\"0.05\"} 2\n"
+        ));
+        assert!(text.contains(
+            "vajra_upstream_latency_seconds_bucket{upstream=\"127.0.0.1:9000\",le=\"+Inf\"} 2\n"
+        ));
+        assert!(
+            text.contains("vajra_upstream_latency_seconds_count{upstream=\"127.0.0.1:9000\"} 2\n")
+        );
         // Every sample line is preceded by TYPE metadata for its family.
         assert!(text.contains("# TYPE vajra_upstream_latency_seconds histogram"));
+    }
+    #[test]
+    fn json_log_line_format() {
+        let mut o = Observer::new();
+        o.log_enabled = true;
+        o.format = LogFormat::Json;
+        o.now = 1_690_000_000;
+        o.response(
+            Some("203.0.113.9".parse().unwrap()),
+            Http::H1,
+            "GET",
+            "/a/b?x=1",
+            200,
+            123,
+        );
+        let s = String::from_utf8(o.log.clone()).unwrap();
+        assert!(s.starts_with('{'), "must start with brace: {s}");
+        assert!(s.ends_with("}\n"), "must end with brace+newline: {s}");
+        assert_eq!(s.lines().count(), 1);
+        assert!(s.contains("\"ts\":1690000000"));
+        assert!(s.contains("\"level\":\"INFO\""));
+        assert!(s.contains("\"proto\":\"HTTP/1.1\""));
+        assert!(s.contains("\"method\":\"GET\""));
+        assert!(s.contains("\"path\":\"/a/b?x=1\""));
+        assert!(s.contains("\"status\":200"));
+        assert!(s.contains("\"bytes\":123"));
+        assert!(s.contains("\"client_ip\":\"203.0.113.9\""));
+    }
+
+    #[test]
+    fn json_log_escapes_dangerous_chars() {
+        let mut o = Observer::new();
+        o.log_enabled = true;
+        o.format = LogFormat::Json;
+        o.now = 1_690_000_000;
+        o.response(None, Http::H1, "GET", "/x\"y\nz\\w", 200, 0);
+        let s = String::from_utf8(o.log).unwrap();
+        assert!(s.contains("\\\""), "quote escaped: {s}");
+        assert!(s.contains("\\n"), "newline escaped: {s}");
+        assert!(s.contains("\\\\"), "backslash escaped: {s}");
+        assert_eq!(s.lines().count(), 1, "must not forge a second line: {s}");
+    }
+
+    #[test]
+    fn text_format_unchanged_when_explicit() {
+        let mut o = Observer::new();
+        o.log_enabled = true;
+        o.format = LogFormat::Text;
+        o.now = 784_111_777;
+        o.response(
+            Some("203.0.113.9".parse().unwrap()),
+            Http::H1,
+            "GET",
+            "/a",
+            200,
+            5,
+        );
+        let s = String::from_utf8(o.log).unwrap();
+        assert_eq!(
+            s.trim_end(),
+            "203.0.113.9 - - [06/Nov/1994:08:49:37 +0000] \"GET /a HTTP/1.1\" 200 5"
+        );
     }
 }

@@ -64,6 +64,16 @@
 use crate::php::PhpConfig;
 use crate::worker::Config as WorkerConfig;
 use serde::Deserialize;
+use serde::Serialize;
+
+/// Access-log line format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
@@ -71,8 +81,36 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 const DEFAULT_INDEX: &str = "index.html";
 const MAX_UPSTREAMS: usize = 64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HealthConfig {
+    #[serde(default = "default_health_listen")]
+    pub listen: String,
+    #[serde(default = "default_health_path")]
+    pub path: String,
+    #[serde(default = "default_health_ready_path")]
+    pub ready_path: String,
+    #[serde(default = "default_health_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mariadb: Option<String>,
+}
+
+fn default_health_listen() -> String {
+    "127.0.0.1:9201".into()
+}
+fn default_health_path() -> String {
+    "/health".into()
+}
+fn default_health_ready_path() -> String {
+    "/ready".into()
+}
+fn default_health_enabled() -> bool {
+    true
+}
+
+#[derive(Clone, Debug)]
 pub struct Settings {
+    pub health: Option<HealthConfig>,
     pub listen: SocketAddr,
     /// 0 means "one per CPU" (resolved by `main`).
     pub workers: usize,
@@ -85,6 +123,7 @@ pub struct Settings {
     pub proxies: Vec<ProxySettings>,
     pub cache: CacheSettings,
     pub access_log: Option<String>,
+    pub log_format: LogFormat,
     pub admin: Option<SocketAddr>,
 }
 
@@ -155,7 +194,9 @@ fn parse_upstream(what: &str, s: &str) -> Result<UpAddr, String> {
     match s.strip_prefix("unix:") {
         Some(path) => {
             if !path.starts_with('/') || path.len() > 107 || path.contains('\0') {
-                return Err(format!("{what} {s:?}: unix socket path must be absolute and shorter than 108 bytes"));
+                return Err(format!(
+                    "{what} {s:?}: unix socket path must be absolute and shorter than 108 bytes"
+                ));
             }
             Ok(UpAddr::Unix(PathBuf::from(path)))
         }
@@ -181,7 +222,12 @@ pub struct ProxySettings {
 
 impl ProxySettings {
     /// A single-upstream route with defaults for everything else.
-    pub fn simple(prefix: &str, upstream: SocketAddr, strip_prefix: bool, timeout_secs: u64) -> Self {
+    pub fn simple(
+        prefix: &str,
+        upstream: SocketAddr,
+        strip_prefix: bool,
+        timeout_secs: u64,
+    ) -> Self {
         Self {
             prefix: prefix.to_string(),
             upstreams: vec![UpAddr::Tcp(upstream)],
@@ -206,7 +252,11 @@ pub struct CacheSettings {
 
 impl Default for CacheSettings {
     fn default() -> Self {
-        Self { max_entries: 10_000, max_bytes: 64 * 1024 * 1024, max_object_bytes: 1024 * 1024 }
+        Self {
+            max_entries: 10_000,
+            max_bytes: 64 * 1024 * 1024,
+            max_object_bytes: 1024 * 1024,
+        }
     }
 }
 
@@ -218,6 +268,7 @@ pub struct Dynamic {
     /// `None` leaves the current TLS configuration untouched.
     pub tls: Option<TlsPaths>,
     pub access_log: Option<String>,
+    pub log_format: LogFormat,
     pub cache: CacheSettings,
 }
 
@@ -230,7 +281,10 @@ impl StaticSettings {
         let canon = std::fs::canonicalize(&root)
             .map_err(|e| format!("static.root {}: {e}", root.display()))?;
         if !canon.is_dir() {
-            return Err(format!("static.root {} is not a directory", canon.display()));
+            return Err(format!(
+                "static.root {} is not a directory",
+                canon.display()
+            ));
         }
         if index.is_empty() || index.contains('/') {
             return Err("static.index must be a bare file name".into());
@@ -238,13 +292,19 @@ impl StaticSettings {
         if max == 0 {
             return Err("static.max_cached_files must be >= 1".into());
         }
-        Ok(Self { root: canon, index, cache_ttl_secs: ttl, max_cached_files: max })
+        Ok(Self {
+            root: canon,
+            index,
+            cache_ttl_secs: ttl,
+            max_cached_files: max,
+        })
     }
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            health: None,
             listen: DEFAULT_LISTEN.parse().unwrap(),
             workers: 1,
             pin: true,
@@ -256,6 +316,7 @@ impl Default for Settings {
             proxies: Vec::new(),
             cache: CacheSettings::default(),
             access_log: None,
+            log_format: LogFormat::Text,
             admin: None,
         }
     }
@@ -266,6 +327,8 @@ impl Default for Settings {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    #[serde(default)]
+    health: Option<HealthConfig>,
     #[serde(default)]
     server: RawServer,
     #[serde(default)]
@@ -294,7 +357,12 @@ struct RawServer {
 }
 impl Default for RawServer {
     fn default() -> Self {
-        Self { listen: DEFAULT_LISTEN.into(), workers: 1, pin: true, grace_secs: 5 }
+        Self {
+            listen: DEFAULT_LISTEN.into(),
+            workers: 1,
+            pin: true,
+            grace_secs: 5,
+        }
     }
 }
 
@@ -452,7 +520,11 @@ struct RawCache {
 impl Default for RawCache {
     fn default() -> Self {
         let d = CacheSettings::default();
-        Self { max_entries: d.max_entries, max_bytes: d.max_bytes, max_object_bytes: d.max_object_bytes }
+        Self {
+            max_entries: d.max_entries,
+            max_bytes: d.max_bytes,
+            max_object_bytes: d.max_object_bytes,
+        }
     }
 }
 
@@ -460,6 +532,7 @@ impl Default for RawCache {
 #[serde(default, deny_unknown_fields)]
 struct RawLogging {
     access_log: Option<String>,
+    format: LogFormat,
 }
 
 #[derive(Deserialize)]
@@ -538,7 +611,11 @@ impl Settings {
                         return Err(format!("{what}: {} is not a file", p.display()));
                     }
                 }
-                Some(TlsSettings { listen: resolve_addr("tls.listen", &t.listen)?, cert, key })
+                Some(TlsSettings {
+                    listen: resolve_addr("tls.listen", &t.listen)?,
+                    cert,
+                    key,
+                })
             }
         };
 
@@ -546,7 +623,9 @@ impl Settings {
             None => None,
             Some(q) => {
                 if tls.is_none() {
-                    return Err("[quic] requires a [tls] section (the same certificate is used)".into());
+                    return Err(
+                        "[quic] requires a [tls] section (the same certificate is used)".into(),
+                    );
                 }
                 if !(1..=600).contains(&q.idle_timeout_secs) {
                     return Err("quic.idle_timeout_secs must be in 1..=600".into());
@@ -573,7 +652,9 @@ impl Settings {
                 return Err("proxy.timeout_secs must be in 1..=3600".into());
             }
             if p.max_fails == 0 || !(1..=3600).contains(&p.fail_timeout_secs) {
-                return Err("proxy.max_fails must be >= 1 and fail_timeout_secs in 1..=3600".into());
+                return Err(
+                    "proxy.max_fails must be >= 1 and fail_timeout_secs in 1..=3600".into(),
+                );
             }
             let names: Vec<String> = match (p.upstream, p.upstreams) {
                 (Some(u), None) => vec![u],
@@ -586,7 +667,10 @@ impl Settings {
                 }
             };
             if names.is_empty() || names.len() > MAX_UPSTREAMS {
-                return Err(format!("proxy {:?}: need 1..={MAX_UPSTREAMS} upstreams", p.prefix));
+                return Err(format!(
+                    "proxy {:?}: need 1..={MAX_UPSTREAMS} upstreams",
+                    p.prefix
+                ));
             }
             let mut upstreams = Vec::with_capacity(names.len());
             for n in &names {
@@ -622,7 +706,12 @@ impl Settings {
         if let Some(php) = raw.php {
             let root = match &static_files {
                 Some(sf) => sf.root.clone(),
-                None => return Err("[php] requires a [static] section (its root is the PHP document root)".into()),
+                None => {
+                    return Err(
+                        "[php] requires a [static] section (its root is the PHP document root)"
+                            .into(),
+                    )
+                }
             };
             if !(1..=3600).contains(&php.timeout_secs) {
                 return Err("php.timeout_secs must be in 1..=3600".into());
@@ -648,7 +737,11 @@ impl Settings {
             let balance = match php.balance.as_deref().unwrap_or("round_robin") {
                 "round_robin" => Balance::RoundRobin,
                 "least_conn" => Balance::LeastConn,
-                other => return Err(format!("php.balance {other:?}: expected round_robin or least_conn")),
+                other => {
+                    return Err(format!(
+                        "php.balance {other:?}: expected round_robin or least_conn"
+                    ))
+                }
             };
             if php.index.is_empty() || php.index.iter().any(|i| i.is_empty() || i.contains('/')) {
                 return Err("php.index must be a non-empty list of bare file names".into());
@@ -658,7 +751,10 @@ impl Settings {
             } else {
                 let f = php.front_controller;
                 if !f.starts_with('/') || f.split('/').any(|seg| seg == "..") {
-                    return Err("php.front_controller must be an absolute path below the root (or \"\")".into());
+                    return Err(
+                        "php.front_controller must be an absolute path below the root (or \"\")"
+                            .into(),
+                    );
                 }
                 Some(f)
             };
@@ -722,12 +818,14 @@ impl Settings {
                 resolve(base_dir, &p).to_string_lossy().into_owned()
             }
         });
+        let log_format = raw.logging.format;
         let admin = match raw.admin {
             None => None,
             Some(a) => Some(resolve_addr("admin.listen", &a.listen)?),
         };
 
         Ok(Self {
+            health: raw.health,
             listen,
             workers: raw.server.workers,
             pin: raw.server.pin,
@@ -749,6 +847,7 @@ impl Settings {
                 max_object_bytes: c.max_object_bytes,
             },
             access_log,
+            log_format,
             admin,
         })
     }
@@ -758,8 +857,12 @@ impl Settings {
         Dynamic {
             static_files: self.static_files.clone(),
             proxies: self.proxies.clone(),
-            tls: self.tls.as_ref().map(|t| TlsPaths { cert: t.cert.clone(), key: t.key.clone() }),
+            tls: self.tls.as_ref().map(|t| TlsPaths {
+                cert: t.cert.clone(),
+                key: t.key.clone(),
+            }),
             access_log: self.access_log.clone(),
+            log_format: self.log_format,
             cache: self.cache,
         }
     }
@@ -822,9 +925,15 @@ mod tests {
     fn php_section() {
         let d = tmpdir("php");
         let base = format!("[static]\nroot = {:?}\n", d.to_str().unwrap());
-        let s = parse(&format!("{base}[php]\nupstream = \"unix:/run/php/php8.3-fpm.sock\"\n")).unwrap();
+        let s = parse(&format!(
+            "{base}[php]\nupstream = \"unix:/run/php/php8.3-fpm.sock\"\n"
+        ))
+        .unwrap();
         let p = s.proxies.last().unwrap();
-        assert_eq!(p.upstreams, vec![UpAddr::Unix(PathBuf::from("/run/php/php8.3-fpm.sock"))]);
+        assert_eq!(
+            p.upstreams,
+            vec![UpAddr::Unix(PathBuf::from("/run/php/php8.3-fpm.sock"))]
+        );
         assert_eq!(p.timeout_secs, 60);
         let php = p.php.as_ref().unwrap();
         assert_eq!(php.index, ["index.php"]);
@@ -858,9 +967,12 @@ mod tests {
     fn php_section_errors() {
         let d = tmpdir("phperr");
         let base = format!("[static]\nroot = {:?}\n", d.to_str().unwrap());
-        assert!(parse("[php]\nupstream = \"127.0.0.1:9000\"").is_err(), "needs [static]");
+        assert!(
+            parse("[php]\nupstream = \"127.0.0.1:9000\"").is_err(),
+            "needs [static]"
+        );
         for bad in [
-            "",                                                   // no upstream
+            "", // no upstream
             "upstream = \"127.0.0.1:9000\"\nupstreams = [\"127.0.0.1:1\"]",
             "upstream = \"unix:relative.sock\"",
             "upstream = \"127.0.0.1:9000\"\nextensions = [\"php\"]",
@@ -874,7 +986,10 @@ mod tests {
             "upstream = \"127.0.0.1:9000\"\nbalance = \"ip_hash\"",
             "upstream = \"127.0.0.1:9000\"\nunknown = 1",
         ] {
-            assert!(parse(&format!("{base}[php]\n{bad}\n")).is_err(), "should reject: {bad}");
+            assert!(
+                parse(&format!("{base}[php]\n{bad}\n")).is_err(),
+                "should reject: {bad}"
+            );
         }
     }
 
@@ -895,18 +1010,30 @@ mod tests {
         let s = Settings::from_toml_str(&ok, &base).unwrap();
         let q = s.quic.unwrap();
         assert!(q.retry && q.advertise);
-        assert_eq!((q.idle_timeout_secs, q.max_streams, q.listen.port()), (30, 100, 9443));
+        assert_eq!(
+            (q.idle_timeout_secs, q.max_streams, q.listen.port()),
+            (30, 100, 9443)
+        );
 
         let custom = format!(
             "{tls}[quic]\nlisten=\"127.0.0.1:9444\"\nretry=false\nadvertise=false\nidle_timeout_secs=5\nmax_streams=7\n"
         );
-        let q = Settings::from_toml_str(&custom, &base).unwrap().quic.unwrap();
+        let q = Settings::from_toml_str(&custom, &base)
+            .unwrap()
+            .quic
+            .unwrap();
         assert!(!q.retry && !q.advertise);
         assert_eq!((q.idle_timeout_secs, q.max_streams), (5, 7));
 
         // QUIC needs the TLS identity; limits are validated; unknown keys rejected.
         assert!(Settings::from_toml_str("[quic]\nlisten=\"127.0.0.1:1\"", &base).is_err());
-        for bad in ["idle_timeout_secs=0", "idle_timeout_secs=601", "max_streams=0", "max_streams=1001", "bogus=1"] {
+        for bad in [
+            "idle_timeout_secs=0",
+            "idle_timeout_secs=601",
+            "max_streams=0",
+            "max_streams=1001",
+            "bogus=1",
+        ] {
             let t = format!("{tls}[quic]\nlisten=\"127.0.0.1:9443\"\n{bad}\n");
             assert!(Settings::from_toml_str(&t, &base).is_err(), "{bad}");
         }
@@ -979,9 +1106,20 @@ mod tests {
         assert_eq!(p.upstreams.len(), 2, "duplicates removed");
         assert_eq!(p.balance, Balance::LeastConn);
         assert!(p.strip_prefix && p.cache);
-        assert_eq!((p.timeout_secs, p.max_fails, p.fail_timeout_secs, p.cache_default_ttl_secs), (5, 2, 20, 60));
+        assert_eq!(
+            (
+                p.timeout_secs,
+                p.max_fails,
+                p.fail_timeout_secs,
+                p.cache_default_ttl_secs
+            ),
+            (5, 2, 20, 60)
+        );
         let q = &s.proxies[1];
-        assert_eq!((q.upstreams.len(), q.balance, q.timeout_secs, q.cache), (1, Balance::RoundRobin, 30, false));
+        assert_eq!(
+            (q.upstreams.len(), q.balance, q.timeout_secs, q.cache),
+            (1, Balance::RoundRobin, 30, false)
+        );
 
         let d = s.dynamic();
         assert_eq!(d.proxies.len(), 2);
@@ -990,7 +1128,13 @@ mod tests {
 
     #[test]
     fn stdout_access_log_is_kept_verbatim() {
-        assert_eq!(parse("[logging]\naccess_log = \"-\"").unwrap().access_log.as_deref(), Some("-"));
+        assert_eq!(
+            parse("[logging]\naccess_log = \"-\"")
+                .unwrap()
+                .access_log
+                .as_deref(),
+            Some("-")
+        );
     }
 
     #[test]
@@ -1010,11 +1154,19 @@ mod tests {
         assert!(parse("[static]\nroot = \"/definitely/not/here\"").is_err());
         assert!(parse("[tls]\nlisten=\"127.0.0.1:1\"\ncert=\"/no\"\nkey=\"/no\"").is_err());
         assert!(parse("[[proxy]]\nprefix=\"api\"\nupstream=\"127.0.0.1:1\"").is_err());
-        assert!(parse("[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\ntimeout_secs=0").is_err());
+        assert!(
+            parse("[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\ntimeout_secs=0").is_err()
+        );
         assert!(parse("[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\nmax_fails=0").is_err());
-        assert!(parse("[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\nbalance=\"random\"").is_err());
+        assert!(
+            parse("[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\nbalance=\"random\"")
+                .is_err()
+        );
         assert!(parse("[[proxy]]\nprefix=\"/a\"").is_err(), "no upstream");
-        assert!(parse("[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\nupstreams=[\"127.0.0.1:2\"]").is_err());
+        assert!(parse(
+            "[[proxy]]\nprefix=\"/a\"\nupstream=\"127.0.0.1:1\"\nupstreams=[\"127.0.0.1:2\"]"
+        )
+        .is_err());
         assert!(parse("[[proxy]]\nprefix=\"/a\"\nupstreams=[]").is_err());
         assert!(parse("[cache]\nmax_bytes = 10\nmax_object_bytes = 100").is_err());
     }
@@ -1032,8 +1184,26 @@ mod tests {
         assert_eq!(r.len(), 4, "{r:?}");
         // Reloadable fields never appear.
         let mut c = a.clone();
-        c.proxies.push(ProxySettings::simple("/x", "127.0.0.1:1".parse().unwrap(), false, 5));
+        c.proxies.push(ProxySettings::simple(
+            "/x",
+            "127.0.0.1:1".parse().unwrap(),
+            false,
+            5,
+        ));
         c.access_log = Some("-".into());
         assert!(a.restart_required(&c).is_empty());
+    }
+    #[test]
+    fn log_format_parsed() {
+        assert_eq!(
+            parse("[logging]\nformat = \"json\"").unwrap().log_format,
+            LogFormat::Json
+        );
+        assert_eq!(
+            parse("[logging]\nformat = \"text\"").unwrap().log_format,
+            LogFormat::Text
+        );
+        assert_eq!(parse("").unwrap().log_format, LogFormat::Text);
+        assert!(parse("[logging]\nformat = \"xml\"").is_err());
     }
 }

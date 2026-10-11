@@ -82,7 +82,12 @@ fn serve<S: Read + Write>(mut s: S, app: &App) {
     let params: HashMap<String, String> = fastcgi::decode_params(&params_blob)
         .expect("valid params")
         .into_iter()
-        .map(|(k, v)| (String::from_utf8_lossy(&k).into_owned(), String::from_utf8_lossy(&v).into_owned()))
+        .map(|(k, v)| {
+            (
+                String::from_utf8_lossy(&k).into_owned(),
+                String::from_utf8_lossy(&v).into_owned(),
+            )
+        })
         .collect();
 
     let mut out = Vec::new();
@@ -163,7 +168,9 @@ fn echo_app() -> Arc<App> {
             g("CONTENT_TYPE"), g("HTTP_COOKIE"), g("HTTP_X_FORWARDED_FOR"), g("HTTP_PROXY"),
             String::from_utf8_lossy(stdin),
         );
-        Answer::Cgi(format!("Content-Type: text/plain\r\nX-Powered-By: mock\r\n\r\n{body}").into_bytes())
+        Answer::Cgi(
+            format!("Content-Type: text/plain\r\nX-Powered-By: mock\r\n\r\n{body}").into_bytes(),
+        )
     })
 }
 
@@ -202,7 +209,10 @@ fn start(root: &Path, proxies: Vec<ProxySettings>, cfg: Config) -> Option<Socket
     let (tx, rx) = mpsc::channel();
     let root = root.to_path_buf();
     std::thread::spawn(move || {
-        let l = [Listener { fd: sock.as_raw_fd(), tls: false }];
+        let l = [Listener {
+            fd: sock.as_raw_fd(),
+            tls: false,
+        }];
         let dynamic = Dynamic {
             static_files: Some(StaticSettings::new(&root).unwrap()),
             proxies,
@@ -235,14 +245,18 @@ impl Resp {
     }
     fn header_count(&self, name: &str) -> usize {
         let n = format!("{}:", name.to_ascii_lowercase());
-        self.head.lines().filter(|l| l.to_ascii_lowercase().starts_with(&n)).count()
+        self.head
+            .lines()
+            .filter(|l| l.to_ascii_lowercase().starts_with(&n))
+            .count()
     }
 }
 
 fn http(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Resp {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n");
+    let mut req =
+        format!("{method} {path} HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n");
     for (k, v) in headers {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -254,10 +268,18 @@ fn http(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)], bo
     s.write_all(body).unwrap();
     let mut raw = Vec::new();
     let _ = s.read_to_end(&mut raw);
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("response head") + 4;
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head")
+        + 4;
     let head = String::from_utf8_lossy(&raw[..split]).into_owned();
     let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-    Resp { status, head, body: raw[split..].to_vec() }
+    Resp {
+        status,
+        head,
+        body: raw[split..].to_vec(),
+    }
 }
 
 fn get(addr: SocketAddr, path: &str) -> Resp {
@@ -270,29 +292,58 @@ fn get(addr: SocketAddr, path: &str) -> Resp {
 fn wordpress_routing() {
     let root = make_site("routing");
     let fpm = spawn_fpm(echo_app());
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 5)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+    ) else {
+        return;
+    };
     let r = root.to_str().unwrap();
 
     let t = get(addr, "/wp-login.php?redirect_to=%2Fwp-admin%2F");
     assert_eq!(t.status, 200);
     let b = t.text();
     assert!(b.contains(&format!("script={r}/wp-login.php")), "{b}");
-    assert!(b.contains("name=/wp-login.php") && b.contains("path_info=-"), "{b}");
-    assert!(b.contains("qs=redirect_to=%2Fwp-admin%2F") && b.contains(&format!("root={r} ")), "{b}");
-    assert!(t.head.contains("X-Powered-By: mock") && t.head.to_ascii_lowercase().contains("content-type: text/plain"));
+    assert!(
+        b.contains("name=/wp-login.php") && b.contains("path_info=-"),
+        "{b}"
+    );
+    assert!(
+        b.contains("qs=redirect_to=%2Fwp-admin%2F") && b.contains(&format!("root={r} ")),
+        "{b}"
+    );
+    assert!(
+        t.head.contains("X-Powered-By: mock")
+            && t.head
+                .to_ascii_lowercase()
+                .contains("content-type: text/plain")
+    );
 
     // Pretty permalink: front controller, original URI preserved.
     let b = get(addr, "/2026/10/hello-world/?p=2").text();
-    assert!(b.contains(&format!("script={r}/index.php")) && b.contains("uri=/2026/10/hello-world/?p=2"), "{b}");
+    assert!(
+        b.contains(&format!("script={r}/index.php")) && b.contains("uri=/2026/10/hello-world/?p=2"),
+        "{b}"
+    );
 
     // PATH_INFO split.
     let b = get(addr, "/index.php/foo/bar").text();
-    assert!(b.contains("name=/index.php") && b.contains("path_info=/foo/bar"), "{b}");
+    assert!(
+        b.contains("name=/index.php") && b.contains("path_info=/foo/bar"),
+        "{b}"
+    );
 
     // Directory indexes.
-    assert!(get(addr, "/").text().contains(&format!("script={r}/index.php")));
-    assert!(get(addr, "/wp-admin/").text().contains(&format!("script={r}/wp-admin/index.php")));
-    assert!(get(addr, "/wp-admin").text().contains(&format!("script={r}/wp-admin/index.php")));
+    assert!(get(addr, "/")
+        .text()
+        .contains(&format!("script={r}/index.php")));
+    assert!(get(addr, "/wp-admin/")
+        .text()
+        .contains(&format!("script={r}/wp-admin/index.php")));
+    assert!(get(addr, "/wp-admin")
+        .text()
+        .contains(&format!("script={r}/wp-admin/index.php")));
 
     let before = fpm.hits.load(Ordering::SeqCst);
     // Static files never reach PHP.
@@ -302,13 +353,25 @@ fn wordpress_routing() {
     assert_eq!((jpg.status, jpg.text().as_str()), (200, "JPEGDATA"));
     // Missing / denied / hidden scripts and files never reach PHP either.
     assert_eq!(get(addr, "/nope.php").status, 404);
-    assert_eq!(get(addr, "/style.css/x.php").status, 404, "must not run style.css");
-    assert_eq!(get(addr, "/wp-content/uploads/evil.php").status, 404, "no execution in uploads");
+    assert_eq!(
+        get(addr, "/style.css/x.php").status,
+        404,
+        "must not run style.css"
+    );
+    assert_eq!(
+        get(addr, "/wp-content/uploads/evil.php").status,
+        404,
+        "no execution in uploads"
+    );
     assert_eq!(get(addr, "/wp-content/uploads/pic.jpg/x.php").status, 404);
     assert_eq!(get(addr, "/.git/config").status, 404);
     assert_eq!(get(addr, "/%2e%2e/etc/passwd").status, 400);
     assert_eq!(get(addr, "/a%00.php").status, 400);
-    assert_eq!(fpm.hits.load(Ordering::SeqCst), before, "none of those touched the application");
+    assert_eq!(
+        fpm.hits.load(Ordering::SeqCst),
+        before,
+        "none of those touched the application"
+    );
 
     // Built-in endpoints still win.
     assert_eq!(get(addr, "/health").text(), "ok\n");
@@ -320,7 +383,13 @@ fn wordpress_routing() {
 fn post_body_headers_and_spoofing() {
     let root = make_site("post");
     let fpm = spawn_fpm(echo_app());
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 5)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+    ) else {
+        return;
+    };
 
     let r = http(
         addr,
@@ -336,11 +405,22 @@ fn post_body_headers_and_spoofing() {
     );
     assert_eq!(r.status, 200);
     let b = r.text();
-    assert!(b.contains("method=POST") && b.contains("len=20") && b.contains("stdin=log=admin&pwd=secret"), "{b}");
+    assert!(
+        b.contains("method=POST")
+            && b.contains("len=20")
+            && b.contains("stdin=log=admin&pwd=secret"),
+        "{b}"
+    );
     assert!(b.contains("ctype=application/x-www-form-urlencoded"), "{b}");
-    assert!(b.contains("cookie=wordpress_test_cookie=WP+Cookie+check"), "{b}");
+    assert!(
+        b.contains("cookie=wordpress_test_cookie=WP+Cookie+check"),
+        "{b}"
+    );
     assert!(b.contains("remote=127.0.0.1"), "{b}");
-    assert!(b.contains("xff=- ") && b.contains("proxy=- "), "client X-Forwarded-For / Proxy must not reach PHP: {b}");
+    assert!(
+        b.contains("xff=- ") && b.contains("proxy=- "),
+        "client X-Forwarded-For / Proxy must not reach PHP: {b}"
+    );
     assert!(b.contains("https=- "), "plain HTTP listener: {b}");
 }
 
@@ -354,9 +434,21 @@ fn large_request_and_response() {
         Answer::Cgi(out)
     });
     let fpm = spawn_fpm(big_resp);
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 10)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 10)],
+        Config::default(),
+    ) else {
+        return;
+    };
     let upload = vec![b'u'; 200_000]; // > 3 STDIN records
-    let r = http(addr, "POST", "/wp-login.php", &[("Content-Type", "application/octet-stream")], &upload);
+    let r = http(
+        addr,
+        "POST",
+        "/wp-login.php",
+        &[("Content-Type", "application/octet-stream")],
+        &upload,
+    );
     assert_eq!(r.status, 200);
     assert_eq!(r.body.len(), 300_000 + "|200000".len());
     assert!(r.body.ends_with(b"zzz|200000"));
@@ -378,12 +470,23 @@ fn status_redirect_and_multiple_cookies() {
         }
     });
     let fpm = spawn_fpm(app);
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 5)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+    ) else {
+        return;
+    };
 
     let r = get(addr, "/index.php/redirect");
     assert_eq!(r.status, 302);
     assert!(r.head.contains("Location: /wp-admin/"));
-    assert_eq!(r.header_count("set-cookie"), 2, "both cookies survive: {}", r.head);
+    assert_eq!(
+        r.header_count("set-cookie"),
+        2,
+        "both cookies survive: {}",
+        r.head
+    );
 
     let r = get(addr, "/index.php/gone");
     assert_eq!((r.status, r.text().as_str()), (410, "it is gone"));
@@ -400,7 +503,13 @@ fn status_redirect_and_multiple_cookies() {
 fn head_requests_have_no_body() {
     let root = make_site("head");
     let fpm = spawn_fpm(echo_app());
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 5)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+    ) else {
+        return;
+    };
     let r = http(addr, "HEAD", "/index.php", &[], b"");
     assert_eq!(r.status, 200);
     assert!(r.body.is_empty());
@@ -420,12 +529,26 @@ fn broken_applications_give_502() {
         } else if uri.contains("empty") {
             Answer::Cgi(Vec::new())
         } else {
-            Answer::CgiWithStderr(b"Content-Type: text/plain\r\n\r\nfine".to_vec(), b"PHP Warning: something".to_vec())
+            Answer::CgiWithStderr(
+                b"Content-Type: text/plain\r\n\r\nfine".to_vec(),
+                b"PHP Warning: something".to_vec(),
+            )
         }
     });
     let fpm = spawn_fpm(app);
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 5)], Config::default()) else { return };
-    for p in ["/index.php/garbage", "/index.php/truncated", "/index.php/nohead", "/index.php/empty"] {
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+    ) else {
+        return;
+    };
+    for p in [
+        "/index.php/garbage",
+        "/index.php/truncated",
+        "/index.php/nohead",
+        "/index.php/empty",
+    ] {
         assert_eq!(get(addr, p).status, 502, "{p}");
     }
     // stderr output does not break an otherwise good response.
@@ -440,7 +563,13 @@ fn dead_application_gives_502_and_slow_one_504() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap()
     };
-    let Some(addr) = start(&root, vec![php_route(&root, vec![dead.into()], 2)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![dead.into()], 2)],
+        Config::default(),
+    ) else {
+        return;
+    };
     assert_eq!(get(addr, "/index.php").status, 502);
 
     let slow: Arc<App> = Arc::new(|_, _| {
@@ -448,7 +577,13 @@ fn dead_application_gives_502_and_slow_one_504() {
         Answer::Cgi(b"Content-Type: text/plain\r\n\r\nlate".to_vec())
     });
     let fpm = spawn_fpm(slow);
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 1)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 1)],
+        Config::default(),
+    ) else {
+        return;
+    };
     assert_eq!(get(addr, "/index.php").status, 504);
 }
 
@@ -460,13 +595,19 @@ fn failover_to_a_second_application_server() {
         l.local_addr().unwrap()
     };
     let fpm = spawn_fpm(echo_app());
-    let Some(addr) =
-        start(&root, vec![php_route(&root, vec![dead.into(), fpm.addr.into()], 3)], Config::default())
-    else {
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![dead.into(), fpm.addr.into()], 3)],
+        Config::default(),
+    ) else {
         return;
     };
     for _ in 0..6 {
-        assert_eq!(get(addr, "/index.php").status, 200, "GET fails over past the dead upstream");
+        assert_eq!(
+            get(addr, "/index.php").status,
+            200,
+            "GET fails over past the dead upstream"
+        );
     }
     assert!(fpm.hits.load(Ordering::SeqCst) >= 6);
 }
@@ -476,8 +617,11 @@ fn unix_socket_upstream() {
     let root = make_site("unix");
     let sock = std::env::temp_dir().join(format!("vajra-fpm-{}.sock", std::process::id()));
     let hits = spawn_fpm_unix(&sock, echo_app());
-    let Some(addr) = start(&root, vec![php_route(&root, vec![UpAddr::Unix(sock.clone())], 5)], Config::default())
-    else {
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![UpAddr::Unix(sock.clone())], 5)],
+        Config::default(),
+    ) else {
         return;
     };
     let r = get(addr, "/index.php/via/unix");
@@ -491,18 +635,32 @@ fn unix_socket_upstream() {
 fn many_concurrent_requests() {
     let root = make_site("conc");
     let fpm = spawn_fpm(echo_app());
-    let Some(addr) = start(&root, vec![php_route(&root, vec![fpm.addr.into()], 10)], Config::default()) else { return };
+    let Some(addr) = start(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 10)],
+        Config::default(),
+    ) else {
+        return;
+    };
     let handles: Vec<_> = (0..64)
         .map(|i| {
             std::thread::spawn(move || {
                 let r = get(addr, &format!("/index.php/n{i}?i={i}"));
                 assert_eq!(r.status, 200);
-                assert!(r.text().contains(&format!("path_info=/n{i} ")), "{}", r.text());
+                assert!(
+                    r.text().contains(&format!("path_info=/n{i} ")),
+                    "{}",
+                    r.text()
+                );
             })
         })
         .collect();
     for h in handles {
         h.join().unwrap();
     }
-    assert_eq!(fpm.hits.load(Ordering::SeqCst), 64, "one FastCGI connection per request");
+    assert_eq!(
+        fpm.hits.load(Ordering::SeqCst),
+        64,
+        "one FastCGI connection per request"
+    );
 }

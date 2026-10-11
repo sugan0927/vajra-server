@@ -63,7 +63,14 @@ impl OpenFile {
         head_extra.extend_from_slice(&lm);
         head_extra.extend_from_slice(b"\r\n");
 
-        Self { file, size, ctype, etag, head_extra, last_modified: lm }
+        Self {
+            file,
+            size,
+            ctype,
+            etag,
+            head_extra,
+            last_modified: lm,
+        }
     }
 
     #[inline]
@@ -74,7 +81,12 @@ impl OpenFile {
     /// A file-shaped value of `size` bytes for protocol tests (reads are simulated).
     #[cfg(test)]
     pub fn for_test(size: u64) -> Self {
-        Self::new(File::open("/dev/null").expect("/dev/null"), size, 0, "application/octet-stream")
+        Self::new(
+            File::open("/dev/null").expect("/dev/null"),
+            size,
+            0,
+            "application/octet-stream",
+        )
     }
 }
 
@@ -135,7 +147,13 @@ impl FileCache {
                     // Crude but bounded. In-flight transfers keep their Rc alive.
                     self.map.clear();
                 }
-                self.map.insert(raw.to_owned(), Entry { file: Rc::clone(&f), checked_at: self.now });
+                self.map.insert(
+                    raw.to_owned(),
+                    Entry {
+                        file: Rc::clone(&f),
+                        checked_at: self.now,
+                    },
+                );
                 Lookup::Found(f)
             }
             other => {
@@ -193,7 +211,12 @@ impl FileCache {
             _ => return Lookup::NotFound,
         };
 
-        Lookup::Found(Rc::new(OpenFile::new(file, md.len(), md.mtime(), mime_for(&canon))))
+        Lookup::Found(Rc::new(OpenFile::new(
+            file,
+            md.len(),
+            md.mtime(),
+            mime_for(&canon),
+        )))
     }
 }
 
@@ -298,7 +321,9 @@ mod tests {
                 assert_eq!(f.size, 5);
                 assert_eq!(f.ctype, "text/plain; charset=utf-8");
                 assert!(f.etag.starts_with('"'));
-                assert!(std::str::from_utf8(&f.head_extra).unwrap().contains("Last-Modified: "));
+                assert!(std::str::from_utf8(&f.head_extra)
+                    .unwrap()
+                    .contains("Last-Modified: "));
             }
             other => panic!("{other:?}"),
         }
@@ -320,7 +345,10 @@ mod tests {
         let (_r, mut c) = setup("trav");
         assert!(matches!(c.lookup("/../etc/passwd"), Lookup::BadRequest));
         assert!(matches!(c.lookup("/%2e%2e/etc/passwd"), Lookup::BadRequest));
-        assert!(matches!(c.lookup("/sub/..%2f..%2fetc/passwd"), Lookup::BadRequest));
+        assert!(matches!(
+            c.lookup("/sub/..%2f..%2fetc/passwd"),
+            Lookup::BadRequest
+        ));
         assert!(matches!(c.lookup("/a%00.txt"), Lookup::BadRequest));
         assert!(matches!(c.lookup("no-leading-slash"), Lookup::BadRequest));
     }
@@ -338,12 +366,21 @@ mod tests {
     fn cache_hits_share_the_same_open_file() {
         let (_r, mut c) = setup("hit");
         c.set_now(100);
-        let a = match c.lookup("/a.txt") { Lookup::Found(f) => f, _ => panic!() };
+        let a = match c.lookup("/a.txt") {
+            Lookup::Found(f) => f,
+            _ => panic!(),
+        };
         c.set_now(101); // within the 2s TTL
-        let b = match c.lookup("/a.txt") { Lookup::Found(f) => f, _ => panic!() };
+        let b = match c.lookup("/a.txt") {
+            Lookup::Found(f) => f,
+            _ => panic!(),
+        };
         assert!(Rc::ptr_eq(&a, &b));
         c.set_now(110); // expired: re-opened
-        let d = match c.lookup("/a.txt") { Lookup::Found(f) => f, _ => panic!() };
+        let d = match c.lookup("/a.txt") {
+            Lookup::Found(f) => f,
+            _ => panic!(),
+        };
         assert!(!Rc::ptr_eq(&a, &d));
     }
 
