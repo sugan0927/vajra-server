@@ -48,6 +48,10 @@ pub struct Ctx<'a> {
     pub rate_limit: Option<&'a mut crate::rate_limit::RateLimiter>,
     /// Compression policy from the running config. `None` disables.
     pub compression: Option<&'a crate::compress::CompressionSettings>,
+
+    /// FastCGI response cache, if enabled on this worker.
+    /// `None` on requests that never reach a FastCGI target.
+    pub fastcgi_cache: Option<&'a mut crate::cache::fastcgi::FastcgiCache>,
 }
 
 /// Case-insensitive lookup of a header value as `&str`.
@@ -994,6 +998,8 @@ mod tests {
             access: None,
             rate_limit: None,
             compression: None,
+
+            fastcgi_cache: None,
         };
         let o = process(input.as_bytes(), &mut out, DATE, &mut ctx);
         (o, String::from_utf8(out).unwrap())

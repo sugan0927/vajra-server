@@ -89,6 +89,7 @@ fn fourth_request_after_burst_gets_429_with_retry_after() {
             access: None,
             rate_limit: Some(&mut rl),
             compression: None,
+            fastcgi_cache: None,
         };
         let mut out = Vec::new();
         let _ = http::process(GET_ROOT, &mut out, &DATE, &mut ctx);
@@ -114,6 +115,7 @@ fn fourth_request_after_burst_gets_429_with_retry_after() {
         access: None,
         rate_limit: Some(&mut rl),
         compression: None,
+        fastcgi_cache: None,
     };
     let mut out = Vec::new();
     let _ = http::process(GET_ROOT, &mut out, &DATE, &mut ctx);
@@ -160,6 +162,7 @@ fn whitelisted_ip_is_never_denied_and_creates_no_buckets() {
             access: None,
             rate_limit: Some(&mut rl),
             compression: None,
+            fastcgi_cache: None,
         };
         let mut out = Vec::new();
         let _ = http::process(GET_ROOT, &mut out, &DATE, &mut ctx);
@@ -213,6 +216,7 @@ fn per_route_override_has_independent_budget_through_http() {
             access: None,
             rate_limit: Some(&mut rl),
             compression: None,
+            fastcgi_cache: None,
         };
         let mut out = Vec::new();
         let _ = http::process(GET_API, &mut out, &DATE, &mut ctx);
@@ -241,6 +245,7 @@ fn per_route_override_has_independent_budget_through_http() {
             access: None,
             rate_limit: Some(&mut rl),
             compression: None,
+            fastcgi_cache: None,
         };
         let mut out = Vec::new();
         let _ = http::process(GET_API, &mut out, &DATE, &mut ctx);
@@ -267,6 +272,7 @@ fn per_route_override_has_independent_budget_through_http() {
             access: None,
             rate_limit: Some(&mut rl),
             compression: None,
+            fastcgi_cache: None,
         };
         let mut out = Vec::new();
         let _ = http::process(GET_ROOT, &mut out, &DATE, &mut ctx);
@@ -327,6 +333,7 @@ fn access_deny_wins_over_rate_limit_and_does_not_consume_budget() {
             access: Some(&access),
             rate_limit: Some(&mut rl),
             compression: None,
+            fastcgi_cache: None,
         };
         let mut out = Vec::new();
         let _ = http::process(GET_ROOT, &mut out, &DATE, &mut ctx);

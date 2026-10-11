@@ -70,6 +70,7 @@ fn drive(
         access: Some(access),
         rate_limit: Some(rl),
         compression: None,
+        fastcgi_cache: None,
     };
     let mut out = Vec::new();
     let _ = http::process(req, &mut out, &DATE, &mut ctx);

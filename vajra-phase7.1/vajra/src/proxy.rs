@@ -392,6 +392,10 @@ pub struct ProxySpec {
     pub host: String,
     /// Raw `Cookie` header value, if present.
     pub cookie: Option<String>,
+    /// `Some(key)` when this FastCGI request was a cache MISS: the key
+    /// to store the eventual response under. `None` when the request is
+    /// not FastCGI, cache is disabled, or a bypass rule fired.
+    pub fcgi_cache_key: Option<Vec<u8>>,
 }
 
 pub struct ReqParts<'a> {
@@ -453,6 +457,7 @@ pub fn make_spec(table: &ProxyTable, route: usize, p: &ReqParts) -> ProxySpec {
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(b"cookie"))
             .map(|(_, v)| String::from_utf8_lossy(v).into_owned()),
+        fcgi_cache_key: None,
     }
 }
 

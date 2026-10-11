@@ -1259,6 +1259,11 @@ impl Worker {
             access: Some(&self.access),
             rate_limit: Some(&mut self.rate_limit),
             compression: Some(&self.compression),
+            fastcgi_cache: if self.fastcgi_cache.is_enabled() {
+                Some(&mut self.fastcgi_cache)
+            } else {
+                None
+            },
         };
         let outcome = if use_rbuf {
             http::process(&c.rbuf.as_slice()[..fast], &mut c.out, date, &mut ctx)
@@ -2862,6 +2867,7 @@ mod tests {
             fcgi: false,
             host: String::new(),
             cookie: None,
+            fcgi_cache_key: None,
         };
         ProxyJob::new(spec, st, None, 0)
     }
