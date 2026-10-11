@@ -159,3 +159,33 @@ target a specific global rate X, set `requests_per_second = X / N`.
 
 Reload preserves existing buckets and only refreshes
 `RateLimiter::settings`.
+
+## Update — IPv6 /64 aggregation + soft warnings (Day 12.1)
+
+### `aggregate_ipv6_64` (default `false`)
+
+When enabled, IPv6 client addresses are masked to their /64 prefix
+before bucket lookup, so all addresses within one /64 share a single
+token bucket. This bounds per-client memory when a single attacker
+rotates source addresses inside their delegated /64.
+
+- Whitelist matching is unaffected: it always runs against the
+  *original* address, before aggregation. Whitelisting
+  `2001:db8::1` whitelists exactly that address, not its /64.
+- IPv4 keys are unchanged.
+- Default `false` for backward compatibility; flip it in
+  `[rate_limit]` to opt in.
+
+    [rate_limit]
+    aggregate_ipv6_64 = true
+
+### Soft warnings at startup
+
+`build_rate_limit` now emits `eprintln!` warnings (fatal validation is
+unchanged) for:
+
+- `cleanup_interval_secs = 0` while `enabled = true` — buckets grow
+  until `max_tracked_ips` is hit.
+- `burst < requests_per_second` — sustained throughput is burst-limited.
+
+Logs only; they do not fail startup.

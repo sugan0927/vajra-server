@@ -15,6 +15,7 @@ fn full_burst_over_time_simulates_a_client() {
         whitelist_ips: vec![],
         max_tracked_ips: 10,
         cleanup_interval_secs: 60,
+        aggregate_ipv6_64: false,
     });
     let t0 = Instant::now();
     let ip: IpAddr = "9.9.9.9".parse().unwrap();
@@ -36,6 +37,7 @@ fn distinct_ips_get_independent_buckets() {
         whitelist_ips: vec![],
         max_tracked_ips: 10,
         cleanup_interval_secs: 60,
+        aggregate_ipv6_64: false,
     });
     let now = Instant::now();
     let a: IpAddr = "1.1.1.1".parse().unwrap();

@@ -13,6 +13,7 @@ fn settings(rps: u32, burst: u32, max: usize) -> RateLimitSettings {
         whitelist_ips: vec![],
         max_tracked_ips: max,
         cleanup_interval_secs: 60,
+        aggregate_ipv6_64: false,
     }
 }
 
@@ -158,4 +159,41 @@ fn config_validation() {
     })
     .unwrap_err();
     assert!(err.contains("whitelist_ips"), "{err}");
+}
+
+#[test]
+fn bucket_key_masks_ipv6_only_when_enabled() {
+    use vajra::rate_limit::bucket_key;
+    let a: IpAddr = "2001:db8::1".parse().unwrap();
+    assert_eq!(bucket_key(a, false), a);
+    let masked = bucket_key(a, true);
+    assert_eq!(masked, "2001:db8::".parse::<IpAddr>().unwrap());
+    let v4: IpAddr = "1.2.3.4".parse().unwrap();
+    assert_eq!(bucket_key(v4, true), v4);
+}
+
+#[test]
+fn ipv6_64_aggregation_shares_bucket() {
+    let mut cfg = settings(1, 1, 100);
+    cfg.aggregate_ipv6_64 = true;
+    let mut rl = RateLimiter::new(cfg);
+    let t0 = Instant::now();
+    let a: IpAddr = "2001:db8::1".parse().unwrap();
+    let b: IpAddr = "2001:db8::2".parse().unwrap();
+    let c: IpAddr = "2001:db8:0:1::1".parse().unwrap();
+    assert_eq!(rl.check(a, t0), Decision::Allow);
+    assert!(matches!(rl.check(b, t0), Decision::Deny { .. }));
+    assert_eq!(rl.check(c, t0), Decision::Allow);
+    assert_eq!(rl.buckets.len(), 2);
+}
+
+#[test]
+fn ipv6_aggregation_off_by_default() {
+    let mut rl = RateLimiter::new(settings(1, 1, 100));
+    let t0 = Instant::now();
+    let a: IpAddr = "2001:db8::1".parse().unwrap();
+    let b: IpAddr = "2001:db8::2".parse().unwrap();
+    assert_eq!(rl.check(a, t0), Decision::Allow);
+    assert_eq!(rl.check(b, t0), Decision::Allow);
+    assert_eq!(rl.buckets.len(), 2);
 }

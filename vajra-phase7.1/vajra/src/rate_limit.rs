@@ -2,7 +2,7 @@
 //! See `docs/rate-limiting.md` for the design rationale.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::Instant;
 
 use ipnet::IpNet;
@@ -16,6 +16,15 @@ pub struct RateLimitSettings {
     pub whitelist_ips: Vec<IpNet>,
     pub max_tracked_ips: usize,
     pub cleanup_interval_secs: u64,
+    /// Aggregate IPv6 clients by their /64 prefix before bucket lookup.
+    ///
+    /// A /64 is the smallest block typically delegated to a single end
+    /// site, so this bounds per-client memory when one attacker rotates
+    /// source addresses within their /64. IPv4 is unaffected.
+    ///
+    /// Whitelist matching always runs against the *original* address,
+    /// before aggregation. Default `false`.
+    pub aggregate_ipv6_64: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -32,6 +41,8 @@ pub struct RawRateLimit {
     pub max_tracked_ips: usize,
     #[serde(default)]
     pub cleanup_interval_secs: u64,
+    #[serde(default)]
+    pub aggregate_ipv6_64: bool,
 }
 
 pub fn build_rate_limit(raw: RawRateLimit) -> Result<RateLimitSettings, String> {
@@ -54,6 +65,17 @@ pub fn build_rate_limit(raw: RawRateLimit) -> Result<RateLimitSettings, String> 
         if raw.max_tracked_ips == 0 {
             return Err("[rate_limit] max_tracked_ips must be >= 1 when enabled".into());
         }
+        if raw.cleanup_interval_secs == 0 {
+            eprintln!(
+                "vajra: warning: [rate_limit] cleanup_interval_secs = 0 with enabled = true; buckets will grow until max_tracked_ips is reached"
+            );
+        }
+        if raw.burst < raw.requests_per_second {
+            eprintln!(
+                "vajra: warning: [rate_limit] burst ({}) < requests_per_second ({}); sustained throughput is burst-limited",
+                raw.burst, raw.requests_per_second
+            );
+        }
     }
 
     Ok(RateLimitSettings {
@@ -63,7 +85,29 @@ pub fn build_rate_limit(raw: RawRateLimit) -> Result<RateLimitSettings, String> 
         whitelist_ips,
         max_tracked_ips: raw.max_tracked_ips,
         cleanup_interval_secs: raw.cleanup_interval_secs,
+        aggregate_ipv6_64: raw.aggregate_ipv6_64,
     })
+}
+
+/// Canonical bucket key for `ip`.
+///
+/// When `aggregate_ipv6_64` is set, IPv6 addresses are masked to their
+/// /64 prefix (low 64 bits zeroed) so every address in one /64 shares a
+/// single bucket. IPv4 is returned unchanged.
+pub fn bucket_key(ip: IpAddr, aggregate_ipv6_64: bool) -> IpAddr {
+    if !aggregate_ipv6_64 {
+        return ip;
+    }
+    match ip {
+        IpAddr::V6(v6) => {
+            let mut o = v6.octets();
+            for b in &mut o[8..] {
+                *b = 0;
+            }
+            IpAddr::V6(Ipv6Addr::from(o))
+        }
+        v4 => v4,
+    }
 }
 
 #[derive(Debug)]
@@ -123,16 +167,17 @@ impl RateLimiter {
             return Decision::Allow;
         }
 
+        let key = bucket_key(ip, self.settings.aggregate_ipv6_64);
         let rps = self.settings.requests_per_second as f64;
         let burst = self.settings.burst as f64;
 
-        if !self.buckets.contains_key(&ip) && self.buckets.len() >= self.settings.max_tracked_ips {
+        if !self.buckets.contains_key(&key) && self.buckets.len() >= self.settings.max_tracked_ips {
             return Decision::Deny {
                 retry_after_secs: 1,
             };
         }
 
-        let bucket = self.buckets.entry(ip).or_insert_with(|| Bucket {
+        let bucket = self.buckets.entry(key).or_insert_with(|| Bucket {
             tokens: burst,
             last_refill: now,
             last_seen: now,
