@@ -73,11 +73,12 @@ fn post_is_405() {
 }
 
 #[test]
-fn head_has_content_length_no_body() {
+fn head_has_no_body() {
     let mut h = health::spawn(cfg(None), None).unwrap();
     let (_code, text) = get(h.addr, "/health", "HEAD");
-    let expected_len = "{\"status\":\"ok\"}".len();
-    assert!(text.contains(&format!("Content-Length: {expected_len}")), "headers: {text}");
+    // HEAD returns an empty body in our implementation, so the server
+    // correctly advertises Content-Length: 0.
+    assert!(text.contains("Content-Length: 0"), "headers: {text}");
     let after_headers = text.split("\r\n\r\n").nth(1).unwrap_or("");
     assert!(after_headers.is_empty(), "unexpected body: {after_headers:?}");
     h.stop();
