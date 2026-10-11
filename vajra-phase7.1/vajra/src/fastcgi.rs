@@ -151,10 +151,25 @@ pub struct CgiRequest<'a> {
 
 /// Headers that never become `HTTP_*` variables.
 const DROP_HEADERS: &[&str] = &[
-    "connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "transfer-encoding", "upgrade", "expect", "host", "content-length",
-    "content-type", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host",
-    "x-forwarded-port", "x-real-ip", "forwarded",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "expect",
+    "host",
+    "content-length",
+    "content-type",
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-real-ip",
+    "forwarded",
     // httpoxy: a `Proxy` header would become HTTP_PROXY, which many HTTP clients trust.
     "proxy",
 ];
@@ -164,7 +179,9 @@ pub fn split_host(host: &[u8]) -> (String, Option<u16>) {
     let s = String::from_utf8_lossy(host).into_owned();
     if let Some(rest) = s.strip_prefix('[') {
         if let Some(end) = rest.find(']') {
-            let port = rest[end + 1..].strip_prefix(':').and_then(|p| p.parse().ok());
+            let port = rest[end + 1..]
+                .strip_prefix(':')
+                .and_then(|p| p.parse().ok());
             return (format!("[{}]", &rest[..end]), port);
         }
     }
@@ -224,10 +241,16 @@ pub fn build_request(r: &CgiRequest) -> Vec<u8> {
     p.add(b"QUERY_STRING", r.query.as_bytes());
     p.add(b"DOCUMENT_ROOT", r.document_root.as_bytes());
     let root = r.document_root.trim_end_matches('/');
-    p.add(b"SCRIPT_FILENAME", format!("{root}{}", r.script_name).as_bytes());
+    p.add(
+        b"SCRIPT_FILENAME",
+        format!("{root}{}", r.script_name).as_bytes(),
+    );
     if !r.path_info.is_empty() {
         p.add(b"PATH_INFO", r.path_info.as_bytes());
-        p.add(b"PATH_TRANSLATED", format!("{root}{}", r.path_info).as_bytes());
+        p.add(
+            b"PATH_TRANSLATED",
+            format!("{root}{}", r.path_info).as_bytes(),
+        );
     }
     if let Some(ip) = r.remote_addr {
         p.add(b"REMOTE_ADDR", ip.to_string().as_bytes());
@@ -254,7 +277,9 @@ pub fn build_request(r: &CgiRequest) -> Vec<u8> {
     // HTTP_*: duplicates are folded (HTTP/2 and HTTP/3 split `cookie` into several fields).
     let mut vars: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (n, v) in r.headers {
-        let Some(var) = http_var_name(n) else { continue };
+        let Some(var) = http_var_name(n) else {
+            continue;
+        };
         match vars.iter_mut().find(|(k, _)| *k == var) {
             Some((k, val)) => {
                 val.extend_from_slice(if k == b"HTTP_COOKIE" { b"; " } else { b", " });
@@ -380,14 +405,17 @@ impl Decoder {
                 }
                 STDERR => {
                     let room = MAX_STDERR.saturating_sub(self.stderr.len());
-                    self.stderr.extend_from_slice(&content[..content.len().min(room)]);
+                    self.stderr
+                        .extend_from_slice(&content[..content.len().min(room)]);
                 }
                 END_REQUEST => {
                     if clen < 8 {
                         break Err(DecodeErr::BadRecord);
                     }
                     self.end = Some(End {
-                        app_status: u32::from_be_bytes([content[0], content[1], content[2], content[3]]),
+                        app_status: u32::from_be_bytes([
+                            content[0], content[1], content[2], content[3],
+                        ]),
                         protocol_status: content[4],
                     });
                     break Ok(());
@@ -434,9 +462,9 @@ fn find_head_end(b: &[u8]) -> Option<(usize, usize)> {
 
 fn is_token(name: &[u8]) -> bool {
     !name.is_empty()
-        && name.iter().all(|&b| {
-            b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-        })
+        && name
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 pub fn reason(status: u16) -> &'static str {
@@ -496,7 +524,10 @@ pub fn cgi_to_http(out: &[u8], head_request: bool) -> Result<Vec<u8>, CgiErr> {
         if line.is_empty() {
             continue;
         }
-        let colon = line.iter().position(|&b| b == b':').ok_or(CgiErr::Malformed)?;
+        let colon = line
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or(CgiErr::Malformed)?;
         let (name, rest) = (&line[..colon], &line[colon + 1..]);
         if !is_token(name) {
             return Err(CgiErr::Malformed);
@@ -595,7 +626,12 @@ mod tests {
         decode_params(&blob)
             .unwrap()
             .into_iter()
-            .map(|(k, v)| (String::from_utf8(k).unwrap(), String::from_utf8_lossy(&v).into_owned()))
+            .map(|(k, v)| {
+                (
+                    String::from_utf8(k).unwrap(),
+                    String::from_utf8_lossy(&v).into_owned(),
+                )
+            })
             .collect()
     }
 
@@ -624,7 +660,10 @@ mod tests {
         let r = records(&wire);
         assert_eq!(r[0].0, BEGIN_REQUEST);
         assert_eq!(&r[0].1[..3], &[0, 1, 0], "responder, no keep-conn");
-        assert!(r.iter().any(|(t, c)| *t == PARAMS && c.is_empty()), "empty PARAMS terminator");
+        assert!(
+            r.iter().any(|(t, c)| *t == PARAMS && c.is_empty()),
+            "empty PARAMS terminator"
+        );
         let stdin: Vec<_> = r.iter().filter(|(t, _)| *t == STDIN).collect();
         assert_eq!(stdin.len(), 2);
         assert_eq!(stdin[0].1, b"hello");
@@ -635,8 +674,11 @@ mod tests {
     fn large_body_is_chunked_without_padding() {
         let body = vec![7u8; MAX_CHUNK * 2 + 5];
         let wire = build_request(&req(&[], &body));
-        let sizes: Vec<usize> =
-            records(&wire).into_iter().filter(|(t, _)| *t == STDIN).map(|(_, c)| c.len()).collect();
+        let sizes: Vec<usize> = records(&wire)
+            .into_iter()
+            .filter(|(t, _)| *t == STDIN)
+            .map(|(_, c)| c.len())
+            .collect();
         assert_eq!(sizes, [MAX_CHUNK, MAX_CHUNK, 5, 0]);
     }
 
@@ -655,7 +697,10 @@ mod tests {
             (b"connection", b"keep-alive"),
         ];
         let p = params_of(&build_request(&req(hdrs, b"a=b")));
-        assert_eq!(get(&p, "SCRIPT_FILENAME"), Some("/var/www/html/blog/index.php"));
+        assert_eq!(
+            get(&p, "SCRIPT_FILENAME"),
+            Some("/var/www/html/blog/index.php")
+        );
         assert_eq!(get(&p, "SCRIPT_NAME"), Some("/blog/index.php"));
         assert_eq!(get(&p, "PATH_INFO"), Some("/x"));
         assert_eq!(get(&p, "PATH_TRANSLATED"), Some("/var/www/html/x"));
@@ -668,12 +713,21 @@ mod tests {
         assert_eq!(get(&p, "SERVER_PORT"), Some("8443"));
         assert_eq!(get(&p, "REMOTE_ADDR"), Some("192.0.2.7"));
         assert_eq!(get(&p, "CONTENT_LENGTH"), Some("3"));
-        assert_eq!(get(&p, "CONTENT_TYPE"), Some("application/x-www-form-urlencoded"));
+        assert_eq!(
+            get(&p, "CONTENT_TYPE"),
+            Some("application/x-www-form-urlencoded")
+        );
         assert_eq!(get(&p, "HTTP_HOST"), Some("example.com:8443"));
         assert_eq!(get(&p, "HTTP_COOKIE"), Some("a=1; b=2"));
         assert_eq!(get(&p, "HTTP_ACCEPT"), Some("x, y"));
         assert_eq!(get(&p, "HTTP_X_CUSTOM_THING"), Some("1"));
-        for bad in ["HTTP_PROXY", "HTTP_X_UNDER", "HTTP_X_FORWARDED_FOR", "HTTP_CONNECTION", "HTTP_CONTENT_TYPE"] {
+        for bad in [
+            "HTTP_PROXY",
+            "HTTP_X_UNDER",
+            "HTTP_X_FORWARDED_FOR",
+            "HTTP_CONNECTION",
+            "HTTP_CONTENT_TYPE",
+        ] {
             assert!(get(&p, bad).is_none(), "{bad} must not be forwarded");
         }
     }
@@ -745,20 +799,25 @@ mod tests {
         assert!(s.contains("Content-Length: 4\r\n") && !s.contains("999"));
         assert!(!s.contains("Status:"));
 
-        let s = String::from_utf8(cgi_to_http(b"Location: /wp-admin/\r\n\r\n", false).unwrap()).unwrap();
+        let s = String::from_utf8(cgi_to_http(b"Location: /wp-admin/\r\n\r\n", false).unwrap())
+            .unwrap();
         assert!(s.starts_with("HTTP/1.1 302 Found\r\n") && s.contains("Location: /wp-admin/"));
 
         let s = String::from_utf8(cgi_to_http(b"Status: 304\n\n", false).unwrap()).unwrap();
         assert!(s.starts_with("HTTP/1.1 304 Not Modified\r\n") && !s.contains("Content-Length"));
 
         // Bare-LF CGI output is accepted.
-        let s = String::from_utf8(cgi_to_http(b"Content-Type: text/plain\n\nbody", false).unwrap()).unwrap();
+        let s = String::from_utf8(cgi_to_http(b"Content-Type: text/plain\n\nbody", false).unwrap())
+            .unwrap();
         assert!(s.ends_with("\r\n\r\nbody"));
     }
 
     #[test]
     fn head_request_drops_body_keeps_length() {
-        let s = String::from_utf8(cgi_to_http(b"Content-Type: text/plain\r\n\r\nabcdef", true).unwrap()).unwrap();
+        let s = String::from_utf8(
+            cgi_to_http(b"Content-Type: text/plain\r\n\r\nabcdef", true).unwrap(),
+        )
+        .unwrap();
         assert!(s.contains("Content-Length: 6\r\n") && s.ends_with("\r\n\r\n"));
     }
 
@@ -776,11 +835,26 @@ mod tests {
     fn malformed_cgi_output() {
         assert_eq!(cgi_to_http(b"", false), Err(CgiErr::Empty));
         assert_eq!(cgi_to_http(b"no blank line", false), Err(CgiErr::Malformed));
-        assert_eq!(cgi_to_http(b"Status: 99\r\n\r\n", false), Err(CgiErr::Malformed));
-        assert_eq!(cgi_to_http(b"Status: abc\r\n\r\n", false), Err(CgiErr::Malformed));
-        assert_eq!(cgi_to_http(b"bad header\r\n\r\n", false), Err(CgiErr::Malformed));
-        assert_eq!(cgi_to_http(b"Bad Name: x\r\n\r\n", false), Err(CgiErr::Malformed));
-        assert_eq!(cgi_to_http(b"X: a\0b\r\n\r\n", false), Err(CgiErr::Malformed));
+        assert_eq!(
+            cgi_to_http(b"Status: 99\r\n\r\n", false),
+            Err(CgiErr::Malformed)
+        );
+        assert_eq!(
+            cgi_to_http(b"Status: abc\r\n\r\n", false),
+            Err(CgiErr::Malformed)
+        );
+        assert_eq!(
+            cgi_to_http(b"bad header\r\n\r\n", false),
+            Err(CgiErr::Malformed)
+        );
+        assert_eq!(
+            cgi_to_http(b"Bad Name: x\r\n\r\n", false),
+            Err(CgiErr::Malformed)
+        );
+        assert_eq!(
+            cgi_to_http(b"X: a\0b\r\n\r\n", false),
+            Err(CgiErr::Malformed)
+        );
         let big = vec![b'a'; MAX_CGI_HEAD + 100];
         assert_eq!(cgi_to_http(&big, false), Err(CgiErr::Malformed));
     }
@@ -788,16 +862,26 @@ mod tests {
     #[test]
     fn decoder_errors_and_limits() {
         let mut d = Decoder::new();
-        assert_eq!(d.feed(&[2, 6, 0, 1, 0, 0, 0, 0], 100), Err(DecodeErr::BadVersion));
+        assert_eq!(
+            d.feed(&[2, 6, 0, 1, 0, 0, 0, 0], 100),
+            Err(DecodeErr::BadVersion)
+        );
 
         let mut d = Decoder::new();
-        assert_eq!(d.feed(&rec(STDOUT, &[b'a'; 50], 0), 40), Err(DecodeErr::TooLarge));
+        assert_eq!(
+            d.feed(&rec(STDOUT, &[b'a'; 50], 0), 40),
+            Err(DecodeErr::TooLarge)
+        );
 
         let mut d = Decoder::new();
-        assert_eq!(d.feed(&rec(END_REQUEST, &[0, 0], 0), 40), Err(DecodeErr::BadRecord));
+        assert_eq!(
+            d.feed(&rec(END_REQUEST, &[0, 0], 0), 40),
+            Err(DecodeErr::BadRecord)
+        );
 
         let mut d = Decoder::new();
-        d.feed(&rec(STDOUT, b"Content-type: x\r\n\r\n", 0), 100).unwrap();
+        d.feed(&rec(STDOUT, b"Content-type: x\r\n\r\n", 0), 100)
+            .unwrap();
         d.feed(&end_rec(2), 100).unwrap();
         assert_eq!(d.end().unwrap().protocol_status, 2);
         assert_eq!(d.take_http(false), Err(CgiErr::Aborted(2)));
@@ -808,7 +892,8 @@ mod tests {
         other[3] = 9;
         d.feed(&other, 100).unwrap();
         d.feed(&rec(99, b"?", 0), 100).unwrap();
-        d.feed(&rec(STDOUT, b"Content-type: x\r\n\r\nok", 0), 100).unwrap();
+        d.feed(&rec(STDOUT, b"Content-type: x\r\n\r\nok", 0), 100)
+            .unwrap();
         d.feed(&end_rec(0), 100).unwrap();
         let s = String::from_utf8(d.take_http(false).unwrap()).unwrap();
         assert!(s.ends_with("\r\n\r\nok"));

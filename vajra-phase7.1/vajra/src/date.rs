@@ -28,7 +28,10 @@ impl Default for DateCache {
 
 impl DateCache {
     pub fn new() -> Self {
-        Self { sec: u64::MAX, buf: [b' '; DATE_LEN] }
+        Self {
+            sec: u64::MAX,
+            buf: [b' '; DATE_LEN],
+        }
     }
 
     /// Unix seconds as of the last [`get`](Self::get) call.

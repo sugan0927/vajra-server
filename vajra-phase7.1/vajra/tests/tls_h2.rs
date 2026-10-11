@@ -55,8 +55,15 @@ fn start(root: &Path, proxies: Vec<ProxySettings>) -> Option<Env> {
 
     std::thread::spawn(move || {
         let tls_cfg = build_server_config(&cert_path, &key_path).expect("tls config");
-        let l = [Listener { fd: sock.as_raw_fd(), tls: true }];
-        let dynamic = Dynamic { static_files: Some(settings), proxies, ..Dynamic::default() };
+        let l = [Listener {
+            fd: sock.as_raw_fd(),
+            tls: true,
+        }];
+        let dynamic = Dynamic {
+            static_files: Some(settings),
+            proxies,
+            ..Dynamic::default()
+        };
         match Worker::new(&l, Config::default(), &dynamic, Some(tls_cfg)) {
             Ok(mut w) => {
                 tx.send(true).unwrap();
@@ -75,28 +82,39 @@ fn start(root: &Path, proxies: Vec<ProxySettings>) -> Option<Env> {
 fn connect(env: &Env, alpn: &[&[u8]]) -> StreamOwned<ClientConnection, TcpStream> {
     let mut roots = RootCertStore::empty();
     roots.add(env.cert_der.clone()).unwrap();
-    let mut cfg = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let mut cfg =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
 
-    let conn = ClientConnection::new(Arc::new(cfg), ServerName::try_from("localhost").unwrap()).unwrap();
+    let conn =
+        ClientConnection::new(Arc::new(cfg), ServerName::try_from("localhost").unwrap()).unwrap();
     let tcp = TcpStream::connect(env.addr).unwrap();
     tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     StreamOwned::new(conn, tcp)
 }
 
 fn split_response(buf: &[u8]) -> (String, Vec<u8>) {
-    let split = buf.windows(4).position(|w| w == b"\r\n\r\n").expect("no header end") + 4;
-    (String::from_utf8_lossy(&buf[..split]).into_owned(), buf[split..].to_vec())
+    let split = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("no header end")
+        + 4;
+    (
+        String::from_utf8_lossy(&buf[..split]).into_owned(),
+        buf[split..].to_vec(),
+    )
 }
 
 fn h1_get(env: &Env, path: &str) -> (String, Vec<u8>) {
     let mut s = connect(env, &[b"http/1.1"]);
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
-        .unwrap();
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes(),
+    )
+    .unwrap();
     let mut buf = Vec::new();
     let _ = s.read_to_end(&mut buf); // a missing close_notify is not what we are testing
     split_response(&buf)
@@ -104,7 +122,9 @@ fn h1_get(env: &Env, path: &str) -> (String, Vec<u8>) {
 
 #[test]
 fn https_http11_small_and_index() {
-    let Some(env) = start(&make_root("h1"), vec![]) else { return };
+    let Some(env) = start(&make_root("h1"), vec![]) else {
+        return;
+    };
     let (head, body) = h1_get(&env, "/a.txt");
     assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
     assert_eq!(body, SMALL);
@@ -116,7 +136,9 @@ fn https_http11_small_and_index() {
 
 #[test]
 fn https_http11_large_file_via_async_reads() {
-    let Some(env) = start(&make_root("h1big"), vec![]) else { return };
+    let Some(env) = start(&make_root("h1big"), vec![]) else {
+        return;
+    };
     let (head, body) = h1_get(&env, "/big.bin");
     assert!(head.starts_with("HTTP/1.1 200 OK"));
     assert_eq!(body.len(), BIG_LEN);
@@ -125,7 +147,9 @@ fn https_http11_large_file_via_async_reads() {
 
 #[test]
 fn alpn_selects_http2_and_http11() {
-    let Some(env) = start(&make_root("alpn"), vec![]) else { return };
+    let Some(env) = start(&make_root("alpn"), vec![]) else {
+        return;
+    };
     let mut s = connect(&env, &[b"h2", b"http/1.1"]);
     s.write_all(b"").unwrap();
     // Force the handshake to complete.
@@ -166,7 +190,7 @@ fn read_frame<R: Read>(r: &mut R) -> std::io::Result<(u8, u8, u32, Vec<u8>)> {
 /// HPACK for a GET using only static-table references and literals.
 fn get_block(path: &str, extra: &[(&str, &str)]) -> Vec<u8> {
     let mut b = vec![0x82, 0x87]; // :method GET, :scheme https
-    // :path (name index 4) literal without indexing
+                                  // :path (name index 4) literal without indexing
     b.push(0x04);
     b.push(path.len() as u8);
     b.extend_from_slice(path.as_bytes());
@@ -204,7 +228,10 @@ fn h2_open(env: &Env) -> StreamOwned<ClientConnection, TcpStream> {
 }
 
 /// Read frames until `want` streams have ended; collect per-stream replies.
-fn h2_collect(s: &mut StreamOwned<ClientConnection, TcpStream>, want: &[u32]) -> Vec<(u32, H2Reply)> {
+fn h2_collect(
+    s: &mut StreamOwned<ClientConnection, TcpStream>,
+    want: &[u32],
+) -> Vec<(u32, H2Reply)> {
     let mut replies: Vec<(u32, H2Reply)> = Vec::new();
     let mut ended = 0;
     while ended < want.len() {
@@ -214,13 +241,24 @@ fn h2_collect(s: &mut StreamOwned<ClientConnection, TcpStream>, want: &[u32]) ->
                 s.write_all(&frame(0x4, 1, 0, &[])).unwrap(); // ACK server SETTINGS
             }
             0x1 => {
-                replies.push((sid, H2Reply { status_byte: payload[0], block: payload, body: Vec::new() }));
+                replies.push((
+                    sid,
+                    H2Reply {
+                        status_byte: payload[0],
+                        block: payload,
+                        body: Vec::new(),
+                    },
+                ));
                 if flags & 1 != 0 {
                     ended += 1;
                 }
             }
             0x0 => {
-                let r = &mut replies.iter_mut().find(|(i, _)| *i == sid).expect("data before headers").1;
+                let r = &mut replies
+                    .iter_mut()
+                    .find(|(i, _)| *i == sid)
+                    .expect("data before headers")
+                    .1;
                 r.body.extend_from_slice(&payload);
                 if flags & 1 != 0 {
                     ended += 1;
@@ -236,10 +274,14 @@ fn h2_collect(s: &mut StreamOwned<ClientConnection, TcpStream>, want: &[u32]) ->
 
 #[test]
 fn http2_small_file_and_404() {
-    let Some(env) = start(&make_root("h2small"), vec![]) else { return };
+    let Some(env) = start(&make_root("h2small"), vec![]) else {
+        return;
+    };
     let mut s = h2_open(&env);
-    s.write_all(&frame(0x1, 0x5, 1, &get_block("/a.txt", &[]))).unwrap(); // END_STREAM|END_HEADERS
-    s.write_all(&frame(0x1, 0x5, 3, &get_block("/nope", &[]))).unwrap();
+    s.write_all(&frame(0x1, 0x5, 1, &get_block("/a.txt", &[])))
+        .unwrap(); // END_STREAM|END_HEADERS
+    s.write_all(&frame(0x1, 0x5, 3, &get_block("/nope", &[])))
+        .unwrap();
     let mut replies = h2_collect(&mut s, &[1, 3]);
     replies.sort_by_key(|(id, _)| *id);
 
@@ -253,9 +295,12 @@ fn http2_small_file_and_404() {
 
 #[test]
 fn http2_large_file_with_flow_control() {
-    let Some(env) = start(&make_root("h2big"), vec![]) else { return };
+    let Some(env) = start(&make_root("h2big"), vec![]) else {
+        return;
+    };
     let mut s = h2_open(&env);
-    s.write_all(&frame(0x1, 0x5, 1, &get_block("/big.bin", &[]))).unwrap();
+    s.write_all(&frame(0x1, 0x5, 1, &get_block("/big.bin", &[])))
+        .unwrap();
     let replies = h2_collect(&mut s, &[1]);
     assert_eq!(replies[0].1.body.len(), BIG_LEN);
     assert!(replies[0].1.body == big_body(), "corrupted over h2");
@@ -263,7 +308,9 @@ fn http2_large_file_with_flow_control() {
 
 #[test]
 fn http2_default_window_stalls_until_window_update() {
-    let Some(env) = start(&make_root("h2fc"), vec![]) else { return };
+    let Some(env) = start(&make_root("h2fc"), vec![]) else {
+        return;
+    };
     // Default 65535-byte windows: the server must stop after 65535 bytes.
     let mut s = connect(&env, &[b"h2"]);
     let mut out = PREFACE.to_vec();
@@ -272,7 +319,9 @@ fn http2_default_window_stalls_until_window_update() {
     s.write_all(&out).unwrap();
 
     let mut got = 0usize;
-    s.sock.set_read_timeout(Some(Duration::from_millis(700))).unwrap();
+    s.sock
+        .set_read_timeout(Some(Duration::from_millis(700)))
+        .unwrap();
     loop {
         match read_frame(&mut s) {
             Ok((0x0, _, _, p)) => got += p.len(),
@@ -283,7 +332,9 @@ fn http2_default_window_stalls_until_window_update() {
     assert_eq!(got, 65_535);
 
     // Open both windows and the rest must arrive intact.
-    s.sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.sock
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     let inc = (BIG_LEN as u32).to_be_bytes();
     s.write_all(&frame(0x8, 0, 0, &inc)).unwrap();
     s.write_all(&frame(0x8, 0, 1, &inc)).unwrap();
@@ -301,12 +352,15 @@ fn http2_default_window_stalls_until_window_update() {
 
 #[test]
 fn http2_multiplexes_concurrent_streams() {
-    let Some(env) = start(&make_root("h2mux"), vec![]) else { return };
+    let Some(env) = start(&make_root("h2mux"), vec![]) else {
+        return;
+    };
     let mut s = h2_open(&env);
     let ids = [1u32, 3, 5, 7, 9];
     for id in ids {
         let path = if id % 4 == 1 { "/big.bin" } else { "/a.txt" };
-        s.write_all(&frame(0x1, 0x5, id, &get_block(path, &[]))).unwrap();
+        s.write_all(&frame(0x1, 0x5, id, &get_block(path, &[])))
+            .unwrap();
     }
     let replies = h2_collect(&mut s, &ids);
     for (id, r) in replies {
@@ -320,17 +374,28 @@ fn http2_multiplexes_concurrent_streams() {
 
 #[test]
 fn http2_conditional_get_returns_304() {
-    let Some(env) = start(&make_root("h2cond"), vec![]) else { return };
+    let Some(env) = start(&make_root("h2cond"), vec![]) else {
+        return;
+    };
     let mut s = h2_open(&env);
-    s.write_all(&frame(0x1, 0x5, 1, &get_block("/a.txt", &[]))).unwrap();
+    s.write_all(&frame(0x1, 0x5, 1, &get_block("/a.txt", &[])))
+        .unwrap();
     let replies = h2_collect(&mut s, &[1]);
     let block = &replies[0].1.block;
     // Pull the etag value out of the literal-encoded response block.
     let pos = block.windows(4).position(|w| w == b"etag").expect("etag");
     let len = block[pos + 4] as usize;
-    let etag = std::str::from_utf8(&block[pos + 5..pos + 5 + len]).unwrap().to_string();
+    let etag = std::str::from_utf8(&block[pos + 5..pos + 5 + len])
+        .unwrap()
+        .to_string();
 
-    s.write_all(&frame(0x1, 0x5, 3, &get_block("/a.txt", &[("if-none-match", &etag)]))).unwrap();
+    s.write_all(&frame(
+        0x1,
+        0x5,
+        3,
+        &get_block("/a.txt", &[("if-none-match", &etag)]),
+    ))
+    .unwrap();
     let replies = h2_collect(&mut s, &[3]);
     assert_eq!(replies[0].1.status_byte, 0x8b, "304 via static index 11");
     assert!(replies[0].1.body.is_empty());
@@ -338,13 +403,19 @@ fn http2_conditional_get_returns_304() {
 
 #[test]
 fn http2_protocol_violation_gets_goaway() {
-    let Some(env) = start(&make_root("h2bad"), vec![]) else { return };
+    let Some(env) = start(&make_root("h2bad"), vec![]) else {
+        return;
+    };
     let mut s = connect(&env, &[b"h2"]);
     s.write_all(b"PRI * HTTP/2.0\r\n\r\nXX\r\n\r\n").unwrap(); // corrupt preface
     loop {
         match read_frame(&mut s) {
             Ok((0x7, _, _, p)) => {
-                assert_eq!(u32::from_be_bytes([p[4], p[5], p[6], p[7]]), 1, "PROTOCOL_ERROR");
+                assert_eq!(
+                    u32::from_be_bytes([p[4], p[5], p[6], p[7]]),
+                    1,
+                    "PROTOCOL_ERROR"
+                );
                 break;
             }
             Ok(_) => continue, // our SETTINGS may precede it
@@ -377,7 +448,10 @@ fn http2_proxy_roundtrip_and_post_body() {
                     let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
                     let cl = head
                         .lines()
-                        .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
                         .unwrap_or(0);
                     while buf.len() < head_end + cl {
                         match c.read(&mut tmp) {
@@ -387,7 +461,10 @@ fn http2_proxy_roundtrip_and_post_body() {
                     }
                     buf.drain(..head_end + cl);
                     let body = format!("upstream saw {cl} bytes");
-                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
                     if c.write_all(resp.as_bytes()).is_err() {
                         return;
                     }
@@ -397,11 +474,14 @@ fn http2_proxy_roundtrip_and_post_body() {
     });
 
     let proxies = vec![ProxySettings::simple("/api/", up_addr, false, 5)];
-    let Some(env) = start(&make_root("h2proxy"), proxies) else { return };
+    let Some(env) = start(&make_root("h2proxy"), proxies) else {
+        return;
+    };
     let mut s = h2_open(&env);
 
     // Stream 1: proxied GET.
-    s.write_all(&frame(0x1, 0x5, 1, &get_block("/api/ping", &[]))).unwrap();
+    s.write_all(&frame(0x1, 0x5, 1, &get_block("/api/ping", &[])))
+        .unwrap();
     // Stream 3: proxied POST with a 30 000-byte body split over DATA frames.
     let mut post = vec![0x83, 0x87]; // :method POST (index 3), :scheme https
     post.push(0x04);

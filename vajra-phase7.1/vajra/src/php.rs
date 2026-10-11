@@ -57,7 +57,9 @@ impl PhpConfig {
 
     fn has_ext(&self, seg: &str) -> bool {
         let l = seg.to_ascii_lowercase();
-        self.extensions.iter().any(|e| l.len() > e.len() && l.ends_with(e.as_str()))
+        self.extensions
+            .iter()
+            .any(|e| l.len() > e.len() && l.ends_with(e.as_str()))
     }
 
     fn denied(&self, script: &str) -> bool {
@@ -66,11 +68,15 @@ impl PhpConfig {
     }
 
     fn is_file(&self, rel: &str) -> bool {
-        std::fs::metadata(self.root.join(rel.trim_start_matches('/'))).map(|m| m.is_file()).unwrap_or(false)
+        std::fs::metadata(self.root.join(rel.trim_start_matches('/')))
+            .map(|m| m.is_file())
+            .unwrap_or(false)
     }
 
     fn is_dir(&self, rel: &str) -> bool {
-        std::fs::metadata(self.root.join(rel.trim_start_matches('/'))).map(|m| m.is_dir()).unwrap_or(false)
+        std::fs::metadata(self.root.join(rel.trim_start_matches('/')))
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
     }
 }
 
@@ -115,7 +121,9 @@ pub fn percent_decode(s: &str) -> Option<String> {
 
 /// `raw` is the request path without the query string.
 pub fn classify(cfg: &PhpConfig, raw: &str) -> Class {
-    let Some(dec) = percent_decode(raw) else { return Class::Bad };
+    let Some(dec) = percent_decode(raw) else {
+        return Class::Bad;
+    };
     if !dec.starts_with('/') || dec.contains('\0') || dec.contains('\\') {
         return Class::Bad;
     }
@@ -146,7 +154,10 @@ pub fn classify(cfg: &PhpConfig, raw: &str) -> Class {
                     pi.push('/');
                 }
             }
-            return Class::Script(Target { script_name: name, path_info: pi });
+            return Class::Script(Target {
+                script_name: name,
+                path_info: pi,
+            });
         }
         saw_missing_script = true;
     }
@@ -164,13 +175,19 @@ pub fn fallback(cfg: &PhpConfig, norm: &str) -> Option<Target> {
         for idx in &cfg.index {
             let name = format!("{base}/{idx}");
             if cfg.is_file(&name) && !cfg.denied(&name) {
-                return Some(Target { script_name: name, path_info: String::new() });
+                return Some(Target {
+                    script_name: name,
+                    path_info: String::new(),
+                });
             }
         }
     }
     let fc = cfg.front_controller.as_ref()?;
     if cfg.is_file(fc) && !cfg.denied(fc) {
-        return Some(Target { script_name: fc.clone(), path_info: String::new() });
+        return Some(Target {
+            script_name: fc.clone(),
+            path_info: String::new(),
+        });
     }
     None
 }
@@ -183,13 +200,27 @@ mod tests {
     fn site(name: &str) -> (PhpConfig, PathBuf) {
         let root = std::env::temp_dir().join(format!("vajra-php-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        for d in ["wp-admin", "wp-content/uploads/2026", "blog", "empty", "assets", ".git"] {
+        for d in [
+            "wp-admin",
+            "wp-content/uploads/2026",
+            "blog",
+            "empty",
+            "assets",
+            ".git",
+        ] {
             fs::create_dir_all(root.join(d)).unwrap();
         }
         for f in [
-            "index.php", "wp-login.php", "wp-admin/index.php", "wp-admin/admin-ajax.php",
-            "wp-content/uploads/2026/evil.php", "wp-content/uploads/2026/pic.jpg", "assets/app.css",
-            "blog/index.php", ".git/config", ".env",
+            "index.php",
+            "wp-login.php",
+            "wp-admin/index.php",
+            "wp-admin/admin-ajax.php",
+            "wp-content/uploads/2026/evil.php",
+            "wp-content/uploads/2026/pic.jpg",
+            "assets/app.css",
+            "blog/index.php",
+            ".git/config",
+            ".env",
         ] {
             fs::write(root.join(f), b"x").unwrap();
         }
@@ -206,11 +237,24 @@ mod tests {
     #[test]
     fn plain_script_and_path_info() {
         let (c, _) = site("a");
-        assert_eq!(script(classify(&c, "/wp-login.php")), ("/wp-login.php".into(), "".into()));
-        assert_eq!(script(classify(&c, "/index.php/2026/hello")), ("/index.php".into(), "/2026/hello".into()));
-        assert_eq!(script(classify(&c, "/wp-admin/admin-ajax.php")).0, "/wp-admin/admin-ajax.php");
+        assert_eq!(
+            script(classify(&c, "/wp-login.php")),
+            ("/wp-login.php".into(), "".into())
+        );
+        assert_eq!(
+            script(classify(&c, "/index.php/2026/hello")),
+            ("/index.php".into(), "/2026/hello".into())
+        );
+        assert_eq!(
+            script(classify(&c, "/wp-admin/admin-ajax.php")).0,
+            "/wp-admin/admin-ajax.php"
+        );
         assert_eq!(script(classify(&c, "/index.php/a/")).1, "/a/");
-        assert_eq!(classify(&c, "/WP-LOGIN.PHP/x"), Class::NotFound, "file names are case-sensitive");
+        assert_eq!(
+            classify(&c, "/WP-LOGIN.PHP/x"),
+            Class::NotFound,
+            "file names are case-sensitive"
+        );
     }
 
     #[test]
@@ -232,16 +276,32 @@ mod tests {
         let (c, _) = site("c");
         assert_eq!(classify(&c, "/nope.php"), Class::NotFound);
         assert_eq!(classify(&c, "/nope.php/more"), Class::NotFound);
-        assert_eq!(classify(&c, "/assets/app.css/x.php"), Class::NotFound, "must not run app.css");
-        assert_eq!(classify(&c, "/wp-content/uploads/2026/pic.jpg/x.php"), Class::NotFound);
+        assert_eq!(
+            classify(&c, "/assets/app.css/x.php"),
+            Class::NotFound,
+            "must not run app.css"
+        );
+        assert_eq!(
+            classify(&c, "/wp-content/uploads/2026/pic.jpg/x.php"),
+            Class::NotFound
+        );
     }
 
     #[test]
     fn uploads_do_not_execute() {
         let (c, _) = site("d");
-        assert_eq!(classify(&c, "/wp-content/uploads/2026/evil.php"), Class::NotFound);
-        assert_eq!(classify(&c, "/WP-Content/Uploads/2026/evil.php"), Class::NotFound);
-        assert!(matches!(classify(&c, "/wp-content/uploads/2026/pic.jpg"), Class::Other(_)));
+        assert_eq!(
+            classify(&c, "/wp-content/uploads/2026/evil.php"),
+            Class::NotFound
+        );
+        assert_eq!(
+            classify(&c, "/WP-Content/Uploads/2026/evil.php"),
+            Class::NotFound
+        );
+        assert!(matches!(
+            classify(&c, "/wp-content/uploads/2026/pic.jpg"),
+            Class::Other(_)
+        ));
     }
 
     #[test]
@@ -250,13 +310,19 @@ mod tests {
         assert_eq!(classify(&c, "/.git/config"), Class::NotFound);
         assert_eq!(classify(&c, "/.env"), Class::NotFound);
         assert_eq!(classify(&c, "/a/.hidden/b"), Class::NotFound);
-        assert!(matches!(classify(&c, "/.well-known/acme-challenge/x"), Class::Other(_)));
+        assert!(matches!(
+            classify(&c, "/.well-known/acme-challenge/x"),
+            Class::Other(_)
+        ));
     }
 
     #[test]
     fn dot_segments_and_slashes_normalise() {
         let (c, _) = site("f");
-        assert_eq!(script(classify(&c, "//wp-admin/./admin-ajax.php")).0, "/wp-admin/admin-ajax.php");
+        assert_eq!(
+            script(classify(&c, "//wp-admin/./admin-ajax.php")).0,
+            "/wp-admin/admin-ajax.php"
+        );
         assert_eq!(classify(&c, "/wp-admin/../index.php"), Class::Bad);
     }
 
@@ -264,12 +330,24 @@ mod tests {
     fn fallback_directory_index_then_front_controller() {
         let (c, _) = site("g");
         let t = fallback(&c, "/").unwrap();
-        assert_eq!((t.script_name.as_str(), t.path_info.as_str()), ("/index.php", ""));
-        assert_eq!(fallback(&c, "/wp-admin").unwrap().script_name, "/wp-admin/index.php");
-        assert_eq!(fallback(&c, "/blog").unwrap().script_name, "/blog/index.php");
+        assert_eq!(
+            (t.script_name.as_str(), t.path_info.as_str()),
+            ("/index.php", "")
+        );
+        assert_eq!(
+            fallback(&c, "/wp-admin").unwrap().script_name,
+            "/wp-admin/index.php"
+        );
+        assert_eq!(
+            fallback(&c, "/blog").unwrap().script_name,
+            "/blog/index.php"
+        );
         // Directory without an index, and pretty permalinks: front controller.
         assert_eq!(fallback(&c, "/empty").unwrap().script_name, "/index.php");
-        assert_eq!(fallback(&c, "/2026/10/hello-world").unwrap().script_name, "/index.php");
+        assert_eq!(
+            fallback(&c, "/2026/10/hello-world").unwrap().script_name,
+            "/index.php"
+        );
     }
 
     #[test]
@@ -289,13 +367,23 @@ mod tests {
         assert_eq!(script(classify(&c, "/old.php5")).0, "/old.php5");
         c.extensions = vec![".php".into()];
         assert!(matches!(classify(&c, "/old.php5"), Class::Other(_)));
-        assert!(matches!(classify(&c, "/.php"), Class::NotFound), "dotfile rule wins");
+        assert!(
+            matches!(classify(&c, "/.php"), Class::NotFound),
+            "dotfile rule wins"
+        );
     }
 
     #[test]
     fn mutation_fuzz_never_panics() {
         let (c, _) = site("j");
-        let seeds = ["/wp-login.php", "/index.php/a/b", "/%2e%2e/x.php", "/a/./b//c.php/d", "/.git/x", "/x%00y"];
+        let seeds = [
+            "/wp-login.php",
+            "/index.php/a/b",
+            "/%2e%2e/x.php",
+            "/a/./b//c.php/d",
+            "/.git/x",
+            "/x%00y",
+        ];
         let mut x = 0x2545f4914f6cdd1du64;
         let mut next = move || {
             x ^= x << 13;
@@ -304,7 +392,9 @@ mod tests {
             x
         };
         for _ in 0..20_000 {
-            let mut b = seeds[(next() % seeds.len() as u64) as usize].as_bytes().to_vec();
+            let mut b = seeds[(next() % seeds.len() as u64) as usize]
+                .as_bytes()
+                .to_vec();
             for _ in 0..(next() % 4) {
                 let i = (next() as usize) % b.len();
                 b[i] = (next() % 128) as u8;

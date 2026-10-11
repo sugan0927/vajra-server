@@ -64,7 +64,8 @@ fn keepalive_serves_many_sequential_requests() {
     let mut buf = [0u8; 4096];
 
     for _ in 0..100 {
-        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
         let n = s.read(&mut buf).unwrap();
         let resp = std::str::from_utf8(&buf[..n]).unwrap();
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
@@ -83,7 +84,9 @@ fn request_split_across_packets() {
 
     let mut buf = [0u8; 4096];
     let n = s.read(&mut buf).unwrap();
-    assert!(std::str::from_utf8(&buf[..n]).unwrap().starts_with("HTTP/1.1 200 OK"));
+    assert!(std::str::from_utf8(&buf[..n])
+        .unwrap()
+        .starts_with("HTTP/1.1 200 OK"));
 }
 
 #[test]

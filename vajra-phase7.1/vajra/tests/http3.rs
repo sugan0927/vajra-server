@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use quinn_proto::crypto::rustls::QuicClientConfig;
 use quinn_proto::{
-    ClientConfig, Connection, ConnectionError, ConnectionHandle, DatagramEvent, Dir, Endpoint, EndpointConfig,
-    Event, ReadError, StreamId,
+    ClientConfig, Connection, ConnectionError, ConnectionHandle, DatagramEvent, Dir, Endpoint,
+    EndpointConfig, Event, ReadError, StreamId,
 };
 
 use vajra::admin::Manager;
@@ -70,7 +70,9 @@ fn spawn_upstream() -> Upstream {
                     let cl = head
                         .lines()
                         .find_map(|l| {
-                            l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
                         })
                         .unwrap_or(0);
                     while buf.len() < end + cl {
@@ -136,15 +138,28 @@ fn start(name: &str, retry: bool, proxies: Vec<ProxySettings>) -> Option<Server>
     let (done_tx, done_rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let qcfg = QuicConfig { retry, ..QuicConfig::default() };
+        let qcfg = QuicConfig {
+            retry,
+            ..QuicConfig::default()
+        };
         let server = quic::server_config(&cert_path, &key_path, &qcfg).expect("quic config");
-        let l = [Listener { fd: tcp_sock.as_raw_fd(), tls: false }];
-        let dynamic = Dynamic { static_files: Some(settings), proxies, ..Dynamic::default() };
+        let l = [Listener {
+            fd: tcp_sock.as_raw_fd(),
+            tls: false,
+        }];
+        let dynamic = Dynamic {
+            static_files: Some(settings),
+            proxies,
+            ..Dynamic::default()
+        };
         match Worker::new(&l, Config::default(), &dynamic, None) {
             Ok(mut w) => {
                 w.attach_control(0, inbox, Duration::from_secs(2));
                 let alt = format!("h3=\":{}\"; ma=60", udp.port());
-                let paths = TlsPaths { cert: cert_path.clone(), key: key_path.clone() };
+                let paths = TlsPaths {
+                    cert: cert_path.clone(),
+                    key: key_path.clone(),
+                };
                 w.attach_quic(udp_sock.as_raw_fd(), qcfg, server, Some(paths), Some(&alt));
                 ready_tx.send(true).unwrap();
                 let r = w.run();
@@ -162,7 +177,13 @@ fn start(name: &str, retry: bool, proxies: Vec<ProxySettings>) -> Option<Server>
         return None;
     }
     let mgr = Arc::new(Manager::new(vec![handle], None, Settings::default()));
-    Some(Server { udp, tcp, cert_der, mgr, done: done_rx })
+    Some(Server {
+        udp,
+        tcp,
+        cert_der,
+        mgr,
+        done: done_rx,
+    })
 }
 
 fn proxy_route(up: SocketAddr, cache: bool) -> ProxySettings {
@@ -183,7 +204,10 @@ struct Response {
 
 impl Response {
     fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -214,17 +238,21 @@ impl Client {
     fn connect(srv: &Server) -> Client {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(srv.cert_der.clone()).unwrap();
-        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         tls.alpn_protocols = vec![b"h3".to_vec()];
         let cc = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()));
 
         let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut ep = Endpoint::new(Arc::new(EndpointConfig::default()), None, false, None);
-        let (ch, conn) = ep.connect(Instant::now(), cc, srv.udp, "localhost").unwrap();
+        let (ch, conn) = ep
+            .connect(Instant::now(), cc, srv.udp, "localhost")
+            .unwrap();
         let mut c = Client {
             sock,
             ep,
@@ -245,7 +273,10 @@ impl Client {
         assert!(c.lost.is_none(), "handshake failed: {:?}", c.lost);
         // Our (empty) control stream, as RFC 9114 requires of every client.
         let ctl = c.conn.streams().open(Dir::Uni).expect("uni stream");
-        c.conn.send_stream(ctl).write(&h3::control_stream_preface()).unwrap();
+        c.conn
+            .send_stream(ctl)
+            .write(&h3::control_stream_preface())
+            .unwrap();
         c.pump(Duration::from_millis(5));
         c
     }
@@ -273,13 +304,22 @@ impl Client {
         let mut pkt = [0u8; 65536];
         if let Ok((n, from)) = self.sock.recv_from(&mut pkt) {
             let mut out = Vec::new();
-            if let Some(DatagramEvent::ConnectionEvent(_, ev)) =
-                self.ep.handle(Instant::now(), from, None, None, BytesMut::from(&pkt[..n]), &mut out)
-            {
+            if let Some(DatagramEvent::ConnectionEvent(_, ev)) = self.ep.handle(
+                Instant::now(),
+                from,
+                None,
+                None,
+                BytesMut::from(&pkt[..n]),
+                &mut out,
+            ) {
                 self.conn.handle_event(ev);
             }
         }
-        if self.conn.poll_timeout().is_some_and(|t| t <= Instant::now()) {
+        if self
+            .conn
+            .poll_timeout()
+            .is_some_and(|t| t <= Instant::now())
+        {
             self.conn.handle_timeout(Instant::now());
         }
         while let Some(ev) = self.conn.poll_endpoint_events() {
@@ -305,7 +345,9 @@ impl Client {
 
     fn read_stream(&mut self, id: StreamId) {
         let mut recv = self.conn.recv_stream(id);
-        let Ok(mut chunks) = recv.read(true) else { return };
+        let Ok(mut chunks) = recv.read(true) else {
+            return;
+        };
         let entry = self.rx.get_mut(&id).unwrap();
         loop {
             match chunks.next(usize::MAX) {
@@ -325,7 +367,13 @@ impl Client {
     }
 
     /// Open a request stream and send HEADERS (+ DATA) without waiting for the answer.
-    fn start_request(&mut self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> StreamId {
+    fn start_request(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> StreamId {
         let deadline = Instant::now() + Duration::from_secs(10);
         let id = loop {
             if let Some(id) = self.conn.streams().open(Dir::Bi) {
@@ -366,7 +414,9 @@ impl Client {
         loop {
             if let Some(reason) = &self.lost {
                 return match reason {
-                    ConnectionError::ApplicationClosed(c) => Outcome::ConnClosed(u64::from(c.error_code)),
+                    ConnectionError::ApplicationClosed(c) => {
+                        Outcome::ConnClosed(u64::from(c.error_code))
+                    }
                     _ => Outcome::ConnClosed(u64::MAX),
                 };
             }
@@ -394,7 +444,8 @@ impl Client {
                         0x1 => {
                             let fields = self.dec.decode(payload).expect("response field section");
                             for (n, v) in fields {
-                                let (n, v) = (String::from_utf8(n).unwrap(), String::from_utf8(v).unwrap());
+                                let (n, v) =
+                                    (String::from_utf8(n).unwrap(), String::from_utf8(v).unwrap());
                                 if n == ":status" {
                                     r.status = v.parse().unwrap();
                                 } else {
@@ -413,7 +464,13 @@ impl Client {
         r
     }
 
-    fn request(&mut self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Response {
         let id = self.start_request(method, path, headers, body);
         match self.await_response(id) {
             Outcome::Done(r) => r,
@@ -429,7 +486,8 @@ impl Client {
 fn tcp_get_head(addr: SocketAddr, path: &str) -> String {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes())
+        .unwrap();
     let mut buf = Vec::new();
     let _ = s.read_to_end(&mut buf);
     String::from_utf8_lossy(&buf).into_owned()
@@ -439,15 +497,23 @@ fn tcp_get_head(addr: SocketAddr, path: &str) -> String {
 
 #[test]
 fn static_file_over_http3() {
-    let Some(srv) = start("static", true, vec![]) else { return };
+    let Some(srv) = start("static", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     let r = c.get("/a.txt");
     assert_eq!(r.status, 200);
     assert_eq!(r.body, SMALL);
     assert_eq!(r.header("server"), Some("Vajra"));
-    assert_eq!(r.header("content-length"), Some(SMALL.len().to_string().as_str()));
+    assert_eq!(
+        r.header("content-length"),
+        Some(SMALL.len().to_string().as_str())
+    );
     assert!(r.header("etag").is_some() && r.header("last-modified").is_some());
-    assert!(r.header("alt-svc").is_none(), "no point advertising h3 inside h3");
+    assert!(
+        r.header("alt-svc").is_none(),
+        "no point advertising h3 inside h3"
+    );
 
     let r = c.get("/");
     assert_eq!((r.status, r.body.as_slice()), (200, &b"<h1>quic</h1>"[..]));
@@ -457,7 +523,9 @@ fn static_file_over_http3() {
 
 #[test]
 fn large_file_spans_many_data_frames() {
-    let Some(srv) = start("big", true, vec![]) else { return };
+    let Some(srv) = start("big", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     let r = c.get("/big.bin");
     assert_eq!(r.status, 200);
@@ -467,13 +535,18 @@ fn large_file_spans_many_data_frames() {
 
 #[test]
 fn head_404_405_and_conditional_requests() {
-    let Some(srv) = start("misc", true, vec![]) else { return };
+    let Some(srv) = start("misc", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
 
     let r = c.request("HEAD", "/a.txt", &[], b"");
     assert_eq!(r.status, 200);
     assert!(r.body.is_empty());
-    assert_eq!(r.header("content-length"), Some(SMALL.len().to_string().as_str()));
+    assert_eq!(
+        r.header("content-length"),
+        Some(SMALL.len().to_string().as_str())
+    );
 
     assert_eq!(c.get("/nope").status, 404);
     assert_eq!(c.get("/../etc/passwd").status, 400);
@@ -488,16 +561,29 @@ fn head_404_405_and_conditional_requests() {
 
 #[test]
 fn many_concurrent_streams_on_one_connection() {
-    let Some(srv) = start("conc", true, vec![]) else { return };
+    let Some(srv) = start("conc", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     let ids: Vec<StreamId> = (0..40)
-        .map(|i| c.start_request("GET", if i % 2 == 0 { "/a.txt" } else { "/big.bin" }, &[], b""))
+        .map(|i| {
+            c.start_request(
+                "GET",
+                if i % 2 == 0 { "/a.txt" } else { "/big.bin" },
+                &[],
+                b"",
+            )
+        })
         .collect();
     for (i, id) in ids.into_iter().enumerate() {
         match c.await_response(id) {
             Outcome::Done(r) => {
                 assert_eq!(r.status, 200, "stream {i}");
-                assert_eq!(r.body.len(), if i % 2 == 0 { SMALL.len() } else { BIG_LEN }, "stream {i}");
+                assert_eq!(
+                    r.body.len(),
+                    if i % 2 == 0 { SMALL.len() } else { BIG_LEN },
+                    "stream {i}"
+                );
             }
             o => panic!("stream {i}: {o:?}"),
         }
@@ -506,7 +592,9 @@ fn many_concurrent_streams_on_one_connection() {
 
 #[test]
 fn several_independent_connections() {
-    let Some(srv) = start("multi", true, vec![]) else { return };
+    let Some(srv) = start("multi", true, vec![]) else {
+        return;
+    };
     let threads: Vec<_> = (0..8)
         .map(|_| {
             let (udp, cert) = (srv.udp, srv.cert_der.clone());
@@ -530,13 +618,21 @@ fn several_independent_connections() {
     }
     let m = srv.mgr.scrape();
     assert!(m.contains("vajra_quic_connections_total 8"), "{m}");
-    assert!(m.contains("vajra_http_requests_total{protocol=\"http3\"} 40"), "{m}");
+    assert!(
+        m.contains("vajra_http_requests_total{protocol=\"http3\"} 40"),
+        "{m}"
+    );
 }
 
 #[test]
 fn retry_is_sent_when_enabled_and_skipped_when_not() {
-    for (retry, expect) in [(true, "vajra_quic_retries_total 1"), (false, "vajra_quic_retries_total 0")] {
-        let Some(srv) = start(if retry { "retry-on" } else { "retry-off" }, retry, vec![]) else { return };
+    for (retry, expect) in [
+        (true, "vajra_quic_retries_total 1"),
+        (false, "vajra_quic_retries_total 0"),
+    ] {
+        let Some(srv) = start(if retry { "retry-on" } else { "retry-off" }, retry, vec![]) else {
+            return;
+        };
         let mut c = Client::connect(&srv);
         assert_eq!(c.get("/a.txt").status, 200);
         let m = srv.mgr.scrape();
@@ -546,15 +642,22 @@ fn retry_is_sent_when_enabled_and_skipped_when_not() {
 
 #[test]
 fn alt_svc_is_advertised_on_http1_and_the_port_matches() {
-    let Some(srv) = start("altsvc", true, vec![]) else { return };
+    let Some(srv) = start("altsvc", true, vec![]) else {
+        return;
+    };
     let head = tcp_get_head(srv.tcp, "/a.txt");
-    assert!(head.contains(&format!("Alt-Svc: h3=\":{}\"; ma=60\r\n", srv.udp.port())), "{head}");
+    assert!(
+        head.contains(&format!("Alt-Svc: h3=\":{}\"; ma=60\r\n", srv.udp.port())),
+        "{head}"
+    );
 }
 
 #[test]
 fn proxied_requests_cache_and_forwarding_headers() {
     let up = spawn_upstream();
-    let Some(srv) = start("proxy", true, vec![proxy_route(up.addr, true)]) else { return };
+    let Some(srv) = start("proxy", true, vec![proxy_route(up.addr, true)]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
 
     let r = c.get("/api/items?id=7");
@@ -563,7 +666,11 @@ fn proxied_requests_cache_and_forwarding_headers() {
     assert_eq!(r.header("x-cache"), Some("MISS"));
     let r = c.get("/api/items?id=7");
     assert_eq!(r.header("x-cache"), Some("HIT"));
-    assert_eq!(up.seen.lock().unwrap().len(), 1, "second answer came from the cache");
+    assert_eq!(
+        up.seen.lock().unwrap().len(),
+        1,
+        "second answer came from the cache"
+    );
 
     {
         let seen = up.seen.lock().unwrap();
@@ -574,26 +681,48 @@ fn proxied_requests_cache_and_forwarding_headers() {
     }
 
     // A request body travels to the upstream and invalidates the cached GET.
-    let r = c.request("POST", "/api/items?id=7", &[("content-type", "text/plain")], &vec![b'x'; 50_000]);
-    assert_eq!(r.body, b"upstream saw /api/items?id=7 with 50000 body bytes\n");
+    let r = c.request(
+        "POST",
+        "/api/items?id=7",
+        &[("content-type", "text/plain")],
+        &vec![b'x'; 50_000],
+    );
+    assert_eq!(
+        r.body,
+        b"upstream saw /api/items?id=7 with 50000 body bytes\n"
+    );
     assert_eq!(c.get("/api/items?id=7").header("x-cache"), Some("MISS"));
 
     let m = srv.mgr.scrape();
-    assert!(m.contains("vajra_http_requests_total{protocol=\"http3\"} 4"), "{m}");
+    assert!(
+        m.contains("vajra_http_requests_total{protocol=\"http3\"} 4"),
+        "{m}"
+    );
 }
 
 #[test]
 fn proxy_to_a_dead_upstream_gives_502() {
-    let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let Some(srv) = start("dead", true, vec![proxy_route(dead, false)]) else { return };
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let Some(srv) = start("dead", true, vec![proxy_route(dead, false)]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     assert_eq!(c.get("/api/x").status, 502);
-    assert_eq!(c.get("/a.txt").status, 200, "the connection and server are unharmed");
+    assert_eq!(
+        c.get("/a.txt").status,
+        200,
+        "the connection and server are unharmed"
+    );
 }
 
 #[test]
 fn server_sends_a_valid_control_stream() {
-    let Some(srv) = start("control", true, vec![]) else { return };
+    let Some(srv) = start("control", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -611,7 +740,9 @@ fn server_sends_a_valid_control_stream() {
 
 #[test]
 fn malformed_requests_reset_the_stream_or_close_the_connection() {
-    let Some(srv) = start("bad", true, vec![]) else { return };
+    let Some(srv) = start("bad", true, vec![]) else {
+        return;
+    };
 
     // Uppercase header name: H3_MESSAGE_ERROR on that stream only.
     let mut c = Client::connect(&srv);
@@ -649,7 +780,10 @@ fn malformed_requests_reset_the_stream_or_close_the_connection() {
     c.send_raw(ctl, &h3::control_stream_preface(), true);
     let deadline = Instant::now() + Duration::from_secs(5);
     while c.lost.is_none() {
-        assert!(Instant::now() < deadline, "connection should have been closed");
+        assert!(
+            Instant::now() < deadline,
+            "connection should have been closed"
+        );
         c.pump(Duration::from_millis(10));
     }
     match &c.lost {
@@ -658,12 +792,17 @@ fn malformed_requests_reset_the_stream_or_close_the_connection() {
         }
         o => panic!("{o:?}"),
     }
-    assert!(srv.mgr.scrape().contains("vajra_quic_protocol_errors_total 3"));
+    assert!(srv
+        .mgr
+        .scrape()
+        .contains("vajra_quic_protocol_errors_total 3"));
 }
 
 #[test]
 fn oversized_body_gets_413() {
-    let Some(srv) = start("413", true, vec![]) else { return };
+    let Some(srv) = start("413", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     // Config::default().max_body_bytes is 1 MiB.
     let id = c.start_request("POST", "/a.txt", &[], &vec![0u8; 2 * 1024 * 1024]);
@@ -677,7 +816,9 @@ fn oversized_body_gets_413() {
 
 #[test]
 fn garbage_datagrams_do_not_disturb_the_server() {
-    let Some(srv) = start("garbage", true, vec![]) else { return };
+    let Some(srv) = start("garbage", true, vec![]) else {
+        return;
+    };
     let s = UdpSocket::bind("127.0.0.1:0").unwrap();
     let mut seed = 0x1234_5678_9abc_def0u64;
     for len in [0usize, 1, 7, 20, 100, 1200, 1500, 3000] {
@@ -704,7 +845,9 @@ fn garbage_datagrams_do_not_disturb_the_server() {
 
 #[test]
 fn graceful_shutdown_says_goodbye_over_quic() {
-    let Some(srv) = start("shutdown", true, vec![]) else { return };
+    let Some(srv) = start("shutdown", true, vec![]) else {
+        return;
+    };
     let mut c = Client::connect(&srv);
     assert_eq!(c.get("/a.txt").status, 200);
 
@@ -717,9 +860,14 @@ fn graceful_shutdown_says_goodbye_over_quic() {
         c.pump(Duration::from_millis(10));
     }
     match &c.lost {
-        Some(ConnectionError::ApplicationClosed(e)) => assert_eq!(u64::from(e.error_code), h3::H3_NO_ERROR),
+        Some(ConnectionError::ApplicationClosed(e)) => {
+            assert_eq!(u64::from(e.error_code), h3::H3_NO_ERROR)
+        }
         o => panic!("{o:?}"),
     }
-    srv.done.recv_timeout(Duration::from_secs(5)).expect("worker exits").unwrap();
+    srv.done
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker exits")
+        .unwrap();
     assert!(t0.elapsed() < Duration::from_secs(5));
 }

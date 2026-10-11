@@ -16,7 +16,8 @@ use vajra::control;
 use vajra::sys;
 use vajra::worker::{Config, Listener, Worker};
 
-const HANDSHAKE: &str = "GET /ws/chat HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+const HANDSHAKE: &str =
+    "GET /ws/chat HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
 
 // ───────────────────────── mock upstream ─────────────────────────
@@ -105,7 +106,10 @@ fn start(upstream: SocketAddr) -> Option<Server> {
     let (done_tx, done_rx) = mpsc::channel();
 
     std::thread::spawn(move || {
-        let l = [Listener { fd: sock.as_raw_fd(), tls: false }];
+        let l = [Listener {
+            fd: sock.as_raw_fd(),
+            tls: false,
+        }];
         match Worker::new(&l, Config::default(), &dynamic, None) {
             Ok(mut w) => {
                 w.attach_control(0, inbox, Duration::from_secs(2));
@@ -125,7 +129,11 @@ fn start(upstream: SocketAddr) -> Option<Server> {
         return None;
     }
     let mgr = Arc::new(Manager::new(vec![handle], None, Settings::default()));
-    Some(Server { addr, mgr, done: done_rx })
+    Some(Server {
+        addr,
+        mgr,
+        done: done_rx,
+    })
 }
 
 fn read_until(s: &mut TcpStream, pat: &[u8]) -> Vec<u8> {
@@ -133,7 +141,11 @@ fn read_until(s: &mut TcpStream, pat: &[u8]) -> Vec<u8> {
     let mut tmp = [0u8; 4096];
     while !buf.windows(pat.len()).any(|w| w == pat) {
         let n = s.read(&mut tmp).expect("read");
-        assert!(n > 0, "closed early; got {:?}", String::from_utf8_lossy(&buf));
+        assert!(
+            n > 0,
+            "closed early; got {:?}",
+            String::from_utf8_lossy(&buf)
+        );
         buf.extend_from_slice(&tmp[..n]);
     }
     buf
@@ -159,7 +171,10 @@ fn open(addr: SocketAddr) -> TcpStream {
     let got = read_until(&mut c, b"welcome");
     let s = String::from_utf8_lossy(&got);
     assert!(s.starts_with("HTTP/1.1 101"), "{s}");
-    assert!(s.contains("Sec-WebSocket-Accept: x"), "accept header must be forwarded: {s}");
+    assert!(
+        s.contains("Sec-WebSocket-Accept: x"),
+        "accept header must be forwarded: {s}"
+    );
     c
 }
 
@@ -200,7 +215,10 @@ fn client_bytes_sent_with_the_handshake_reach_the_upstream() {
     req.extend_from_slice(b"EARLY");
     c.write_all(&req).unwrap();
     let got = read_until(&mut c, b"EARLY");
-    assert!(String::from_utf8_lossy(&got).contains("welcomeEARLY"), "banner then echo");
+    assert!(
+        String::from_utf8_lossy(&got).contains("welcomeEARLY"),
+        "banner then echo"
+    );
 }
 
 #[test]
@@ -244,7 +262,10 @@ fn many_concurrent_tunnels() {
     for t in threads {
         t.join().unwrap();
     }
-    assert!(srv.mgr.scrape().contains("vajra_websocket_upgrades_total 32"));
+    assert!(srv
+        .mgr
+        .scrape()
+        .contains("vajra_websocket_upgrades_total 32"));
 }
 
 #[test]
@@ -268,7 +289,8 @@ fn upstream_close_closes_the_client_after_the_last_bytes() {
     let Some(srv) = start(up) else { return };
 
     let mut c = connect(srv.addr);
-    c.write_all(HANDSHAKE.replace("/ws/chat", "/ws/bye").as_bytes()).unwrap();
+    c.write_all(HANDSHAKE.replace("/ws/chat", "/ws/bye").as_bytes())
+        .unwrap();
     let mut all = Vec::new();
     c.read_to_end(&mut all).unwrap();
     let s = String::from_utf8_lossy(&all);
@@ -282,18 +304,25 @@ fn a_refused_upgrade_is_an_ordinary_response() {
     let Some(srv) = start(up) else { return };
 
     let mut c = connect(srv.addr);
-    c.write_all(HANDSHAKE.replace("/ws/chat", "/ws/deny").as_bytes()).unwrap();
+    c.write_all(HANDSHAKE.replace("/ws/chat", "/ws/deny").as_bytes())
+        .unwrap();
     let mut all = Vec::new();
     c.read_to_end(&mut all).unwrap();
     let s = String::from_utf8_lossy(&all);
     assert!(s.starts_with("HTTP/1.1 403"), "{s}");
     assert!(s.ends_with("no"));
-    assert!(srv.mgr.scrape().contains("vajra_websocket_upgrades_total 0"));
+    assert!(srv
+        .mgr
+        .scrape()
+        .contains("vajra_websocket_upgrades_total 0"));
 }
 
 #[test]
 fn unreachable_upstream_gives_502_for_upgrades_too() {
-    let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
     let Some(srv) = start(dead) else { return };
     let mut c = connect(srv.addr);
     c.write_all(HANDSHAKE.as_bytes()).unwrap();
@@ -317,5 +346,8 @@ fn graceful_shutdown_ends_open_tunnels() {
     let mut rest = Vec::new();
     let _ = c.read_to_end(&mut rest); // closed by the drain, not by a timeout
     assert!(t0.elapsed() < Duration::from_secs(5));
-    srv.done.recv_timeout(Duration::from_secs(5)).expect("worker exits").unwrap();
+    srv.done
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker exits")
+        .unwrap();
 }

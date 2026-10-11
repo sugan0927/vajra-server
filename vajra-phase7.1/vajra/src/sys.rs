@@ -81,7 +81,9 @@ pub fn pin_to_core(core: usize) -> io::Result<()> {
 
 /// Number of CPUs this process may run on.
 pub fn available_cpus() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 /// Peer IP of a connected socket (one `getpeername` syscall).
@@ -154,7 +156,11 @@ pub fn wait_signal() -> Signal {
             if libc::sigwait(&set, &mut sig) != 0 {
                 continue;
             }
-            return if sig == libc::SIGHUP { Signal::Reload } else { Signal::Shutdown };
+            return if sig == libc::SIGHUP {
+                Signal::Reload
+            } else {
+                Signal::Shutdown
+            };
         }
     }
 }
