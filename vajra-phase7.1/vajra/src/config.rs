@@ -1221,13 +1221,34 @@ mod tests {
 
 /// The five managed header names, in RFC canonical spelling.
 /// Lookup against response headers is case-insensitive.
-pub const SECURITY_HEADERS: [&str; 5] = [
+pub const SECURITY_HEADERS: [&str; 6] = [
     "Strict-Transport-Security",
     "X-Frame-Options",
     "X-Content-Type-Options",
     "Referrer-Policy",
     "Permissions-Policy",
+    "Content-Security-Policy",
 ];
+
+/// WordPress-compatible Content-Security-Policy.
+///
+/// Permits the inline scripts/styles/eval that unmodified WordPress 6.x
+/// and most plugins require; locks down frame-ancestors / base-uri /
+/// form-action. See `docs/security-headers.md` for rationale and a
+/// stronger-policy migration path.
+///
+/// Deliberately a string, not a magic `"wordpress"` keyword: a future
+/// change to this constant cannot silently alter a running site.
+pub const WORDPRESS_CSP: &str = "\
+default-src 'self'; \
+script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+style-src 'self' 'unsafe-inline'; \
+img-src 'self' data: https:; \
+font-src 'self' data:; \
+connect-src 'self'; \
+frame-ancestors 'self'; \
+base-uri 'self'; \
+form-action 'self'";
 
 /// What to do with one managed header for a given path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1248,9 +1269,11 @@ pub struct HeaderSettings {
     pub x_content_type_options: Option<String>,
     pub referrer_policy: Option<String>,
     pub permissions_policy: Option<String>,
+    pub content_security_policy: Option<String>,
     pub overrides: Vec<HeaderOverride>,
 }
 
+#[derive(Default)]
 /// Per-path override. `Some("")` means "remove for this path".
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeaderOverride {
@@ -1260,6 +1283,7 @@ pub struct HeaderOverride {
     pub x_content_type_options: Option<String>,
     pub referrer_policy: Option<String>,
     pub permissions_policy: Option<String>,
+    pub content_security_policy: Option<String>,
 }
 
 impl HeaderSettings {
@@ -1275,7 +1299,7 @@ impl HeaderSettings {
     }
 
     /// Effective action per managed header at `path`.
-    pub fn effective_at(&self, path: &str) -> [Action<'_>; 5] {
+    pub fn effective_at(&self, path: &str) -> [Action<'_>; 6] {
         let mut eff = [
             self.hsts.as_deref().map_or(Action::Skip, Action::Set),
             self.x_frame_options
@@ -1288,6 +1312,9 @@ impl HeaderSettings {
                 .as_deref()
                 .map_or(Action::Skip, Action::Set),
             self.permissions_policy
+                .as_deref()
+                .map_or(Action::Skip, Action::Set),
+            self.content_security_policy
                 .as_deref()
                 .map_or(Action::Skip, Action::Set),
         ];
@@ -1312,6 +1339,7 @@ impl HeaderSettings {
                 act(&ov.x_content_type_options),
                 act(&ov.referrer_policy),
                 act(&ov.permissions_policy),
+                act(&ov.content_security_policy),
             ];
             for (i, a) in over.iter().enumerate() {
                 if let Some(a) = a {
@@ -1358,6 +1386,7 @@ struct RawHeaders {
     x_content_type_options: Option<String>,
     referrer_policy: Option<String>,
     permissions_policy: Option<String>,
+    content_security_policy: Option<String>,
     #[serde(default)]
     overrides: Vec<RawHeaderOverride>,
 }
@@ -1371,6 +1400,7 @@ struct RawHeaderOverride {
     x_content_type_options: Option<String>,
     referrer_policy: Option<String>,
     permissions_policy: Option<String>,
+    content_security_policy: Option<String>,
 }
 
 /// Validate + convert raw headers section. Returns an error string on:
@@ -1388,6 +1418,7 @@ fn build_headers(raw: Option<RawHeaders>) -> Result<HeaderSettings, String> {
         ("x_content_type_options", &r.x_content_type_options),
         ("referrer_policy", &r.referrer_policy),
         ("permissions_policy", &r.permissions_policy),
+        ("content_security_policy", &r.content_security_policy),
     ];
     for (field, v) in top {
         if let Some(s) = v {
@@ -1417,6 +1448,7 @@ fn build_headers(raw: Option<RawHeaders>) -> Result<HeaderSettings, String> {
             ("x_content_type_options", &o.x_content_type_options),
             ("referrer_policy", &o.referrer_policy),
             ("permissions_policy", &o.permissions_policy),
+            ("content_security_policy", &o.content_security_policy),
         ];
         for (field, v) in fields {
             if let Some(s) = v {
@@ -1434,6 +1466,7 @@ fn build_headers(raw: Option<RawHeaders>) -> Result<HeaderSettings, String> {
             x_content_type_options: o.x_content_type_options,
             referrer_policy: o.referrer_policy,
             permissions_policy: o.permissions_policy,
+            content_security_policy: o.content_security_policy,
         });
     }
 
@@ -1443,6 +1476,7 @@ fn build_headers(raw: Option<RawHeaders>) -> Result<HeaderSettings, String> {
         x_content_type_options: r.x_content_type_options,
         referrer_policy: r.referrer_policy,
         permissions_policy: r.permissions_policy,
+        content_security_policy: r.content_security_policy,
         overrides,
     })
 }

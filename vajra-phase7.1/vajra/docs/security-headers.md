@@ -41,6 +41,79 @@ Vajra will not strip or replace a header it wasn't asked to manage.
 | `referrer_policy`      | `Referrer-Policy`            |
 | `permissions_policy`   | `Permissions-Policy`         |
 
+## Content-Security-Policy (CSP)
+
+CSP is the highest-leverage header in this set — it can neutralise most
+reflected-XSS and inline-script injection, *provided the policy matches
+your actual site*. Vajra does **not** ship a CSP default; you must opt in.
+
+    [headers]
+    content_security_policy = "default-src 'self'"
+
+Per-path override:
+
+    [[headers.overrides]]
+    path = "/admin/"
+    content_security_policy = "default-src 'self'; frame-ancestors 'none'"
+
+Empty string removes the header for a path:
+
+    [[headers.overrides]]
+    path = "/embed/"
+    content_security_policy = ""
+
+### WordPress-compatible starting point
+
+The example below works with unmodified WordPress 6.x plus most of the
+plugin ecosystem. It is intentionally permissive — `'unsafe-inline'`
+and `'unsafe-eval'` are what WordPress needs to function, and `data:` /
+`https:` image sources cover avatars and CDN assets. It is **not** a
+strict policy; treat it as a floor, not a ceiling.
+
+    [headers]
+    content_security_policy = """
+    default-src 'self'; \
+    script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+    style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: https:; \
+    font-src 'self' data:; \
+    connect-src 'self'; \
+    frame-ancestors 'self'; \
+    base-uri 'self'; \
+    form-action 'self'
+    """
+
+The same string is exposed in code as `vajra::config::WORDPRESS_CSP`,
+so if you build a config programmatically you can use it directly:
+
+    use vajra::config::{HeaderSettings, WORDPRESS_CSP};
+
+    let cfg = HeaderSettings {
+        content_security_policy: Some(WORDPRESS_CSP.to_string()),
+        ..HeaderSettings::default()
+    };
+
+### Migrating to a stricter policy
+
+If your site has moved past inline scripts (e.g. via a nonce-emitting
+plugin), tighten `script-src` and `style-src` to drop `'unsafe-inline'`
+and `'unsafe-eval'`:
+
+    script-src 'self' 'nonce-{NONCE}' 'strict-dynamic';
+    style-src  'self' 'nonce-{NONCE}';
+
+Vajra cannot currently inject per-response nonces; that is future work.
+Until then, keep the WP-compatible policy or provide your own nonce
+plumbing at the application layer.
+
+### Why this is a string, not a "`wordpress`" keyword
+
+An earlier draft made `content_security_policy = "wordpress"` a magic
+keyword. We rejected it: a future change to the built-in policy would
+then silently change what a running site emits, without a config diff
+to review. Users copy the string once and own it.
+
+
 ## Notes
 
 - **HSTS is only meaningful over HTTPS.** If you serve both HTTP and HTTPS

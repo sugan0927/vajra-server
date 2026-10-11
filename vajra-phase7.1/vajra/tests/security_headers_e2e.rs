@@ -114,6 +114,7 @@ fn all_headers_set() -> HeaderSettings {
         referrer_policy: Some("no-referrer".into()),
         permissions_policy: Some("geolocation=()".into()),
         overrides: vec![],
+        content_security_policy: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn empty_override() -> HeaderOverride {
         x_content_type_options: None,
         referrer_policy: None,
         permissions_policy: None,
+        content_security_policy: None,
     }
 }
 
@@ -264,6 +266,38 @@ fn h1_managed_header_replaces_upstream_value() {
 
     // Unmanaged upstream headers still flow through.
     assert_eq!(find(&h, "x-upstream-only"), Some("keep-me"), "{r}");
+
+    s.mgr.shutdown();
+    let _ = s.done.recv_timeout(Duration::from_secs(5));
+}
+
+#[test]
+fn h1_csp_lands_on_the_wire() {
+    let dynamic = Dynamic {
+        headers: HeaderSettings {
+            content_security_policy: Some("default-src 'self'".into()),
+            overrides: vec![HeaderOverride {
+                path: "/admin/".into(),
+                content_security_policy: Some("default-src 'self'; frame-ancestors 'none'".into()),
+                ..empty_override()
+            }],
+            ..HeaderSettings::default()
+        },
+        ..Dynamic::default()
+    };
+    let Some(s) = start(dynamic) else { return };
+
+    let h = parse_headers(&http_get(s.addr, "/blog/post"));
+    assert_eq!(
+        find(&h, "content-security-policy"),
+        Some("default-src 'self'")
+    );
+
+    let h = parse_headers(&http_get(s.addr, "/admin/users"));
+    assert_eq!(
+        find(&h, "content-security-policy"),
+        Some("default-src 'self'; frame-ancestors 'none'")
+    );
 
     s.mgr.shutdown();
     let _ = s.done.recv_timeout(Duration::from_secs(5));

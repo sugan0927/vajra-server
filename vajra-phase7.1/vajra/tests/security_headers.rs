@@ -37,6 +37,7 @@ fn top_level_headers_are_applied() {
         referrer_policy: Some("strict-origin-when-cross-origin".into()),
         permissions_policy: Some("geolocation=()".into()),
         overrides: vec![],
+        content_security_policy: None,
     };
     let mut h = vec![];
     apply_security_headers(&cfg, "/anywhere", &mut h);
@@ -97,6 +98,7 @@ fn override_replaces_value_for_matching_prefix() {
             x_content_type_options: None,
             referrer_policy: None,
             permissions_policy: None,
+            content_security_policy: None,
         }],
         ..Default::default()
     };
@@ -122,6 +124,7 @@ fn override_with_empty_string_removes_header() {
             x_content_type_options: None,
             referrer_policy: None,
             permissions_policy: None,
+            content_security_policy: None,
         }],
         ..Default::default()
     };
@@ -143,6 +146,7 @@ fn override_with_empty_string_also_strips_upstream_header() {
             x_content_type_options: None,
             referrer_policy: None,
             permissions_policy: None,
+            content_security_policy: None,
         }],
         ..Default::default()
     };
@@ -163,6 +167,7 @@ fn longest_prefix_override_wins() {
                 x_content_type_options: None,
                 referrer_policy: None,
                 permissions_policy: None,
+                content_security_policy: None,
             },
             HeaderOverride {
                 path: "/a/b/".into(),
@@ -171,6 +176,7 @@ fn longest_prefix_override_wins() {
                 x_content_type_options: None,
                 referrer_policy: None,
                 permissions_policy: None,
+                content_security_policy: None,
             },
         ],
         ..Default::default()
@@ -201,6 +207,7 @@ fn override_partial_leaves_other_headers_inherited() {
             x_content_type_options: None,
             referrer_policy: None,
             permissions_policy: None,
+            content_security_policy: None,
         }],
         ..Default::default()
     };
@@ -268,4 +275,92 @@ fn config_rejects_relative_override_path() {
 fn config_rejects_unknown_key() {
     let err = parse_cfg("[headers]\nbogus = \"x\"").unwrap_err();
     assert!(err.contains("bogus") || err.contains("unknown"), "{err}");
+}
+
+// ─── Content-Security-Policy ─────────────────────────────────────────
+#[test]
+fn csp_top_level_applied() {
+    let cfg = HeaderSettings {
+        content_security_policy: Some("default-src 'self'".into()),
+        ..HeaderSettings::default()
+    };
+    let mut h = vec![];
+    apply_security_headers(&cfg, "/any", &mut h);
+    assert!(has(&h, "Content-Security-Policy", "default-src 'self'"));
+}
+
+#[test]
+fn csp_per_path_override() {
+    let cfg = HeaderSettings {
+        content_security_policy: Some("default-src 'self'".into()),
+        overrides: vec![HeaderOverride {
+            path: "/admin/".into(),
+            content_security_policy: Some("default-src 'self'; frame-ancestors 'none'".into()),
+            ..HeaderOverride::default()
+        }],
+        ..HeaderSettings::default()
+    };
+    let mut admin = vec![];
+    apply_security_headers(&cfg, "/admin/users", &mut admin);
+    assert!(has(
+        &admin,
+        "Content-Security-Policy",
+        "default-src 'self'; frame-ancestors 'none'"
+    ));
+    let mut public = vec![];
+    apply_security_headers(&cfg, "/blog/", &mut public);
+    assert!(has(
+        &public,
+        "Content-Security-Policy",
+        "default-src 'self'"
+    ));
+}
+
+#[test]
+fn csp_removed_by_empty_string_override() {
+    let cfg = HeaderSettings {
+        content_security_policy: Some("default-src 'self'".into()),
+        overrides: vec![HeaderOverride {
+            path: "/embed/".into(),
+            content_security_policy: Some(String::new()),
+            ..HeaderOverride::default()
+        }],
+        ..HeaderSettings::default()
+    };
+    let mut h = vec![];
+    apply_security_headers(&cfg, "/embed/widget", &mut h);
+    assert_eq!(count(&h, "Content-Security-Policy"), 0);
+}
+
+#[test]
+fn wordpress_csp_const_is_valid() {
+    let v = vajra::config::WORDPRESS_CSP;
+    assert!(!v.is_empty());
+    assert!(!v.contains('\n'), "must be single-line");
+    assert!(!v.contains('\r'), "must be single-line");
+    assert!(v.contains("default-src 'self'"), "{v}");
+    assert!(v.contains("frame-ancestors 'self'"), "{v}");
+}
+
+#[test]
+fn csp_config_parses_from_toml() {
+    let cfg = parse_cfg("[headers]\ncontent_security_policy = \"default-src 'self'\"\n").unwrap();
+    assert_eq!(
+        cfg.headers.content_security_policy.as_deref(),
+        Some("default-src 'self'")
+    );
+}
+
+#[test]
+fn csp_config_rejects_crlf() {
+    // Two-layer defense: the TOML crate itself rejects a literal newline
+    // inside a basic string ("invalid basic string"), and our own
+    // validation rejects CR/LF if the string somehow reaches us as a
+    // raw value (e.g. from a programmatic config). Either way the
+    // config must not parse.
+    let err = parse_cfg("[headers]\ncontent_security_policy = \"a\nb\"").unwrap_err();
+    assert!(
+        err.contains("CR/LF") || err.contains("invalid basic string"),
+        "unexpected error: {err}"
+    );
 }
