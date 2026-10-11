@@ -1923,6 +1923,16 @@ impl Worker {
                 );
             }
             if fed.is_err() {
+                // FastCGI protocol decode failure → status="parse".
+                // कोई valid HTTP response नहीं बना, इसलिए proxy_fail के
+                // "error" से पहले ही parse को observe कर लेते हैं और
+                // fpm_observed flag set कर देते हैं ताकि double-count न हो।
+                if job.fcgi.is_some() && !job.fpm_observed {
+                    job.fpm_observed = true;
+                    if let Some(m) = crate::metrics::fpm() {
+                        m.observe(3, job.started.elapsed()); // 3 == "parse"
+                    }
+                }
                 Step::Bad
             } else if dec.is_done() {
                 match dec.take_http(head_req) {
