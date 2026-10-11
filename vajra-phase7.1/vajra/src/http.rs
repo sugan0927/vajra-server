@@ -408,6 +408,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 keep_alive,
                                 date,
                                 Some("HIT"),
+                                None,
                             );
                             let bytes = if hit.status == 204 || hit.status == 304 {
                                 0
@@ -751,6 +752,7 @@ pub fn write_proxy_response(
     keep_alive: bool,
     date: &[u8; DATE_LEN],
     xcache: Option<&str>,
+    fcgi_cache: Option<&str>,
 ) {
     let bodyless = status == 204 || status == 304;
     out.extend_from_slice(b"HTTP/1.1 ");
@@ -785,6 +787,11 @@ pub fn write_proxy_response(
     if let Some(x) = xcache {
         out.extend_from_slice(b"X-Cache: ");
         out.extend_from_slice(x.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    if let Some(f) = fcgi_cache {
+        out.extend_from_slice(b"X-FastCGI-Cache: ");
+        out.extend_from_slice(f.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
     if !head_req && !bodyless {
@@ -899,6 +906,7 @@ pub fn h2_proxy_response(
     head_req: bool,
     date: &[u8; DATE_LEN],
     xcache: Option<&'static str>,
+    fcgi_cache: Option<&'static str>,
 ) -> H2Response {
     let bodyless = status == 204 || status == 304;
     let mut out = vec![
@@ -921,6 +929,9 @@ pub fn h2_proxy_response(
     }
     if let Some(x) = xcache {
         out.push((b"x-cache".to_vec(), x.as_bytes().to_vec()));
+    }
+    if let Some(f) = fcgi_cache {
+        out.push((b"x-fastcgi-cache".to_vec(), f.as_bytes().to_vec()));
     }
     if !head_req && !bodyless {
         out.push((
@@ -1293,6 +1304,7 @@ mod tests {
             true,
             DATE,
             Some("MISS"),
+            None,
         );
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("HTTP/1.1 201 Created\r\n"));
@@ -1302,7 +1314,7 @@ mod tests {
         assert!(s.ends_with("\r\n\r\nabc"));
 
         let mut out = Vec::new();
-        write_proxy_response(&mut out, 200, &hdrs, b"", true, false, DATE, None);
+        write_proxy_response(&mut out, 200, &hdrs, b"", true, false, DATE, None, None);
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.contains("Content-Length: 99\r\n"),
@@ -1322,6 +1334,7 @@ mod tests {
             false,
             DATE,
             Some("HIT"),
+            None,
         );
         assert!(r.headers.iter().any(|(n, v)| n == b"x-a" && v == b"1"));
         assert!(r

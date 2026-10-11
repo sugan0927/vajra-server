@@ -266,6 +266,10 @@ struct ProxyJob {
     /// FastCGI (PHP-FPM) request: the upstream stream is decoded here and
     /// rewritten into an HTTP/1.1 response before the normal proxy path sees it.
     fcgi: Option<Box<fastcgi::Decoder>>,
+    /// `Some(key)` when this FastCGI request was a cache MISS and its
+    /// response should be stored on completion. `None` when cache is off
+    /// or the request bypassed.
+    fcgi_cache_key: Option<Vec<u8>>,
 }
 
 impl ProxyJob {
@@ -300,6 +304,7 @@ impl ProxyJob {
             t0: Instant::now(),
             upgrade: spec.upgrade,
             fcgi: spec.fcgi.then(|| Box::new(fastcgi::Decoder::new())),
+            fcgi_cache_key: None,
         }
     }
 
@@ -1375,6 +1380,7 @@ impl Worker {
                             false,
                             date,
                             Some("HIT"),
+                            None,
                         );
                         let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
                         self.obs.response(
@@ -2209,6 +2215,39 @@ impl Worker {
         // Cache bookkeeping.
         let body = Rc::new(body);
         let mut xcache: Option<&'static str> = None;
+        // FastCGI cache bookkeeping (only when this was a FastCGI job).
+        let fcgi_status: Option<&'static str> = if let Some(key) = job.fcgi_cache_key.as_ref() {
+            // Cacheable statuses per docs/fastcgi-cache.md; the response must
+            // not carry Set-Cookie and must not be Cache-Control: no-store
+            // / private. HEAD responses are never stored (empty body).
+            let has_set_cookie = head
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case(b"set-cookie"));
+            let no_store = head.headers.iter().any(|(n, v)| {
+                n.eq_ignore_ascii_case(b"cache-control") && {
+                    let s = String::from_utf8_lossy(v).to_ascii_lowercase();
+                    s.contains("no-store") || s.contains("private")
+                }
+            });
+            let cacheable = !job.head_req
+                && matches!(head.status, 200 | 301 | 302 | 404)
+                && !has_set_cookie
+                && !no_store;
+            if cacheable {
+                let ttl = self.fastcgi_cache.settings.ttl_secs;
+                if let Err(e) = self.fastcgi_cache.put(key, body.as_slice(), ttl) {
+                    eprintln!("vajra: fastcgi_cache put: {e}");
+                } else if let Err(e) = self.fastcgi_cache.save_index() {
+                    eprintln!("vajra: fastcgi_cache save_index: {e}");
+                }
+            }
+            Some("MISS")
+        } else if job.fcgi.is_some() {
+            Some("BYPASS")
+        } else {
+            None
+        };
         match &job.cache {
             CacheMode::Store(key) => {
                 xcache = Some("MISS");
@@ -2270,6 +2309,7 @@ impl Worker {
                         job.head_req,
                         &date,
                         xcache,
+                        fcgi_status,
                     );
                     quic_resp = Some((*q, resp));
                 }
@@ -2283,6 +2323,7 @@ impl Worker {
                         job.head_req,
                         &date,
                         xcache,
+                        fcgi_status,
                     );
                     h.respond(job.stream, resp, &mut c.out);
                 }
@@ -2297,6 +2338,7 @@ impl Worker {
                         keep,
                         &date,
                         xcache,
+                        fcgi_status,
                     );
                 }
             }
@@ -2818,6 +2860,8 @@ mod tests {
             cache: CacheMode::None,
             upgrade: false,
             fcgi: false,
+            host: String::new(),
+            cookie: None,
         };
         ProxyJob::new(spec, st, None, 0)
     }

@@ -388,6 +388,10 @@ pub struct ProxySpec {
     /// Wall clock at the moment the proxy job was created.
     /// Used for metrics only.
     pub started: std::time::Instant,
+    /// Lowercased `Host` header value; empty when absent.
+    pub host: String,
+    /// Raw `Cookie` header value, if present.
+    pub cookie: Option<String>,
 }
 
 pub struct ReqParts<'a> {
@@ -440,6 +444,15 @@ pub fn make_spec(table: &ProxyTable, route: usize, p: &ReqParts) -> ProxySpec {
         target: p.target.to_string(),
         cache: CacheMode::None,
         upgrade: p.upgrade,
+        host: p
+            .host
+            .map(|h| String::from_utf8_lossy(h).to_ascii_lowercase())
+            .unwrap_or_default(),
+        cookie: p
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(b"cookie"))
+            .map(|(_, v)| String::from_utf8_lossy(v).into_owned()),
     }
 }
 

@@ -426,6 +426,7 @@ impl Worker {
                         head_only,
                         &date,
                         Some("HIT"),
+                        None,
                     );
                     let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
                     self.obs
