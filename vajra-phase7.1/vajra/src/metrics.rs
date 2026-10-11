@@ -56,6 +56,8 @@ pub fn init() -> prometheus::Result<()> {
         reg.register(Box::new(st))?;
     }
 
+    init_http(&reg)?;
+
     REGISTRY
         .set(reg)
         .map_err(|_| prometheus::Error::Msg("registry already set".into()))?;
@@ -83,6 +85,133 @@ pub fn render() -> String {
         return String::new();
     }
     String::from_utf8(buf).unwrap_or_default()
+}
+
+
+// ─── HTTP metrics ─────────────────────────────────────────────────────
+
+pub const METHODS: [&str; 10] =
+    ["GET","POST","PUT","DELETE","HEAD","OPTIONS","PATCH","CONNECT","TRACE","OTHER"];
+pub const CLASSES: [&str; 5] = ["1xx","2xx","3xx","4xx","5xx"];
+
+pub struct HttpMetrics {
+    pub requests: Vec<prometheus::IntCounter>,
+    pub durations: Vec<prometheus::Histogram>,
+    pub active_connections: prometheus::IntGauge,
+}
+
+static HTTP: OnceLock<HttpMetrics> = OnceLock::new();
+
+#[inline]
+pub fn method_idx(m: &str) -> usize {
+    match m {
+        "GET" => 0, "POST" => 1, "PUT" => 2, "DELETE" => 3,
+        "HEAD" => 4, "OPTIONS" => 5, "PATCH" => 6, "CONNECT" => 7,
+        "TRACE" => 8, _ => 9,
+    }
+}
+
+#[inline]
+pub fn class_idx(status: u16) -> usize {
+    match status / 100 { 1 => 0, 2 => 1, 3 => 2, 4 => 3, _ => 4 }
+}
+
+pub fn init_http(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if HTTP.get().is_some() { return Ok(()); }
+
+    let buckets = vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                       0.5, 1.0, 2.5, 5.0, 10.0];
+
+    let mut requests = Vec::with_capacity(METHODS.len() * CLASSES.len());
+    let mut durations = Vec::with_capacity(METHODS.len() * CLASSES.len());
+
+    for m in METHODS {
+        for c in CLASSES {
+            let labels: std::collections::HashMap<String, String> =
+                [("method".into(), m.to_string()),
+                 ("status_class".into(), c.to_string())]
+                .into_iter().collect();
+
+            let ctr = prometheus::IntCounter::with_opts(
+                prometheus::Opts::new("vajra_requests_total", "HTTP requests")
+                    .const_labels(labels.clone()))?;
+            reg.register(Box::new(ctr.clone()))?;
+            requests.push(ctr);
+
+            let hist = prometheus::Histogram::with_opts(
+                prometheus::HistogramOpts::new(
+                    "vajra_request_duration_seconds",
+                    "HTTP request duration in seconds")
+                    .buckets(buckets.clone())
+                    .const_labels(labels))?;
+            reg.register(Box::new(hist.clone()))?;
+            durations.push(hist);
+        }
+    }
+
+    let active_connections = prometheus::IntGauge::new(
+        "vajra_active_connections",
+        "Current open client connections")?;
+    reg.register(Box::new(active_connections.clone()))?;
+
+    HTTP.set(HttpMetrics { requests, durations, active_connections })
+        .map_err(|_| prometheus::Error::Msg("http metrics already set".into()))?;
+    Ok(())
+}
+
+pub fn http() -> Option<&'static HttpMetrics> { HTTP.get() }
+
+impl HttpMetrics {
+    /// Zero-allocation hot path. Called once per response.
+    #[inline]
+    pub fn observe(&self, method: &str, status: u16, dur: std::time::Duration) {
+        let i = method_idx(method) * CLASSES.len() + class_idx(status);
+        self.requests[i].inc();
+        self.durations[i].observe(dur.as_secs_f64());
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+
+    #[test]
+    fn method_class_indices() {
+        assert_eq!(method_idx("GET"), 0);
+        assert_eq!(method_idx("POST"), 1);
+        assert_eq!(method_idx("BREW"), 9);
+        assert_eq!(class_idx(199), 0);
+        assert_eq!(class_idx(200), 1);
+        assert_eq!(class_idx(404), 3);
+        assert_eq!(class_idx(500), 4);
+        assert_eq!(class_idx(599), 4);
+    }
+
+    #[test]
+    fn observe_updates_counter_and_histogram() {
+        init().unwrap();
+        let h = http().expect("http metrics initialized");
+        let idx = method_idx("GET") * 5 + class_idx(200);
+        let before = h.requests[idx].get();
+        h.observe("GET", 200, std::time::Duration::from_millis(12));
+        let after = h.requests[idx].get();
+        assert_eq!(after, before + 1);
+
+        let text = render();
+        assert!(text.contains("vajra_requests_total"));
+        assert!(text.contains("vajra_request_duration_seconds"));
+    }
+
+    #[test]
+    fn active_connections_gauge_round_trip() {
+        init().unwrap();
+        let h = http().unwrap();
+        h.active_connections.inc();
+        h.active_connections.inc();
+        h.active_connections.dec();
+        let text = render();
+        assert!(text.contains("vajra_active_connections"));
+    }
 }
 
 #[cfg(test)]
