@@ -8,6 +8,7 @@
 //! snapshot-based text). Until Day 7 both outputs are concatenated so
 //! no existing dashboards break.
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -211,6 +212,66 @@ mod http_tests {
         h.active_connections.dec();
         let text = render();
         assert!(text.contains("vajra_active_connections"));
+    }
+}
+
+
+// ─── Request-timing helpers (hot path, zero-alloc) ─────────────────────
+
+thread_local! {
+    /// Start of the request currently being processed on this worker
+    /// thread. Set by `request_begin()`, consumed by `request_end()`.
+    /// Worker model is thread-per-core, so there is no cross-thread
+    /// contention and no need for atomics.
+    static REQUEST_START: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Called once per request, right after the request head is parsed.
+#[inline]
+pub fn request_begin() {
+    REQUEST_START.with(|c| c.set(Some(Instant::now())));
+}
+
+/// Called once per response. Consumes the start instant and records
+/// the observation. No-op if `request_begin()` was not called.
+#[inline]
+pub fn request_end(method: &str, status: u16) {
+    let start = REQUEST_START.with(|c| c.replace(None));
+    let Some(start) = start else { return };
+    if let Some(h) = HTTP.get() {
+        h.observe(method, status, start.elapsed());
+    }
+}
+
+/// Clear any pending start time. Used defensively at the top of
+/// `process()` so a proxy-path return (which does not observe here)
+/// cannot leak its timestamp into a later request.
+#[inline]
+pub fn request_end_unknown() {
+    REQUEST_START.with(|c| c.set(None));
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn begin_end_round_trip() {
+        init().unwrap();
+        let idx = method_idx("GET") * 5 + class_idx(200);
+        let before = http().unwrap().requests[idx].get();
+        request_begin();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        request_end("GET", 200);
+        let after = http().unwrap().requests[idx].get();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn end_without_begin_is_noop() {
+        init().unwrap();
+        request_end_unknown();
+        request_end("GET", 200);
     }
 }
 
