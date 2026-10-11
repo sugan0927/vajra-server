@@ -22,6 +22,7 @@ pub mod access;
 pub mod admin;
 pub mod arena;
 pub mod cache;
+pub mod compress;
 pub mod config;
 pub mod control;
 pub mod date;

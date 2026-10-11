@@ -205,3 +205,20 @@ unchanged.
 
 `allowed` is incremented only inside `check()` — the disabled fast path
 and `ctx.rate_limit == None` both skip the counters entirely.
+
+## Update — Day 14: effective client IP for both gates
+
+The access check and the rate limiter now share one effective-client
+computation per request:
+
+    peer   = ctx.client_ip        (socket peer, always set in prod)
+    client = access.effective_client_ip(peer, XFF, X-Real-IP)
+             or peer, if [access] is absent
+
+Consequences:
+- Buckets, deny-logs, and `[access]` all key on the same identity.
+- When `ctx.client_ip` is `None` (only tests do this), *both* checks
+  are skipped entirely. Production never sees a `None` here.
+
+This restores the pre-Day-14 invariant that access was evaluated
+independently of the rate limiter; if `ctx.client_ip` is set, both run.
