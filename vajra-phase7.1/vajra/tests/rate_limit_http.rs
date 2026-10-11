@@ -212,10 +212,12 @@ fn per_route_override_has_independent_budget_through_http() {
         };
         let mut out = Vec::new();
         let _ = http::process(GET_API, &mut out, &DATE, &mut ctx);
-        assert_ne!(
-            status_of(&out),
-            429,
-            "first /api request should pass: {}",
+        // /api is a proxied route here; with no live upstream the
+        // response body may be empty. Assert only that the limiter
+        // did not emit 429.
+        assert!(
+            !out.windows(3).any(|w| w == b"429"),
+            "first /api request should pass, got: {}",
             String::from_utf8_lossy(&out)
         );
     }
