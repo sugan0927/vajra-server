@@ -88,3 +88,33 @@ claimed here because none have been measured.
 
 ## Roadmap
 Get Phase 5/6 compiling and green; measure vs. Nginx; Range requests, upstream TLS, streaming proxy bodies, GSO/GRO.
+
+## Metrics
+
+Prometheus metrics on the admin listener (default `127.0.0.1:9202`):
+
+    curl -s http://127.0.0.1:9202/metrics | head -20
+
+Reference: [`docs/metrics.md`](docs/metrics.md)
+Alerts:    [`alerts/vajra.yaml`](alerts/vajra.yaml)
+Verify:    [`docs/verify.md`](docs/verify.md)
+
+### Prometheus scrape config
+
+    scrape_configs:
+      - job_name: vajra
+        static_configs:
+          - targets: ['127.0.0.1:9202']
+        metrics_path: /metrics
+        scrape_interval: 15s
+
+    rule_files:
+      - /etc/vajra/alerts/vajra.yaml
+
+### Grafana dashboard
+
+Import [`grafana/dashboard.json`](grafana/dashboard.json)
+(Dashboards → New → Import → Upload JSON). Set `$instance` after import.
+
+Panels: requests/sec by class, PHP-FPM outcomes/sec, latency p50/p95/p99,
+bandwidth, uptime, requests-in-flight, active-connections, config reloads.

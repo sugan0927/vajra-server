@@ -1,0 +1,67 @@
+{
+  "title": "Vajra — Web Server",
+  "uid": "vajra-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(vajra_build_info, instance)",
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    { "id": 1, "type": "timeseries", "title": "Requests/sec by class",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum by (status_class) (rate(vajra_requests_total{instance=~\"$instance\"}[5m]))", "legendFormat": "{{status_class}}" }] },
+    { "id": 2, "type": "timeseries", "title": "PHP-FPM outcomes/sec",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum by (status) (rate(vajra_php_fpm_requests_total{instance=~\"$instance\"}[5m]))", "legendFormat": "{{status}}" }] },
+    { "id": 3, "type": "timeseries", "title": "Latency p50/p95/p99",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(vajra_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(vajra_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(vajra_request_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } } },
+    { "id": 4, "type": "timeseries", "title": "Bandwidth",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(vajra_bytes_sent_total{instance=~\"$instance\"}[5m]))", "legendFormat": "egress" },
+        { "expr": "sum(rate(vajra_bytes_received_total{instance=~\"$instance\"}[5m]))", "legendFormat": "ingress" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } } },
+    { "id": 5, "type": "stat", "title": "Uptime",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "min(vajra_uptime_seconds{instance=~\"$instance\"})" }],
+      "fieldConfig": { "defaults": { "unit": "s" } } },
+    { "id": 6, "type": "stat", "title": "Requests in flight",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum(vajra_requests_in_flight{instance=~\"$instance\"})" }] },
+    { "id": 7, "type": "stat", "title": "Active connections",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "expr": "sum(vajra_active_connections{instance=~\"$instance\"})" }] },
+    { "id": 8, "type": "timeseries", "title": "Config reloads/errors",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "increase(vajra_config_reloads_total{instance=~\"$instance\"}[1h])", "legendFormat": "ok" },
+        { "expr": "increase(vajra_config_reload_errors_total{instance=~\"$instance\"}[1h])", "legendFormat": "errors" }
+      ] }
+  ]
+}

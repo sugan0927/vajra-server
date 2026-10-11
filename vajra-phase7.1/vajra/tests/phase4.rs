@@ -620,7 +620,6 @@ fn access_log_is_written_and_rotated_by_reload() {
 }
 
 #[test]
-#[ignore = "WIP: access log line now ends with request UUID; test needs update"]
 fn access_log_format() {
     let dir = tmpdir("logfmt");
     let log = dir.join("access.log");
@@ -642,19 +641,29 @@ fn access_log_format() {
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<_> = text.lines().collect();
     assert_eq!(lines.len(), 2, "{text}");
+    // v0.8.0+: line ends with the request UUID (36-char UUIDv4) for tracing.
+    // Strip it before checking the CLF body.
+    fn split_id(line: &str) -> (&str, &str) {
+        let (body, id) = line.rsplit_once(' ').expect("line has spaces");
+        (body, id)
+    }
     for l in &lines {
         assert!(l.starts_with("127.0.0.1 - - ["), "{l}");
         assert!(l.contains(" +0000] \""), "{l}");
+        let (_body, id) = split_id(l);
+        assert_eq!(id.len(), 36, "request id must be a 36-char UUID: {id}");
+        assert_eq!(
+            id.chars().filter(|c| *c == '-').count(),
+            4,
+            "not a UUID: {id}"
+        );
     }
+    let (body0, _) = split_id(lines[0]);
+    assert!(body0.ends_with("\"GET /health HTTP/1.1\" 200 3"), "{body0}");
+    let (body1, _) = split_id(lines[1]);
     assert!(
-        lines[0].ends_with("\"GET /health HTTP/1.1\" 200 3"),
-        "{}",
-        lines[0]
-    );
-    assert!(
-        lines[1].ends_with("\"GET /nope?q=1 HTTP/1.1\" 404 10"),
-        "{}",
-        lines[1]
+        body1.ends_with("\"GET /nope?q=1 HTTP/1.1\" 404 10"),
+        "{body1}"
     );
 }
 

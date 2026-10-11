@@ -180,8 +180,14 @@ pub fn route_admin(method: &str, path: &str, mgr: &Manager) -> (u16, &'static st
         ("GET" | "HEAD", "/metrics") => (200, PROM, mgr.scrape()),
         ("GET" | "HEAD", "/healthz") => (200, TEXT, "ok\n".to_string()),
         ("POST", "/reload") => match mgr.reload() {
-            Ok(m) => (200, TEXT, format!("{m}\n")),
-            Err(e) => (500, TEXT, format!("reload failed: {e}\n")),
+            Ok(m) => {
+                crate::metrics::record_reload_ok();
+                (200, TEXT, format!("{m}\n"))
+            }
+            Err(e) => {
+                crate::metrics::record_reload_err();
+                (500, TEXT, format!("reload failed: {e}\n"))
+            }
         },
         (_, "/metrics" | "/healthz" | "/reload") => (405, TEXT, "method not allowed\n".to_string()),
         _ => (404, TEXT, "not found\n".to_string()),

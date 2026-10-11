@@ -62,6 +62,8 @@ pub fn init() -> prometheus::Result<()> {
     init_http(&reg)?;
     init_fpm(&reg)?;
     init_bytes(&reg)?;
+    init_in_flight(&reg)?;
+    init_reload(&reg)?;
 
     REGISTRY
         .set(reg)
@@ -85,6 +87,7 @@ pub fn render() -> String {
         u.set(s.elapsed().as_secs_f64());
     }
     flush_bytes();
+    flush_in_flight();
     let mut buf = Vec::with_capacity(4096);
     let encoder = TextEncoder::new();
     if encoder.encode(&reg.gather(), &mut buf).is_err() {
@@ -512,5 +515,96 @@ mod tests {
         init().unwrap();
         let s = render();
         assert!(s.contains("vajra_uptime_seconds"), "missing uptime");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Day 7: in-flight gauge + reload counters
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── Request-in-flight gauge (atomic hot path) ───────────────────────
+
+static IN_FLIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static IN_FLIGHT_GAUGE: OnceLock<prometheus::IntGauge> = OnceLock::new();
+
+pub fn init_in_flight(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if IN_FLIGHT_GAUGE.get().is_some() {
+        return Ok(());
+    }
+    let g = prometheus::IntGauge::new(
+        "vajra_requests_in_flight",
+        "HTTP requests currently being processed",
+    )?;
+    reg.register(Box::new(g.clone()))?;
+    let _ = IN_FLIGHT_GAUGE.set(g);
+    Ok(())
+}
+
+/// Call on request start. Single relaxed atomic increment.
+#[inline]
+pub fn enter_request() {
+    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Call on every request exit path. Flushes to gauge every 64th decrement.
+#[inline]
+pub fn leave_request() {
+    let prev = IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    if prev & 0x3F == 0 {
+        if let Some(g) = IN_FLIGHT_GAUGE.get() {
+            g.set(IN_FLIGHT.load(Ordering::Relaxed) as i64);
+        }
+    }
+}
+
+/// Force a flush. Called from `/metrics` scrape so the value is exact.
+pub fn flush_in_flight() {
+    if let Some(g) = IN_FLIGHT_GAUGE.get() {
+        g.set(IN_FLIGHT.load(Ordering::Relaxed) as i64);
+    }
+}
+
+// ─── Config reload counters ──────────────────────────────────────────
+
+static RELOADS: OnceLock<ReloadMetrics> = OnceLock::new();
+
+pub struct ReloadMetrics {
+    pub ok: prometheus::IntCounter,
+    pub err: prometheus::IntCounter,
+}
+
+pub fn init_reload(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if RELOADS.get().is_some() {
+        return Ok(());
+    }
+    let ok =
+        prometheus::IntCounter::new("vajra_config_reloads_total", "Successful config reloads")?;
+    let err = prometheus::IntCounter::new(
+        "vajra_config_reload_errors_total",
+        "Config reload attempts that failed validation",
+    )?;
+    reg.register(Box::new(ok.clone()))?;
+    reg.register(Box::new(err.clone()))?;
+    RELOADS
+        .set(ReloadMetrics { ok, err })
+        .map_err(|_| prometheus::Error::Msg("reload metrics already set".into()))?;
+    Ok(())
+}
+
+pub fn reload() -> Option<&'static ReloadMetrics> {
+    RELOADS.get()
+}
+
+#[inline]
+pub fn record_reload_ok() {
+    if let Some(m) = RELOADS.get() {
+        m.ok.inc();
+    }
+}
+
+#[inline]
+pub fn record_reload_err() {
+    if let Some(m) = RELOADS.get() {
+        m.err.inc();
     }
 }
