@@ -1,0 +1,86 @@
+# Prometheus alert rules for vajra PHP-FPM + bytes metrics.
+# Include from prometheus.yml:
+#   rule_files:
+#     - /etc/vajra/alerts/vajra.yaml
+groups:
+  - name: vajra_php_fpm
+    interval: 30s
+    rules:
+      - alert: VajraFpmErrorRateHigh
+        expr: |
+          rate(vajra_php_fpm_requests_total{status="error"}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vajra: PHP-FPM error rate > 0.1/s"
+          description: "{{ $value | printf \"%.3f\" }} errors/s over last 5m on {{ $labels.instance }}"
+
+      - alert: VajraFpmTimeoutRateHigh
+        expr: |
+          rate(vajra_php_fpm_requests_total{status="timeout"}[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "vajra: PHP-FPM timeout rate > 0.05/s"
+          description: "{{ $value | printf \"%.3f\" }} timeouts/s on {{ $labels.instance }}"
+
+      - alert: VajraFpmParseErrors
+        expr: |
+          rate(vajra_php_fpm_requests_total{status="parse"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vajra: FastCGI protocol decode errors"
+          description: "{{ $value | printf \"%.3f\" }} parse errors/s — upstream probably broken"
+
+      - alert: VajraFpmP95LatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(vajra_php_fpm_duration_seconds_bucket{status="ok"}[5m]))
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vajra: PHP-FPM p95 latency > 1s"
+          description: "p95 = {{ $value | printf \"%.3f\" }}s on {{ $labels.instance }}"
+
+      - alert: VajraFpmAllFailing
+        expr: |
+          rate(vajra_php_fpm_requests_total{status="ok"}[5m]) == 0
+          and
+          rate(vajra_php_fpm_requests_total{status="error"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "vajra: all PHP-FPM requests failing"
+          description: "ok rate = 0 पर error rate > 0 — FPM या pool down हो सकता है"
+
+      - alert: VajraNoTraffic
+        expr: |
+          rate(vajra_bytes_sent_total[10m]) == 0
+          and
+          rate(vajra_bytes_received_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "vajra: no traffic in last 10m"
+          description: "वज्र process शायद hang है या traffic बंद है"
+
+  - name: vajra_bytes
+    interval: 30s
+    rules:
+      - alert: VajraBandwidthSpike
+        expr: |
+          rate(vajra_bytes_sent_total[1m]) > 50 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "vajra: egress > 50 MiB/s sustained"
+          description: "{{ $value | humanize1024 }}B/s outbound — possible DoS or large transfer"
