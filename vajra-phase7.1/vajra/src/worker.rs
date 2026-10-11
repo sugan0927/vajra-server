@@ -533,6 +533,8 @@ pub struct Worker {
     batch: Vec<(u64, i32, u32)>,
     multishot_accept: bool,
     cfg: Config,
+    /// Security-header policy (from `[headers]`), refreshed on reload.
+    sec: crate::config::HeaderSettings,
     // control plane
     id: usize,
     ctl: Option<Inbox>,
@@ -610,6 +612,7 @@ impl Worker {
             proxies: Rc::new(proxies),
             cache: Cache::new(&dynamic.cache),
             cache_max_object: dynamic.cache.max_object_bytes,
+            sec: dynamic.headers.clone(),
             obs,
             log: LogSink {
                 fd: log_fd,
@@ -811,6 +814,7 @@ impl Worker {
 
     /// Build everything first, swap only if all of it worked.
     fn apply_reload(&mut self, d: &Dynamic) -> Result<(), String> {
+        self.sec = d.headers.clone();
         if self.draining.is_some() {
             return Err("worker is shutting down".into());
         }
@@ -1210,6 +1214,7 @@ impl Worker {
             max_body: self.cfg.max_body_bytes,
             secure,
             client_ip: c.peer,
+            sec: Some(&self.sec),
         };
         let outcome = if use_rbuf {
             http::process(&c.rbuf.as_slice()[..fast], &mut c.out, date, &mut ctx)

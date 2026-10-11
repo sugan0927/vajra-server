@@ -91,6 +91,7 @@ fn http1_requests_never_panic_and_consumption_is_bounded() {
                 max_body: 1024,
                 secure: false,
                 client_ip: Some("192.0.2.1".parse().unwrap()),
+                sec: None,
             };
             let o = http::process(&buf, &mut out, &date, &mut ctx);
             assert!(o.consumed <= buf.len());

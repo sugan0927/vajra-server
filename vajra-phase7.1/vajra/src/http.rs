@@ -40,12 +40,72 @@ pub struct Ctx<'a> {
     pub max_body: usize,
     pub secure: bool,
     pub client_ip: Option<IpAddr>,
+    /// Security-header policy from the running config.
+    pub sec: Option<&'a crate::config::HeaderSettings>,
 }
 
 thread_local! {
     /// `Alt-Svc` value advertised on HTTP/1.1 and HTTP/2 responses (empty = none).
     /// Thread-local: each worker sets its own copy, nothing is shared.
     static ALT_SVC: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+// ─── Security-header plumbing (thread-local, set once per request) ──
+
+thread_local! {
+    /// Resolved `Name: value` pairs for the current request.
+    static SEC_HDR: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    /// Header names this request must drop from upstream/cached responses
+    /// (config either replaces or removes them for this path).
+    static SEC_DROP: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Compute and cache the security-header actions for `path`.
+/// Called once per request as soon as the target is parsed.
+fn prepare_sec(cfg: Option<&crate::config::HeaderSettings>, path: &str) {
+    SEC_HDR.with(|h| h.borrow_mut().clear());
+    SEC_DROP.with(|d| d.borrow_mut().clear());
+    let Some(cfg) = cfg else { return };
+    let eff = cfg.effective_at(path);
+    SEC_HDR.with(|h| {
+        SEC_DROP.with(|d| {
+            let mut h = h.borrow_mut();
+            let mut d = d.borrow_mut();
+            for (i, name) in crate::config::SECURITY_HEADERS.iter().enumerate() {
+                match eff[i] {
+                    crate::config::Action::Skip => {}
+                    crate::config::Action::Remove => d.push(name.to_string()),
+                    crate::config::Action::Set(v) => {
+                        d.push(name.to_string());
+                        h.push((name.to_string(), v.to_string()));
+                    }
+                }
+            }
+        })
+    });
+}
+
+/// Append the resolved security headers as complete `Name: value\r\n` lines.
+#[inline]
+fn push_sec_into(out: &mut Vec<u8>) {
+    SEC_HDR.with(|h| {
+        for (n, v) in h.borrow().iter() {
+            out.extend_from_slice(n.as_bytes());
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(v.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+    });
+}
+
+/// `true` if the config manages `name` (sets or removes it) at the current path.
+#[inline]
+fn sec_manages(name: &[u8]) -> bool {
+    SEC_DROP.with(|d| {
+        d.borrow()
+            .iter()
+            .any(|n| n.as_bytes().eq_ignore_ascii_case(name))
+    })
 }
 
 /// Advertise HTTP/3 on this thread's responses, e.g. `h3=":443"; ma=86400`.
@@ -150,6 +210,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 let method = req.method.unwrap_or("");
                 let target = req.path.unwrap_or("/");
                 let path = target.split('?').next().unwrap_or("/");
+                prepare_sec(ctx.sec, path);
 
                 let mut keep_alive = req.version == Some(1);
                 let mut content_length: Option<usize> = None;
@@ -512,6 +573,7 @@ fn write_head(
         out.extend_from_slice(b"\r\n");
     }
     push_alt_svc_h1(out);
+    push_sec_into(out);
     out.extend_from_slice(b"Content-Type: ");
     out.extend_from_slice(content_type.as_bytes());
     out.extend_from_slice(b"\r\nContent-Length: ");
@@ -552,8 +614,10 @@ pub fn write_proxy_response(
         out.extend_from_slice(b"\r\n");
     }
     push_alt_svc_h1(out);
+    push_sec_into(out);
     for (n, v) in headers {
         if is_hop_by_hop(n)
+            || sec_manages(n)
             || n.eq_ignore_ascii_case(b"date")
             || n.eq_ignore_ascii_case(b"server")
             || n.eq_ignore_ascii_case(b"x-cache")
@@ -760,6 +824,7 @@ mod tests {
             max_body: 1024,
             secure: false,
             client_ip: Some("192.0.2.7".parse().unwrap()),
+            sec: None,
         };
         let o = process(input.as_bytes(), &mut out, DATE, &mut ctx);
         (o, String::from_utf8(out).unwrap())

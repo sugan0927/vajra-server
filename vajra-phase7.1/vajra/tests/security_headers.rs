@@ -230,7 +230,7 @@ fn config_parses_all_fields() {
          x_content_type_options = \"nosniff\"\n\
          referrer_policy = \"no-referrer\"\n\
          permissions_policy = \"geolocation=()\"\n\
-         [[headers.override]]\n\
+         [[headers.overrides]]\n\
          path = \"/api/\"\n\
          hsts = \"max-age=60\"\n",
     )
@@ -258,7 +258,7 @@ fn config_rejects_crlf_injection() {
 fn config_rejects_relative_override_path() {
     let err = parse_cfg(
         "[headers]\nx_frame_options = \"DENY\"\n\
-         [[headers.override]]\npath = \"api/\"\nx_frame_options = \"SAMEORIGIN\"",
+         [[headers.overrides]]\npath = \"api/\"\nx_frame_options = \"SAMEORIGIN\"",
     )
     .unwrap_err();
     assert!(err.contains("absolute"), "{err}");

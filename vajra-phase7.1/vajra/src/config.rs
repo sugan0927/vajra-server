@@ -1221,7 +1221,7 @@ mod tests {
 
 /// The five managed header names, in RFC canonical spelling.
 /// Lookup against response headers is case-insensitive.
-const SECURITY_HEADERS: [&str; 5] = [
+pub const SECURITY_HEADERS: [&str; 5] = [
     "Strict-Transport-Security",
     "X-Frame-Options",
     "X-Content-Type-Options",
@@ -1231,7 +1231,7 @@ const SECURITY_HEADERS: [&str; 5] = [
 
 /// What to do with one managed header for a given path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Action<'a> {
+pub enum Action<'a> {
     /// Don't touch — leave whatever (if anything) is already there.
     Skip,
     /// Strip any existing instance.
@@ -1275,7 +1275,7 @@ impl HeaderSettings {
     }
 
     /// Effective action per managed header at `path`.
-    fn effective_at(&self, path: &str) -> [Action<'_>; 5] {
+    pub fn effective_at(&self, path: &str) -> [Action<'_>; 5] {
         let mut eff = [
             self.hsts.as_deref().map_or(Action::Skip, Action::Set),
             self.x_frame_options
