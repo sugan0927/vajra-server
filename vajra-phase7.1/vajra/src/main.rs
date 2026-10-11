@@ -79,6 +79,9 @@ fn die(msg: String) -> ! {
 }
 
 fn main() {
+    if let Err(e) = vajra::metrics::init() {
+        eprintln!("vajra: metrics init failed: {e}");
+    }
     let cli = parse_cli();
     if std::env::var_os("VAJRA_H2_TRACE").is_some_and(|v| v != "0" && !v.is_empty()) {
         vajra::h2::set_trace(true);

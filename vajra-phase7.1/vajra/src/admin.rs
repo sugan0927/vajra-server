@@ -56,7 +56,11 @@ pub struct Manager {
 
 impl Manager {
     pub fn new(handles: Vec<Handle>, config_path: Option<PathBuf>, running: Settings) -> Self {
-        Self { handles, config_path, running: Mutex::new(running) }
+        Self {
+            handles,
+            config_path,
+            running: Mutex::new(running),
+        }
     }
 
     /// Gather a snapshot from every worker and render Prometheus text.
@@ -101,7 +105,10 @@ impl Manager {
         let (ack, rx) = mpsc::channel::<Result<(), String>>();
         let mut expected = 0;
         for h in &self.handles {
-            if h.send(Cmd::Reload { dynamic: Arc::clone(&dynamic), ack: ack.clone() }) {
+            if h.send(Cmd::Reload {
+                dynamic: Arc::clone(&dynamic),
+                ack: ack.clone(),
+            }) {
                 expected += 1;
             }
         }
@@ -121,22 +128,35 @@ impl Manager {
         }
         if !errors.is_empty() {
             errors.dedup();
-            return Err(format!("{ok}/{expected} workers applied the new config; {}", errors.join("; ")));
+            return Err(format!(
+                "{ok}/{expected} workers applied the new config; {}",
+                errors.join("; ")
+            ));
         }
 
         // Remember the reloadable parts; keep the rest as actually running.
         running.static_files = new.static_files.clone();
         running.proxies = new.proxies.clone();
         running.tls = match (&running.tls, &new.tls) {
-            (Some(old), Some(n)) => Some(crate::config::TlsSettings { listen: old.listen, cert: n.cert.clone(), key: n.key.clone() }),
+            (Some(old), Some(n)) => Some(crate::config::TlsSettings {
+                listen: old.listen,
+                cert: n.cert.clone(),
+                key: n.key.clone(),
+            }),
             (old, _) => old.clone(),
         };
         running.access_log = new.access_log.clone();
         running.cache = new.cache;
 
-        let mut msg = format!("reloaded {ok} worker(s): {} proxy route(s)", dynamic.proxies.len());
+        let mut msg = format!(
+            "reloaded {ok} worker(s): {} proxy route(s)",
+            dynamic.proxies.len()
+        );
         if !pending_restart.is_empty() {
-            msg.push_str(&format!("; restart required for: {}", pending_restart.join(", ")));
+            msg.push_str(&format!(
+                "; restart required for: {}",
+                pending_restart.join(", ")
+            ));
         }
         Ok(msg)
     }
@@ -225,13 +245,15 @@ fn handle(mut s: TcpStream, mgr: &Manager) {
 pub fn serve(addr: SocketAddr, mgr: Arc<Manager>) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
     let listener = TcpListener::bind(addr)?;
     let bound = listener.local_addr()?;
-    let h = thread::Builder::new().name("vajra-admin".into()).spawn(move || {
-        for conn in listener.incoming() {
-            if let Ok(s) = conn {
-                handle(s, &mgr);
+    let h = thread::Builder::new()
+        .name("vajra-admin".into())
+        .spawn(move || {
+            for conn in listener.incoming() {
+                if let Ok(s) = conn {
+                    handle(s, &mgr);
+                }
             }
-        }
-    })?;
+        })?;
     Ok((bound, h))
 }
 
@@ -286,7 +308,10 @@ mod tests {
             out
         };
         let r = get("GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
-        assert!(r.starts_with("HTTP/1.1 200 OK") && r.ends_with("ok\n"), "{r}");
+        assert!(
+            r.starts_with("HTTP/1.1 200 OK") && r.ends_with("ok\n"),
+            "{r}"
+        );
         let r = get("HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
         assert!(r.contains("Content-Length: 3") && r.ends_with("\r\n\r\n"));
         let r = get("GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n");

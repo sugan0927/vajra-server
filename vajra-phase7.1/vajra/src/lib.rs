@@ -39,3 +39,4 @@ pub mod static_files;
 pub mod sys;
 pub mod tls;
 pub mod worker;
+pub mod metrics;
