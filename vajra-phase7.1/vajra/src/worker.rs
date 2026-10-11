@@ -1291,6 +1291,7 @@ impl Worker {
                     .or_else(|| Some(crate::req_id::RequestId::generate())),
             );
             let path = req.path.split('?').next().unwrap_or("/");
+            crate::http::prepare_sec(Some(&self.sec), path);
             let head_only = req.method == "HEAD";
             let inm = req
                 .headers

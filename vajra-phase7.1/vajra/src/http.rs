@@ -62,7 +62,7 @@ thread_local! {
 
 /// Compute and cache the security-header actions for `path`.
 /// Called once per request as soon as the target is parsed.
-fn prepare_sec(cfg: Option<&crate::config::HeaderSettings>, path: &str) {
+pub(crate) fn prepare_sec(cfg: Option<&crate::config::HeaderSettings>, path: &str) {
     SEC_HDR.with(|h| h.borrow_mut().clear());
     SEC_DROP.with(|d| d.borrow_mut().clear());
     let Some(cfg) = cfg else { return };
@@ -98,9 +98,20 @@ fn push_sec_into(out: &mut Vec<u8>) {
     });
 }
 
+/// Push the resolved security headers into an `(name, value)` Vec used
+/// by H2/H3 response builders. Called once per response.
+#[inline]
+pub(crate) fn push_sec_h2(v: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+    SEC_HDR.with(|h| {
+        for (n, val) in h.borrow().iter() {
+            v.push((n.as_bytes().to_vec(), val.as_bytes().to_vec()));
+        }
+    });
+}
+
 /// `true` if the config manages `name` (sets or removes it) at the current path.
 #[inline]
-fn sec_manages(name: &[u8]) -> bool {
+pub(crate) fn sec_manages(name: &[u8]) -> bool {
     SEC_DROP.with(|d| {
         d.borrow()
             .iter()
@@ -678,6 +689,7 @@ fn h2_base(date: &[u8; DATE_LEN], ctype: &str, len: u64) -> Vec<(Vec<u8>, Vec<u8
         v.push((b"x-request-id".to_vec(), id.as_str().as_bytes().to_vec()));
     }
     push_alt_svc_h2(&mut v);
+    push_sec_h2(&mut v);
     v
 }
 
@@ -753,8 +765,10 @@ pub fn h2_proxy_response(
         (b"date".to_vec(), date.to_vec()),
     ];
     push_alt_svc_h2(&mut out);
+    push_sec_h2(&mut out);
     for (n, v) in headers {
         if is_hop_by_hop(n)
+            || sec_manages(n)
             || n.eq_ignore_ascii_case(b"date")
             || n.eq_ignore_ascii_case(b"server")
             || n.eq_ignore_ascii_case(b"x-cache")

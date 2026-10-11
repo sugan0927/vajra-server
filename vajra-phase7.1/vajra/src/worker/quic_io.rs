@@ -377,6 +377,8 @@ impl Worker {
 
     /// Route one HTTP/3 request (same decisions as the HTTP/2 path).
     fn q_dispatch(&mut self, r: Ready) {
+        let path = r.req.path.split('?').next().unwrap_or("/");
+        crate::http::prepare_sec(Some(&self.sec), path);
         let date = self.cur_date;
         let req = &r.req;
         let peer = Some(r.peer.ip());
