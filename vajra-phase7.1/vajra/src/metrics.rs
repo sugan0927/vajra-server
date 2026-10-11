@@ -9,6 +9,7 @@
 //! no existing dashboards break.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -58,6 +59,8 @@ pub fn init() -> prometheus::Result<()> {
     }
 
     init_http(&reg)?;
+    init_fpm(&reg)?;
+    init_bytes(&reg)?;
 
     REGISTRY
         .set(reg)
@@ -80,6 +83,7 @@ pub fn render() -> String {
     if let (Some(u), Some(s)) = (UPTIME.get(), START.get()) {
         u.set(s.elapsed().as_secs_f64());
     }
+    flush_bytes();
     let mut buf = Vec::with_capacity(4096);
     let encoder = TextEncoder::new();
     if encoder.encode(&reg.gather(), &mut buf).is_err() {
@@ -272,6 +276,154 @@ mod timing_tests {
         init().unwrap();
         request_end_unknown();
         request_end("GET", 200);
+    }
+}
+
+
+// ─── PHP-FPM metrics ──────────────────────────────────────────────────
+
+pub const FPM_STATUSES: [&str; 4] = ["ok", "error", "timeout", "parse"];
+
+pub struct FpmMetrics {
+    pub requests: Vec<prometheus::IntCounter>,
+    pub durations: Vec<prometheus::Histogram>,
+}
+
+static FPM: OnceLock<FpmMetrics> = OnceLock::new();
+
+pub fn init_fpm(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if FPM.get().is_some() { return Ok(()); }
+
+    let buckets = vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
+                       0.5, 1.0, 2.5, 5.0, 10.0];
+
+    let mut requests = Vec::with_capacity(FPM_STATUSES.len());
+    let mut durations = Vec::with_capacity(FPM_STATUSES.len());
+
+    for st in FPM_STATUSES {
+        let labels: std::collections::HashMap<String, String> =
+            [("status".to_string(), st.to_string())].into_iter().collect();
+
+        let ctr = prometheus::IntCounter::with_opts(
+            prometheus::Opts::new("vajra_php_fpm_requests_total",
+                                  "PHP-FPM (FastCGI) requests by outcome")
+                .const_labels(labels.clone()))?;
+        reg.register(Box::new(ctr.clone()))?;
+        requests.push(ctr);
+
+        let hist = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                "vajra_php_fpm_duration_seconds",
+                "PHP-FPM (FastCGI) request duration in seconds")
+                .buckets(buckets.clone())
+                .const_labels(labels))?;
+        reg.register(Box::new(hist.clone()))?;
+        durations.push(hist);
+    }
+
+    FPM.set(FpmMetrics { requests, durations })
+        .map_err(|_| prometheus::Error::Msg("fpm metrics already set".into()))?;
+    Ok(())
+}
+
+pub fn fpm() -> Option<&'static FpmMetrics> { FPM.get() }
+
+impl FpmMetrics {
+    /// `status_idx` must be an index into `FPM_STATUSES`.
+    #[inline]
+    pub fn observe(&self, status_idx: usize, dur: std::time::Duration) {
+        if let Some(c) = self.requests.get(status_idx) { c.inc(); }
+        if let Some(h) = self.durations.get(status_idx) {
+            h.observe(dur.as_secs_f64());
+        }
+    }
+}
+
+// ─── Bytes counters ───────────────────────────────────────────────────
+
+static BYTES_SENT: OnceLock<prometheus::IntCounter> = OnceLock::new();
+static BYTES_RECEIVED: OnceLock<prometheus::IntCounter> = OnceLock::new();
+static BYTES_SENT_FAST: AtomicU64 = AtomicU64::new(0);
+static BYTES_RECEIVED_FAST: AtomicU64 = AtomicU64::new(0);
+
+pub fn init_bytes(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if BYTES_SENT.get().is_some() { return Ok(()); }
+    let s = prometheus::IntCounter::new(
+        "vajra_bytes_sent_total",
+        "Bytes written to clients (request+response)")?;
+    let r = prometheus::IntCounter::new(
+        "vajra_bytes_received_total",
+        "Bytes read from clients")?;
+    reg.register(Box::new(s.clone()))?;
+    reg.register(Box::new(r.clone()))?;
+    let _ = BYTES_SENT.set(s);
+    let _ = BYTES_RECEIVED.set(r);
+    Ok(())
+}
+
+/// Record response bytes. Cheap: single atomic add.
+#[inline]
+pub fn record_bytes_sent(n: u64) {
+    if n == 0 { return; }
+    let prev = BYTES_SENT_FAST.fetch_add(n, Ordering::Relaxed);
+    // Flush to the counter every ~1 MiB to avoid atomic-heavy hot path.
+    if (prev + n) & 0x000F_FFFF < prev & 0x000F_FFFF {
+        flush_bytes();
+    }
+    let _ = prev;
+}
+
+#[inline]
+pub fn record_bytes_received(n: u64) {
+    if n == 0 { return; }
+    BYTES_RECEIVED_FAST.fetch_add(n, Ordering::Relaxed);
+}
+
+/// Push accumulated atomic counters into prometheus IntCounters.
+/// Called from the metrics scraper.
+pub fn flush_bytes() {
+    if let Some(c) = BYTES_SENT.get() {
+        let n = BYTES_SENT_FAST.swap(0, Ordering::Relaxed);
+        if n > 0 { c.inc_by(n); }
+    }
+    if let Some(c) = BYTES_RECEIVED.get() {
+        let n = BYTES_RECEIVED_FAST.swap(0, Ordering::Relaxed);
+        if n > 0 { c.inc_by(n); }
+    }
+}
+
+#[cfg(test)]
+mod fpm_tests {
+    use super::*;
+
+    #[test]
+    fn fpm_observe_round_trip() {
+        init().unwrap();
+        let m = fpm().expect("fpm metrics");
+        let before = m.requests[0].get();
+        m.observe(0, std::time::Duration::from_millis(5));
+        assert_eq!(m.requests[0].get(), before + 1);
+        let text = render();
+        assert!(text.contains("vajra_php_fpm_requests_total"));
+        assert!(text.contains("vajra_php_fpm_duration_seconds"));
+    }
+
+    #[test]
+    fn bytes_counters_round_trip() {
+        init().unwrap();
+        record_bytes_sent(1024);
+        record_bytes_received(2048);
+        flush_bytes();
+        let text = render();
+        assert!(text.contains("vajra_bytes_sent_total"));
+        assert!(text.contains("vajra_bytes_received_total"));
+    }
+
+    #[test]
+    fn unknown_status_is_noop() {
+        init().unwrap();
+        let m = fpm().unwrap();
+        m.observe(999, std::time::Duration::from_secs(1));
     }
 }
 

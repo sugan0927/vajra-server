@@ -13,7 +13,7 @@
 //! [`Observer`] (metrics + access log), and proxied `GET`s are answered from the
 //! per-core response cache when a fresh entry exists (`X-Cache: HIT`).
 
-use crate::cache::{self, Cache, CacheMode};
+use crate::cache::{self, Cache};
 use crate::date::DATE_LEN;
 use crate::h2::{H2Body, H2Response};
 use crate::observe::{Http, Observer};
@@ -123,6 +123,14 @@ pub fn fail(
 /// Parse as many complete (possibly pipelined) requests as `input` holds,
 /// appending responses to `out`. Stops after a request that needs an action.
 pub fn process(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &mut Ctx) -> Outcome {
+    let out_start = out.len();
+    let result = process_inner(input, out, date, ctx);
+    crate::metrics::record_bytes_sent((out.len() - out_start) as u64);
+    crate::metrics::record_bytes_received(result.consumed as u64);
+    result
+}
+
+fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &mut Ctx) -> Outcome {
     let mut consumed = 0;
     loop {
         crate::metrics::request_begin();

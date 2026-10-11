@@ -256,6 +256,8 @@ struct ProxyJob {
     /// HTTP/2 stream awaiting the answer (0 for HTTP/1.1).
     stream: u32,
     cache: CacheMode,
+    started: std::time::Instant,
+    fpm_observed: bool,
     method: String,
     target: String,
     t0: Instant,
@@ -291,6 +293,8 @@ impl ProxyJob {
             idempotent: spec.idempotent,
             stream,
             cache: spec.cache,
+            started: spec.started,
+            fpm_observed: false,
             method: spec.method,
             target: spec.target,
             t0: Instant::now(),
@@ -2044,6 +2048,16 @@ impl Worker {
     }
 
     fn proxy_fail(&mut self, idx: usize, status: u16) {
+        // PHP-FPM metrics: only when this job was a FastCGI request.
+        if let Some(job) = self.conns[idx].proxy.as_mut() {
+            if job.fcgi.is_some() && !job.fpm_observed {
+                job.fpm_observed = true;
+                let kind: usize = if status == 504 { 2 } else { 1 };
+                if let Some(m) = crate::metrics::fpm() {
+                    m.observe(kind, job.started.elapsed());
+                }
+            }
+        }
         let date = self.cur_date;
         let now = self.now;
         let mut job = self.conns[idx].proxy.take().expect("job");
@@ -2087,6 +2101,15 @@ impl Worker {
     }
 
     fn proxy_done(&mut self, idx: usize) {
+        // PHP-FPM success: record once when a FastCGI upstream answered.
+        if let Some(job) = self.conns[idx].proxy.as_mut() {
+            if job.fcgi.is_some() && !job.fpm_observed {
+                job.fpm_observed = true;
+                if let Some(m) = crate::metrics::fpm() {
+                    m.observe(0, job.started.elapsed());  // 0 == "ok"
+                }
+            }
+        }
         let date = self.cur_date;
         let now = self.now;
         let mut job = self.conns[idx].proxy.take().expect("job");
