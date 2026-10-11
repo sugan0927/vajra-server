@@ -83,7 +83,11 @@ impl Manager {
             }
         }
         snaps.sort_by_key(|s| s.worker);
-        observe::render_prometheus(&snaps)
+        {
+            let mut body = observe::render_prometheus(&snaps);
+            body.push_str(&crate::metrics::render());
+            body
+        }
     }
 
     /// Re-read the config file and push the reloadable part to every worker.
