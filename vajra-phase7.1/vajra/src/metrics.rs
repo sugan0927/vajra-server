@@ -615,44 +615,58 @@ pub fn record_reload_err() {
 static RATE_LIMIT: OnceLock<RateLimitMetrics> = OnceLock::new();
 
 pub struct RateLimitMetrics {
-    pub denied: prometheus::IntCounter,
+    pub allowed: prometheus::IntCounter,
+    pub rejected: prometheus::IntCounter,
     pub cap_reached: prometheus::IntCounter,
-    pub buckets: prometheus::IntGauge,
+    pub tracked_ips: prometheus::IntGauge,
 }
 
 pub fn init_rate_limit(reg: &prometheus::Registry) -> prometheus::Result<()> {
     if RATE_LIMIT.get().is_some() {
         return Ok(());
     }
-    let denied = prometheus::IntCounter::new(
-        "vajra_rate_limit_denied_total",
-        "Requests denied by the rate limiter (includes cap-reached)",
+    let allowed = prometheus::IntCounter::new(
+        "vajra_rate_limit_allowed_total",
+        "Requests allowed by the rate limiter",
+    )?;
+    let rejected = prometheus::IntCounter::new(
+        "vajra_rate_limit_rejected_total",
+        "Requests rejected by the rate limiter (includes cap-reached)",
     )?;
     let cap_reached = prometheus::IntCounter::new(
         "vajra_rate_limit_cap_reached_total",
-        "Requests denied because max_tracked_ips was reached",
+        "Requests rejected because max_tracked_ips was reached",
     )?;
-    let buckets = prometheus::IntGauge::new(
-        "vajra_rate_limit_buckets",
+    let tracked_ips = prometheus::IntGauge::new(
+        "vajra_rate_limit_tracked_ips",
         "Tracked rate-limit buckets (sampled at cleanup boundary)",
     )?;
-    reg.register(Box::new(denied.clone()))?;
+    reg.register(Box::new(allowed.clone()))?;
+    reg.register(Box::new(rejected.clone()))?;
     reg.register(Box::new(cap_reached.clone()))?;
-    reg.register(Box::new(buckets.clone()))?;
+    reg.register(Box::new(tracked_ips.clone()))?;
     RATE_LIMIT
         .set(RateLimitMetrics {
-            denied,
+            allowed,
+            rejected,
             cap_reached,
-            buckets,
+            tracked_ips,
         })
         .map_err(|_| prometheus::Error::Msg("rate-limit metrics already set".into()))?;
     Ok(())
 }
 
 #[inline]
-pub fn record_rate_limit_denied() {
+pub fn record_rate_limit_allowed() {
     if let Some(m) = RATE_LIMIT.get() {
-        m.denied.inc();
+        m.allowed.inc();
+    }
+}
+
+#[inline]
+pub fn record_rate_limit_rejected() {
+    if let Some(m) = RATE_LIMIT.get() {
+        m.rejected.inc();
     }
 }
 
@@ -664,9 +678,9 @@ pub fn record_rate_limit_cap_reached() {
 }
 
 #[inline]
-pub fn record_rate_limit_buckets(n: usize) {
+pub fn record_rate_limit_tracked_ips(n: usize) {
     if let Some(m) = RATE_LIMIT.get() {
-        m.buckets.set(n as i64);
+        m.tracked_ips.set(n as i64);
     }
 }
 
@@ -677,15 +691,17 @@ mod rate_limit_metrics_tests {
     #[test]
     fn rate_limit_counters_and_gauge() {
         init().unwrap();
-        record_rate_limit_denied();
+        record_rate_limit_allowed();
+        record_rate_limit_rejected();
         record_rate_limit_cap_reached();
-        record_rate_limit_buckets(7);
+        record_rate_limit_tracked_ips(7);
         let text = render();
-        assert!(text.contains("vajra_rate_limit_denied_total"), "{text}");
+        assert!(text.contains("vajra_rate_limit_allowed_total"), "{text}");
+        assert!(text.contains("vajra_rate_limit_rejected_total"), "{text}");
         assert!(
             text.contains("vajra_rate_limit_cap_reached_total"),
             "{text}"
         );
-        assert!(text.contains("vajra_rate_limit_buckets"), "{text}");
+        assert!(text.contains("vajra_rate_limit_tracked_ips"), "{text}");
     }
 }

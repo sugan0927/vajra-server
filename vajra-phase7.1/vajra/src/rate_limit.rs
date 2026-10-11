@@ -255,6 +255,7 @@ impl RateLimiter {
             self.cleanup(now);
         }
         if self.is_whitelisted(ip) {
+            crate::metrics::record_rate_limit_allowed();
             return Decision::Allow;
         }
 
@@ -263,7 +264,7 @@ impl RateLimiter {
 
         if !self.buckets.contains_key(&key) && self.buckets.len() >= self.settings.max_tracked_ips {
             crate::metrics::record_rate_limit_cap_reached();
-            crate::metrics::record_rate_limit_denied();
+            crate::metrics::record_rate_limit_rejected();
             return Decision::Deny {
                 retry_after_secs: 1,
             };
@@ -282,11 +283,12 @@ impl RateLimiter {
 
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
+            crate::metrics::record_rate_limit_allowed();
             Decision::Allow
         } else {
             let needed = 1.0 - bucket.tokens;
             let retry = (needed / rps).ceil() as u32;
-            crate::metrics::record_rate_limit_denied();
+            crate::metrics::record_rate_limit_rejected();
             Decision::Deny {
                 retry_after_secs: retry.max(1),
             }
@@ -302,6 +304,6 @@ impl RateLimiter {
             self.buckets
                 .retain(|_, b| now.duration_since(b.last_seen).as_secs_f64() < threshold_secs);
         }
-        crate::metrics::record_rate_limit_buckets(self.buckets.len());
+        crate::metrics::record_rate_limit_tracked_ips(self.buckets.len());
     }
 }

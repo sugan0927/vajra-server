@@ -326,3 +326,18 @@ fn config_validation_overrides() {
     .unwrap_err();
     assert!(err.contains("overrides[0].requests_per_second"), "{err}");
 }
+
+#[test]
+fn metrics_reflect_allow_and_reject() {
+    // init() is idempotent; safe even if another test already called it.
+    let _ = vajra::metrics::init();
+    let mut rl = RateLimiter::new(settings(1, 1, 100));
+    let t0 = Instant::now();
+    assert_eq!(rl.check(ip("1.2.3.4"), t0), Decision::Allow);
+    assert!(matches!(rl.check(ip("1.2.3.4"), t0), Decision::Deny { .. }));
+
+    let text = vajra::metrics::render();
+    assert!(text.contains("vajra_rate_limit_allowed_total"), "{text}");
+    assert!(text.contains("vajra_rate_limit_rejected_total"), "{text}");
+    assert!(text.contains("vajra_rate_limit_tracked_ips"), "{text}");
+}

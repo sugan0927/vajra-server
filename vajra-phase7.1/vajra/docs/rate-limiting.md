@@ -189,3 +189,19 @@ unchanged) for:
 - `burst < requests_per_second` — sustained throughput is burst-limited.
 
 Logs only; they do not fail startup.
+
+## Update — Day 13: metric names aligned to spec
+
+Renamed and extended the rate-limit metric set. Dashboards written
+against the day-12 names must be updated; the semantic behaviour is
+unchanged.
+
+| Old (day 12)                          | New (day 13)                          | Meaning |
+|---------------------------------------|---------------------------------------|---------|
+| —                                     | `vajra_rate_limit_allowed_total`      | requests permitted (successful token consume *or* whitelist bypass) |
+| `vajra_rate_limit_denied_total`       | `vajra_rate_limit_rejected_total`     | requests refused with 429, including cap-reached |
+| `vajra_rate_limit_buckets`            | `vajra_rate_limit_tracked_ips`        | gauge, current bucket count |
+| `vajra_rate_limit_cap_reached_total`  | *(unchanged)*                         | rejections due to `max_tracked_ips` |
+
+`allowed` is incremented only inside `check()` — the disabled fast path
+and `ctx.rate_limit == None` both skip the counters entirely.
