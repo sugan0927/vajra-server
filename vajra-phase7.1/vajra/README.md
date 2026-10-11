@@ -118,3 +118,10 @@ Import [`grafana/dashboard.json`](grafana/dashboard.json)
 
 Panels: requests/sec by class, PHP-FPM outcomes/sec, latency p50/p95/p99,
 bandwidth, uptime, requests-in-flight, active-connections, config reloads.
+
+## Security headers
+
+Vajra can inject `Strict-Transport-Security`, `X-Frame-Options`,
+`X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy` on
+every response, with per-path overrides. See
+[`docs/security-headers.md`](docs/security-headers.md).

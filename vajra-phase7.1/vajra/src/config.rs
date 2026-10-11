@@ -125,6 +125,7 @@ pub struct Settings {
     pub access_log: Option<String>,
     pub log_format: LogFormat,
     pub admin: Option<SocketAddr>,
+    pub headers: HeaderSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -270,6 +271,7 @@ pub struct Dynamic {
     pub access_log: Option<String>,
     pub log_format: LogFormat,
     pub cache: CacheSettings,
+    pub headers: HeaderSettings,
 }
 
 impl StaticSettings {
@@ -318,6 +320,7 @@ impl Default for Settings {
             access_log: None,
             log_format: LogFormat::Text,
             admin: None,
+            headers: HeaderSettings::default(),
         }
     }
 }
@@ -345,6 +348,8 @@ struct Raw {
     #[serde(default)]
     logging: RawLogging,
     admin: Option<RawAdmin>,
+    #[serde(default)]
+    headers: Option<RawHeaders>,
 }
 
 #[derive(Deserialize)]
@@ -825,6 +830,7 @@ impl Settings {
         };
 
         Ok(Self {
+            headers: build_headers(raw.headers)?,
             health: raw.health,
             listen,
             workers: raw.server.workers,
@@ -864,6 +870,7 @@ impl Settings {
             access_log: self.access_log.clone(),
             log_format: self.log_format,
             cache: self.cache,
+            headers: self.headers.clone(),
         }
     }
 
@@ -1206,4 +1213,236 @@ mod tests {
         assert_eq!(parse("").unwrap().log_format, LogFormat::Text);
         assert!(parse("[logging]\nformat = \"xml\"").is_err());
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Day 8: security headers
+// ═══════════════════════════════════════════════════════════════════
+
+/// The five managed header names, in RFC canonical spelling.
+/// Lookup against response headers is case-insensitive.
+const SECURITY_HEADERS: [&str; 5] = [
+    "Strict-Transport-Security",
+    "X-Frame-Options",
+    "X-Content-Type-Options",
+    "Referrer-Policy",
+    "Permissions-Policy",
+];
+
+/// What to do with one managed header for a given path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action<'a> {
+    /// Don't touch — leave whatever (if anything) is already there.
+    Skip,
+    /// Strip any existing instance.
+    Remove,
+    /// Strip any existing instance and set this value.
+    Set(&'a str),
+}
+
+/// Runtime security-header policy (resolved from `[headers]`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeaderSettings {
+    pub hsts: Option<String>,
+    pub x_frame_options: Option<String>,
+    pub x_content_type_options: Option<String>,
+    pub referrer_policy: Option<String>,
+    pub permissions_policy: Option<String>,
+    pub overrides: Vec<HeaderOverride>,
+}
+
+/// Per-path override. `Some("")` means "remove for this path".
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeaderOverride {
+    pub path: String,
+    pub hsts: Option<String>,
+    pub x_frame_options: Option<String>,
+    pub x_content_type_options: Option<String>,
+    pub referrer_policy: Option<String>,
+    pub permissions_policy: Option<String>,
+}
+
+impl HeaderSettings {
+    /// Longest matching prefix wins.
+    fn best_override_for(&self, path: &str) -> Option<&HeaderOverride> {
+        let mut best: Option<&HeaderOverride> = None;
+        for ov in &self.overrides {
+            if path.starts_with(&ov.path) && best.map_or(true, |b| ov.path.len() > b.path.len()) {
+                best = Some(ov);
+            }
+        }
+        best
+    }
+
+    /// Effective action per managed header at `path`.
+    fn effective_at(&self, path: &str) -> [Action<'_>; 5] {
+        let mut eff = [
+            self.hsts.as_deref().map_or(Action::Skip, Action::Set),
+            self.x_frame_options
+                .as_deref()
+                .map_or(Action::Skip, Action::Set),
+            self.x_content_type_options
+                .as_deref()
+                .map_or(Action::Skip, Action::Set),
+            self.referrer_policy
+                .as_deref()
+                .map_or(Action::Skip, Action::Set),
+            self.permissions_policy
+                .as_deref()
+                .map_or(Action::Skip, Action::Set),
+        ];
+
+        if let Some(ov) = self.best_override_for(path) {
+            // Inline: closures cannot be generic over 'a, so `Action<'a>`
+            // can't be returned through a helper closure. Five explicit
+            // maps keep the borrow checker happy and are trivial to audit.
+            #[inline]
+            fn act(v: &Option<String>) -> Option<Action<'_>> {
+                v.as_deref().map(|s| {
+                    if s.is_empty() {
+                        Action::Remove
+                    } else {
+                        Action::Set(s)
+                    }
+                })
+            }
+            let over = [
+                act(&ov.hsts),
+                act(&ov.x_frame_options),
+                act(&ov.x_content_type_options),
+                act(&ov.referrer_policy),
+                act(&ov.permissions_policy),
+            ];
+            for (i, a) in over.iter().enumerate() {
+                if let Some(a) = a {
+                    eff[i] = *a;
+                }
+            }
+        }
+        eff
+    }
+}
+
+/// Apply the security-header policy for `path` to `headers`.
+///
+/// * Managed headers already present are replaced (case-insensitive).
+/// * Unmanaged headers are left alone.
+/// * `Action::Remove` (from an override with `""`) strips the header entirely.
+pub fn apply_security_headers(
+    cfg: &HeaderSettings,
+    path: &str,
+    headers: &mut Vec<(String, String)>,
+) {
+    let eff = cfg.effective_at(path);
+    for (i, name) in SECURITY_HEADERS.iter().enumerate() {
+        match eff[i] {
+            Action::Skip => {}
+            Action::Remove => {
+                headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+            }
+            Action::Set(v) => {
+                headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+                headers.push((name.to_string(), v.to_string()));
+            }
+        }
+    }
+}
+
+// ─── Raw TOML shapes ─────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawHeaders {
+    hsts: Option<String>,
+    x_frame_options: Option<String>,
+    x_content_type_options: Option<String>,
+    referrer_policy: Option<String>,
+    permissions_policy: Option<String>,
+    #[serde(default)]
+    overrides: Vec<RawHeaderOverride>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHeaderOverride {
+    path: String,
+    hsts: Option<String>,
+    x_frame_options: Option<String>,
+    x_content_type_options: Option<String>,
+    referrer_policy: Option<String>,
+    permissions_policy: Option<String>,
+}
+
+/// Validate + convert raw headers section. Returns an error string on:
+/// * empty top-level value (operator probably meant to omit the key)
+/// * CR or LF in any value (header injection)
+/// * relative / empty override path
+fn build_headers(raw: Option<RawHeaders>) -> Result<HeaderSettings, String> {
+    let Some(r) = raw else {
+        return Ok(HeaderSettings::default());
+    };
+
+    let top = [
+        ("hsts", &r.hsts),
+        ("x_frame_options", &r.x_frame_options),
+        ("x_content_type_options", &r.x_content_type_options),
+        ("referrer_policy", &r.referrer_policy),
+        ("permissions_policy", &r.permissions_policy),
+    ];
+    for (field, v) in top {
+        if let Some(s) = v {
+            if s.is_empty() {
+                return Err(format!(
+                    "[headers] {field}: empty value; omit the key to skip the header"
+                ));
+            }
+            if s.contains('\n') || s.contains('\r') {
+                return Err(format!(
+                    "[headers] {field}: value must not contain CR/LF (header injection)"
+                ));
+            }
+        }
+    }
+
+    let mut overrides = Vec::with_capacity(r.overrides.len());
+    for (i, o) in r.overrides.into_iter().enumerate() {
+        if o.path.is_empty() || !o.path.starts_with('/') {
+            return Err(format!(
+                "[[headers.override]] #{i}: path must be absolute (start with '/')"
+            ));
+        }
+        let fields = [
+            ("hsts", &o.hsts),
+            ("x_frame_options", &o.x_frame_options),
+            ("x_content_type_options", &o.x_content_type_options),
+            ("referrer_policy", &o.referrer_policy),
+            ("permissions_policy", &o.permissions_policy),
+        ];
+        for (field, v) in fields {
+            if let Some(s) = v {
+                if s.contains('\n') || s.contains('\r') {
+                    return Err(format!(
+                        "[[headers.override]] #{i} {field}: value must not contain CR/LF"
+                    ));
+                }
+            }
+        }
+        overrides.push(HeaderOverride {
+            path: o.path,
+            hsts: o.hsts,
+            x_frame_options: o.x_frame_options,
+            x_content_type_options: o.x_content_type_options,
+            referrer_policy: o.referrer_policy,
+            permissions_policy: o.permissions_policy,
+        });
+    }
+
+    Ok(HeaderSettings {
+        hsts: r.hsts,
+        x_frame_options: r.x_frame_options,
+        x_content_type_options: r.x_content_type_options,
+        referrer_policy: r.referrer_policy,
+        permissions_policy: r.permissions_policy,
+        overrides,
+    })
 }
