@@ -168,3 +168,63 @@ Counters (Prometheus, added Day 19):
    worker start, so entries survive restart. Data files whose index
    entries are missing are considered orphaned and swept at first
    cleanup.
+
+---
+
+## Update — Day 19d: HIT replay + on-disk entry format v2
+
+The storage layer now stores a full response (status + headers + body),
+not just the body, so a cache HIT can be replayed without contacting
+the upstream.
+
+### On-disk entry format v2
+
+    [u16 status LE]
+    [u32 hdr_len LE]
+    [hdr blob]              # hdr_len bytes
+    [body bytes]
+
+    hdr blob =
+      [u32 n_headers LE]
+      repeated n_headers times:
+        [u32 nlen LE][name bytes]
+        [u32 vlen LE][value bytes]
+
+Cache-key prefix bumped `v1\0` → `v2\0`. Existing `v1` entries are
+silently ignored on read (treated as a miss) and overwritten on the
+next request for the same key. No migration script needed.
+
+`max_entry_size` now bounds the whole serialised entry (status +
+headers + body), not just the body. `get()` returns
+`Option<(u16, Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>)>`; a truncated or
+malformed entry is treated as a miss and the index entry is evicted.
+
+### Response headers
+
+Stored headers are filtered through the same `cache::storable_headers`
+routine the in-memory proxy cache uses, so `Connection`,
+`Transfer-Encoding`, `Date`, etc. are never replayed.
+
+### Request flow (updated)
+
+On a cache HIT:
+
+- H1: `write_proxy_response(..., xcache = None, fcgi_cache = Some("HIT"))`.
+- H2: `h2_proxy_response(..., xcache = None, fcgi_cache = Some("HIT"))`.
+- The upstream is not contacted; `obs.response` and `request_end` fire
+  with the cached status and length.
+
+On a cache MISS:
+
+- The key is carried on `spec.fcgi_cache_key`; `proxy_done` stores the
+  response after `head` is parsed, using `cache::storable_headers`.
+
+On BYPASS (any rule fired, or non-GET/HEAD):
+
+- The response is served upstream and never stored.
+
+### Tests
+
+`src/cache/fastcgi.rs` round-trips status + headers + body through the
+storage layer, including empty-header entries; the previous single-body
+tests are still present under adapted signatures.
