@@ -6,13 +6,13 @@
 //! allocation through the request pipeline, and per-path overrides
 //! being selected from the real `req.path` string.
 //!
-//! TODO(day12-followup): a `[access]` deny-list + `[rate_limit]` test
-//! asserting that access wins (403 before 429). That needs the
-//! `AccessSettings` constructor, which is not part of this crate's
-//! public surface yet.
+//! The fourth test pins down the ordering between `[access]` and
+//! `[rate_limit]`: when both would deny, access wins and the
+//! rate-limiter's bucket map is never touched.
 
 use std::net::IpAddr;
 
+use vajra::access::AccessSettings;
 use vajra::cache::Cache;
 use vajra::config::{CacheSettings, ProxySettings};
 use vajra::date::DATE_LEN;
@@ -277,6 +277,63 @@ fn per_route_override_has_independent_budget_through_http() {
         rl.buckets.len(),
         2,
         "expected exactly two namespaces, got {}",
+        rl.buckets.len()
+    );
+}
+
+#[test]
+fn access_deny_wins_over_rate_limit_and_does_not_consume_budget() {
+    let table = table();
+    let mut cache = Cache::new(&CacheSettings::default());
+    let mut obs = Observer::new();
+
+    // Burst = rps = 1: if the rate limiter ran first, request #1 would
+    // be allowed and request #2 would be 429. We instead expect every
+    // request to be 403 and the bucket map to stay empty.
+    let mut rl = RateLimiter::new(RateLimitSettings {
+        enabled: true,
+        requests_per_second: 1,
+        burst: 1,
+        whitelist_ips: vec![],
+        max_tracked_ips: 100,
+        cleanup_interval_secs: 60,
+        aggregate_ipv6_64: false,
+        overrides: vec![],
+    });
+    let access = AccessSettings {
+        allow_ips: vec![],
+        deny_ips: vec!["203.0.113.5/32".parse().unwrap()],
+        trusted_proxies: vec![],
+    };
+    let ip: IpAddr = "203.0.113.5".parse().unwrap();
+
+    for i in 0..10 {
+        let mut ctx = Ctx {
+            files: None,
+            proxies: &table,
+            cache: &mut cache,
+            obs: &mut obs,
+            now: 10,
+            max_body: 1024,
+            secure: false,
+            client_ip: Some(ip),
+            sec: None,
+            access: Some(&access),
+            rate_limit: Some(&mut rl),
+        };
+        let mut out = Vec::new();
+        let _ = http::process(GET_ROOT, &mut out, &DATE, &mut ctx);
+        assert_eq!(
+            status_of(&out),
+            403,
+            "request #{i} must be 403 (access deny), got: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    assert!(
+        rl.buckets.is_empty(),
+        "access-denied client must never allocate a rate-limit bucket, got {}",
         rl.buckets.len()
     );
 }
