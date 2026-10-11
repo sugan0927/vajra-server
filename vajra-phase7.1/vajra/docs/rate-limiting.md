@@ -1,0 +1,149 @@
+# Rate limiting — design
+
+**Status:** design only. src/rate_limit.rs has types + signatures;
+RateLimiter::check is not yet called from the request path.
+
+## Goals
+
+- Bound per-client rate with smooth rate + hard burst cap.
+- Zero-lock hot path, no background threads.
+- Bounded memory under attack.
+- Reuse effective-client-IP plumbing from [access].
+
+## Non-goals
+
+- Global cross-worker exact enforcement; use nginx/Envoy for that.
+- Distributed limiting across Vajra instances.
+- Fairness, weighted quotas, per-route budgets.
+- Adaptive limiting from traffic signals.
+
+## Algorithm - token bucket
+
+Per tracked client IP: capacity = burst, refill = rps / worker,
+initial tokens = burst.
+
+Refill lazily: tokens = min(burst, tokens + elapsed * rps).
+If tokens >= 1: consume, allow. Else deny with
+Retry-After = ceil((1 - tokens) / rps) seconds.
+
+Why not sliding window: O(requests/window) memory, needs sorted
+structure, expensive at scale.
+Why not fixed window: burst doubling at window boundary.
+
+## Data structures
+
+RateLimiter { settings, buckets: HashMap<IpAddr, Bucket>, last_cleanup }
+Bucket      { tokens: f64, last_refill: Instant, last_seen: Instant }
+
+~100 B/IP, ~10 MB per worker at max_tracked_ips = 100_000.
+
+## Concurrency model
+
+Per-worker sharded (option B): lock-free, each worker gets rps / N
+and full burst. Trade-off: a client spraying across workers can
+momentarily get N x burst tokens; sustained converges to rps.
+Rejected global mutex: serializes all requests, kills io_uring gains.
+
+Two consequences:
+- rps in config is global; each worker gets rps / N.
+- A single client pinned to one worker sees rps / N.
+
+## Interaction with [access]
+
+Order: parse headers -> [access] (403 on deny) -> [rate_limit]
+(429 + Retry-After on deny) -> route.
+
+Rationale:
+- [access] is a hard gate; denied IPs should not consume budget.
+- [rate_limit] then only sees traffic you would serve; 429 is
+  unambiguous.
+- Both use same effective client IP.
+
+## Config reference
+
+[rate_limit]
+enabled                = true
+requests_per_second    = 50
+burst                  = 100
+whitelist_ips          = ["127.0.0.1", "10.0.0.0/8"]
+max_tracked_ips        = 100_000
+cleanup_interval_secs  = 60
+
+Fields:
+- enabled                bool   default false
+- requests_per_second    u32    default 0
+- burst                  u32    default 0
+- whitelist_ips          CIDR[] default []
+- max_tracked_ips        usize  default 0
+- cleanup_interval_secs  u64    default 0
+
+Validation (fatal at startup):
+- enabled -> requests_per_second >= 1
+- enabled -> burst >= 1
+- enabled -> max_tracked_ips >= 1
+- whitelist entries must parse as CIDR
+
+Soft warnings (logged only):
+- cleanup_interval_secs == 0 with enabled = true
+- burst < requests_per_second
+
+## Memory bounds
+
+1. Cap: buckets.len() >= max_tracked_ips -> new IPs denied
+   (fail-closed). Sustained attacks tighten rather than degrade.
+2. Cleanup: evict last_seen older than 2 x (burst / rps) seconds,
+   triggered on the cleanup_interval_secs boundary.
+3. No insertion on whitelisted IPs -> never inflates buckets.
+
+Operator signal: rate_limit_cap_reached_total counter (Day 12).
+
+## Response semantics
+
+Deny:
+- Status 429.
+- Header Retry-After: <n> (whole seconds, >= 1).
+- Empty body.
+
+Allow:
+- No headers added. Rate limiting is invisible to successful
+  requests; no X-RateLimit-* leakage.
+
+## Observability
+
+- rate_limit_denied_total         counter, per denied request.
+- rate_limit_cap_reached_total    counter, when cap is hit.
+- rate_limit_buckets              gauge, sampled at cleanup boundary.
+- First denial per IP logged at info; later denials suppressed until
+  the next cleanup window.
+
+## Testing plan (Day 12)
+
+Unit tests (tests/rate_limit.rs):
+1. disabled_limiter_always_allows
+2. burst_then_throttle
+3. refill_over_time
+4. burst_cap_enforced
+5. whitelisted_ip_not_tracked
+6. retry_after_is_ceil_and_at_least_1
+7. cap_reached_denies_new_ip
+8. cleanup_evicts_idle_buckets
+9. config_validation (enabled with rps = 0 fails; bad CIDR fails)
+
+Integration tests (tests/rate_limit_e2e.rs, Day 12):
+- 5 requests at rps=1 burst=3 -> first 3 pass, 4th and 5th get 429
+  with Retry-After.
+- Same with [access] deny-list also present -> access wins, 403 not
+  429.
+
+## Open questions (Day 12)
+
+1. Global mode: add shared = true with Arc<Mutex<RateLimiter>>?
+   Deferred; start with per-worker.
+2. Per-route overrides [[rate_limit.overrides]] with path, rps,
+   burst. Likely Day 13.
+3. Connection affinity: does a Vajra connection stick to one worker?
+   If yes, N x burst bound is real; else 1 x burst in practice.
+4. IPv6 /64 aggregation. Deferred; document current per-address
+   behavior explicitly.
+5. Metrics plumbing: confirm whether the metrics module exposes
+   atomic-global counters or per-worker counters.

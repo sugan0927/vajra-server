@@ -62,6 +62,7 @@
 //! needs a restart; [`Settings::restart_required`] reports what changed.
 
 use crate::php::PhpConfig;
+use crate::rate_limit::{build_rate_limit, RateLimitSettings, RawRateLimit};
 use crate::worker::Config as WorkerConfig;
 use serde::Deserialize;
 use serde::Serialize;
@@ -128,6 +129,7 @@ pub struct Settings {
     pub admin: Option<SocketAddr>,
     pub headers: HeaderSettings,
     pub access: AccessSettings,
+    pub rate_limit: RateLimitSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +277,7 @@ pub struct Dynamic {
     pub cache: CacheSettings,
     pub headers: HeaderSettings,
     pub access: AccessSettings,
+    pub rate_limit: RateLimitSettings,
 }
 
 impl StaticSettings {
@@ -325,6 +328,7 @@ impl Default for Settings {
             admin: None,
             headers: HeaderSettings::default(),
             access: AccessSettings::default(),
+            rate_limit: RateLimitSettings::default(),
         }
     }
 }
@@ -355,6 +359,7 @@ struct Raw {
     #[serde(default)]
     headers: Option<RawHeaders>,
     access: Option<RawAccess>,
+    rate_limit: Option<RawRateLimit>,
 }
 
 #[derive(Deserialize)]
@@ -837,6 +842,7 @@ impl Settings {
         Ok(Self {
             headers: build_headers(raw.headers)?,
             access: build_access(raw.access.unwrap_or_default())?,
+            rate_limit: build_rate_limit(raw.rate_limit.unwrap_or_default())?,
             health: raw.health,
             listen,
             workers: raw.server.workers,

@@ -35,6 +35,7 @@ pub mod observe;
 pub mod php;
 pub mod proxy;
 pub mod quic;
+pub mod rate_limit;
 pub mod req_id;
 pub mod router;
 pub mod static_files;
