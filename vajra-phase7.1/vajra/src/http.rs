@@ -297,15 +297,26 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                     return done(input.len(), true);
                 }
 
-                // ─── IP access control ──────────────────────────────
-                // Runs after headers are parsed, before routing. Deny
-                // wins over allow; empty policy is a no-op.
-                if let (Some(access), Some(peer)) = (ctx.access, ctx.client_ip) {
-                    if !access.is_empty() {
-                        let xff = lookup_header(req.headers, "x-forwarded-for");
-                        let xri = lookup_header(req.headers, "x-real-ip");
-                        let client = access.effective_client_ip(peer, xff, xri);
-                        if access.evaluate(client) == crate::access::AccessDecision::Deny {
+                // ─── Effective client IP ────────────────────────────
+                // Post trusted-proxy / XFF resolution. Both the access
+                // check and the rate limiter use this same value so an
+                // IP denied by one is the same IP seen by the other.
+                //
+                // Absent `ctx.client_ip` (tests), both checks are
+                // skipped entirely.
+                if let Some(peer) = ctx.client_ip {
+                    let xff = lookup_header(req.headers, "x-forwarded-for");
+                    let xri = lookup_header(req.headers, "x-real-ip");
+                    let client = ctx
+                        .access
+                        .map(|a| a.effective_client_ip(peer, xff, xri))
+                        .unwrap_or(peer);
+
+                    // ─── IP access control ────────────────────────
+                    if let Some(access) = ctx.access {
+                        if !access.is_empty()
+                            && access.evaluate(client) == crate::access::AccessDecision::Deny
+                        {
                             eprintln!(
                                 "vajra: access denied client={client} peer={peer} path={path}"
                             );
@@ -313,24 +324,23 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                             return done(input.len(), true);
                         }
                     }
-                }
 
-                // ─── Rate limiting ──────────────────────────────────
-                let rl_decision = match (ctx.rate_limit.as_deref_mut(), ctx.client_ip) {
-                    (Some(rl), Some(peer)) if !rl.is_disabled() => {
-                        Some(rl.check_with_path(peer, std::time::Instant::now(), path))
+                    // ─── Rate limiting ────────────────────────────
+                    let rl_decision = match ctx.rate_limit.as_deref_mut() {
+                        Some(rl) if !rl.is_disabled() => {
+                            Some(rl.check_with_path(client, std::time::Instant::now(), path))
+                        }
+                        _ => None,
+                    };
+                    if let Some(crate::rate_limit::Decision::Deny { retry_after_secs }) =
+                        rl_decision
+                    {
+                        eprintln!(
+                            "vajra: rate-limit denied client={client} peer={peer} path={path} retry_after={retry_after_secs}"
+                        );
+                        fail_429(out, ctx.obs, ctx.client_ip, retry_after_secs, date);
+                        return done(input.len(), true);
                     }
-                    _ => None,
-                };
-                if let Some(crate::rate_limit::Decision::Deny { retry_after_secs }) = rl_decision {
-                    eprintln!(
-                        "vajra: rate-limit denied client={} path={path} retry_after={retry_after_secs}",
-                        ctx.client_ip
-                            .map(|ip| ip.to_string())
-                            .unwrap_or_else(|| "-".into())
-                    );
-                    fail_429(out, ctx.obs, ctx.client_ip, retry_after_secs, date);
-                    return done(input.len(), true);
                 }
 
                 let head_only = method == "HEAD";
