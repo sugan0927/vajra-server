@@ -82,3 +82,50 @@ Hot-path tests (`src/http.rs::compress_hot_path_tests`, 8 tests):
    Vary.
 8. `head_request_not_compressed` — HEAD → identity + Vary, uncompressed
    Content-Length.
+
+## Update — Day 16: gzip fallback
+
+Two encoders are now supported. Config gains `gzip` and `gzip_level`:
+
+    [compression]
+    brotli      = true
+    gzip        = true
+    level       = 6         # brotli quality, 0..=11
+    gzip_level  = 6         # gzip level, 1..=9
+    min_size    = 1024
+
+### Negotiation
+
+`negotiate(Accept-Encoding, settings) -> Encoding`:
+
+1. If neither `brotli` nor `gzip` enabled → `Identity`.
+2. Parse `br`, `gzip` / `x-gzip`, `*` q-values (default 1.0).
+3. Effective q for a codec = its own q, else `*` q, else 0. A disabled
+   codec has effective q 0 regardless of the header.
+4. Pick the highest effective q. **Ties favour brotli.**
+5. If the winner has q ≤ 0 → `Identity`.
+
+### Response
+
+- brotli → `Content-Encoding: br`
+- gzip   → `Content-Encoding: gzip`
+- identity → no `Content-Encoding` header.
+
+`Vary: Accept-Encoding` is added on every compressible type regardless
+of the outcome, so shared caches key correctly.
+
+### Validation
+
+- `brotli = true` and `level > 11` → fatal.
+- `gzip = true` and `gzip_level < 1 | > 9` → fatal.
+- `min_size = 0` while either is on → soft warning.
+
+### Tests added (Day 16)
+
+Unit (`src/compress.rs`): negotiate prefers brotli, falls back to gzip,
+respects disabled codecs, edge cases (`q=0`, `*`, empty), gzip round-trip,
+config validation.
+
+Hot-path (`src/http.rs::compress_hot_path_tests`):
+`gzip_served_when_brotli_disabled`, `brotli_preferred_when_both_available`,
+`gzip_fallback_when_br_not_offered`, `gzip_only_not_used_when_client_asks_br_only`.

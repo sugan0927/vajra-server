@@ -532,23 +532,33 @@ fn maybe_compress<'a>(
     comp: Option<&crate::compress::CompressionSettings>,
     accept: Option<&str>,
 ) -> (std::borrow::Cow<'a, [u8]>, &'static str) {
-    use crate::compress::{brotli_compress, is_pre_compressed, negotiate, Encoding};
+    use crate::compress::{brotli_compress, gzip_compress, is_pre_compressed, negotiate, Encoding};
     use std::borrow::Cow;
 
     let Some(comp) = comp else {
         return (Cow::Borrowed(body), "");
     };
-    if !comp.enabled || is_pre_compressed(ctype) {
+    if !(comp.brotli || comp.gzip) || is_pre_compressed(ctype) {
         return (Cow::Borrowed(body), "");
     }
     let vary = "Vary: Accept-Encoding\r\n";
-    if head_only || body.len() < comp.min_size || negotiate(accept) != Encoding::Brotli {
+    if head_only || body.len() < comp.min_size {
         return (Cow::Borrowed(body), vary);
     }
-    match brotli_compress(body, comp.level) {
-        Some(c) if c.len() < body.len() => (
+    let enc = negotiate(accept, comp);
+    let compressed = match enc {
+        Encoding::Brotli => brotli_compress(body, comp.level),
+        Encoding::Gzip => gzip_compress(body, comp.gzip_level),
+        Encoding::Identity => None,
+    };
+    match (enc, compressed) {
+        (Encoding::Brotli, Some(c)) if c.len() < body.len() => (
             Cow::Owned(c),
             "Vary: Accept-Encoding\r\nContent-Encoding: br\r\n",
+        ),
+        (Encoding::Gzip, Some(c)) if c.len() < body.len() => (
+            Cow::Owned(c),
+            "Vary: Accept-Encoding\r\nContent-Encoding: gzip\r\n",
         ),
         _ => (Cow::Borrowed(body), vary),
     }
@@ -1338,8 +1348,30 @@ mod compress_hot_path_tests {
 
     fn settings(on: bool, min_size: usize) -> CompressionSettings {
         CompressionSettings {
-            enabled: on,
+            brotli: on,
+            gzip: false,
             level: 6,
+            gzip_level: 6,
+            min_size,
+        }
+    }
+
+    fn settings_gzip_only(min_size: usize) -> CompressionSettings {
+        CompressionSettings {
+            brotli: false,
+            gzip: true,
+            level: 6,
+            gzip_level: 6,
+            min_size,
+        }
+    }
+
+    fn settings_both(min_size: usize) -> CompressionSettings {
+        CompressionSettings {
+            brotli: true,
+            gzip: true,
+            level: 6,
+            gzip_level: 6,
             min_size,
         }
     }
@@ -1467,6 +1499,39 @@ mod compress_hot_path_tests {
     fn head_request_not_compressed() {
         let comp = settings(true, 1024);
         let resp = render_mem(&BIG, "text/html", true, Some(&comp), Some("br"));
+        assert!(header_value(&resp, "Content-Encoding").is_none());
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert_eq!(content_length(&resp), BIG.len() as u64);
+    }
+
+    #[test]
+    fn gzip_served_when_brotli_disabled() {
+        let comp = settings_gzip_only(1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("gzip"));
+        assert_eq!(header_value(&resp, "Content-Encoding"), Some("gzip"));
+        assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
+        assert!(content_length(&resp) < BIG.len() as u64);
+    }
+
+    #[test]
+    fn brotli_preferred_when_both_available() {
+        let comp = settings_both(1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("gzip, br"));
+        assert_eq!(header_value(&resp, "Content-Encoding"), Some("br"));
+    }
+
+    #[test]
+    fn gzip_fallback_when_br_not_offered() {
+        let comp = settings_both(1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("gzip"));
+        assert_eq!(header_value(&resp, "Content-Encoding"), Some("gzip"));
+        assert!(content_length(&resp) < BIG.len() as u64);
+    }
+
+    #[test]
+    fn gzip_only_not_used_when_client_asks_br_only() {
+        let comp = settings_gzip_only(1024);
+        let resp = render_mem(&BIG, "text/html", false, Some(&comp), Some("br"));
         assert!(header_value(&resp, "Content-Encoding").is_none());
         assert_eq!(header_value(&resp, "Vary"), Some("Accept-Encoding"));
         assert_eq!(content_length(&resp), BIG.len() as u64);

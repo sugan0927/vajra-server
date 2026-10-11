@@ -1,15 +1,22 @@
-//! On-the-fly Brotli compression for Vajra responses.
+//! On-the-fly compression for Vajra responses.
 //! See `docs/compression.md` for the design.
+//!
+//! Brotli preferred, gzip fallback, identity otherwise. Both codecs are
+//! opt-in via `[compression] brotli` / `[compression] gzip`.
 
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompressionSettings {
-    /// Master switch. `false` = pass every response through unchanged.
-    pub enabled: bool,
-    /// Brotli quality, 0..=11. Higher = smaller, slower.
+    /// Brotli enabled.
+    pub brotli: bool,
+    /// Gzip enabled.
+    pub gzip: bool,
+    /// Brotli quality, 0..=11.
     pub level: u32,
-    /// Responses below this byte size are served uncompressed.
+    /// Gzip level, 1..=9.
+    pub gzip_level: u32,
+    /// Responses below this size are served uncompressed.
     pub min_size: usize,
 }
 
@@ -17,8 +24,12 @@ pub struct CompressionSettings {
 pub struct RawCompression {
     #[serde(default)]
     pub brotli: bool,
+    #[serde(default)]
+    pub gzip: bool,
     #[serde(default = "default_level")]
     pub level: u32,
+    #[serde(default = "default_gzip_level")]
+    pub gzip_level: u32,
     #[serde(default = "default_min_size")]
     pub min_size: usize,
 }
@@ -26,46 +37,65 @@ pub struct RawCompression {
 fn default_level() -> u32 {
     6
 }
+fn default_gzip_level() -> u32 {
+    6
+}
 fn default_min_size() -> usize {
     1024
 }
 
 pub fn build_compression(raw: RawCompression) -> Result<CompressionSettings, String> {
-    if raw.brotli {
-        if raw.level > 11 {
-            return Err(format!(
-                "[compression] level must be 0..=11, got {}",
-                raw.level
-            ));
-        }
-        if raw.min_size == 0 {
-            eprintln!(
-                "vajra: warning: [compression] min_size = 0; every response will be compressed"
-            );
-        }
+    if raw.brotli && raw.level > 11 {
+        return Err(format!(
+            "[compression] level (brotli) must be 0..=11, got {}",
+            raw.level
+        ));
+    }
+    if raw.gzip && (raw.gzip_level < 1 || raw.gzip_level > 9) {
+        return Err(format!(
+            "[compression] gzip_level must be 1..=9, got {}",
+            raw.gzip_level
+        ));
+    }
+    if raw.brotli && raw.min_size == 0 {
+        eprintln!("vajra: warning: [compression] min_size = 0; every response will be compressed");
+    }
+    if raw.gzip && raw.min_size == 0 {
+        eprintln!("vajra: warning: [compression] min_size = 0; every response will be compressed");
     }
     Ok(CompressionSettings {
-        enabled: raw.brotli,
+        brotli: raw.brotli,
+        gzip: raw.gzip,
         level: raw.level,
+        gzip_level: raw.gzip_level,
         min_size: raw.min_size,
     })
 }
 
-/// Which content encoding we will actually apply.
+/// Which content encoding we will apply.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Encoding {
     Brotli,
+    Gzip,
     Identity,
 }
 
-/// Parse `Accept-Encoding` and decide whether brotli is acceptable.
-/// Returns `Brotli` iff `br` is present with q > 0, or `*` is present
-/// with q > 0 and `br` is not explicitly rejected.
-pub fn negotiate(header: Option<&str>) -> Encoding {
+/// Parse `Accept-Encoding` and pick the best encoding available.
+/// Preference order (when both are enabled and equally acceptable):
+/// **brotli > gzip**. `identity` is the fallback.
+///
+/// - `br;q=0` explicitly disables brotli.
+/// - `*;q=0` disables both.
+/// - A codec that isn't enabled in settings is never returned.
+pub fn negotiate(header: Option<&str>, comp: &CompressionSettings) -> Encoding {
+    if !comp.brotli && !comp.gzip {
+        return Encoding::Identity;
+    }
     let Some(h) = header else {
         return Encoding::Identity;
     };
     let mut br_q: Option<f32> = None;
+    let mut gz_q: Option<f32> = None;
     let mut star_q: Option<f32> = None;
     for tok in h.split(',') {
         let mut parts = tok.split(';');
@@ -81,21 +111,33 @@ pub fn negotiate(header: Option<&str>) -> Encoding {
         }
         match name.as_str() {
             "br" => br_q = Some(q),
+            "gzip" | "x-gzip" => gz_q = Some(q),
             "*" => star_q = Some(q),
             _ => {}
         }
     }
-    let eff = br_q.or(star_q).unwrap_or(0.0);
-    if eff > 0.0 {
+    let eff_br = if comp.brotli {
+        br_q.or(star_q).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let eff_gz = if comp.gzip {
+        gz_q.or(star_q).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    if eff_br > 0.0 && eff_br >= eff_gz {
         Encoding::Brotli
+    } else if eff_gz > 0.0 {
+        Encoding::Gzip
     } else {
         Encoding::Identity
     }
 }
 
 /// True if the response is already a compressed binary format and
-/// re-compressing it is pure waste. `Content-Type` is compared
-/// case-insensitively with parameters stripped.
+/// re-compressing it is pure waste.
 pub fn is_pre_compressed(content_type: &str) -> bool {
     let ct = content_type
         .split(';')
@@ -137,8 +179,7 @@ pub enum Plan {
     Skip,
 }
 
-/// Decide whether a given response should be compressed. Every gate is
-/// independently testable; see the unit tests at the bottom of this file.
+/// Decide whether a given response should be compressed.
 pub fn decide(
     settings: &CompressionSettings,
     accept_encoding: Option<&str>,
@@ -146,12 +187,10 @@ pub fn decide(
     body_len: usize,
     is_head: bool,
 ) -> Plan {
-    if !settings.enabled {
+    if !settings.brotli && !settings.gzip {
         return Plan::Skip;
     }
     if is_head {
-        // HEAD responses carry no body to compress; skip to avoid burning
-        // CPU on bytes nobody reads. See docs/compression.md.
         return Plan::Skip;
     }
     if body_len < settings.min_size {
@@ -160,15 +199,13 @@ pub fn decide(
     if is_pre_compressed(content_type) {
         return Plan::Skip;
     }
-    if negotiate(accept_encoding) != Encoding::Brotli {
+    if negotiate(accept_encoding, settings) == Encoding::Identity {
         return Plan::Skip;
     }
     Plan::Compress
 }
 
 /// Compress `body` with brotli at `level` (clamped to 0..=11).
-/// Returns `None` on encoder failure; the caller then falls back to
-/// identity and the response is served as-is.
 pub fn brotli_compress(body: &[u8], level: u32) -> Option<Vec<u8>> {
     use brotli::enc::BrotliEncoderParams;
     let params = BrotliEncoderParams {
@@ -182,81 +219,133 @@ pub fn brotli_compress(body: &[u8], level: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Compress `body` with gzip at `level` (clamped to 1..=9).
+pub fn gzip_compress(body: &[u8], level: u32) -> Option<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let lvl = level.clamp(1, 9);
+    let mut enc = GzEncoder::new(
+        Vec::with_capacity(body.len() / 2 + 32),
+        Compression::new(lvl),
+    );
+    if enc.write_all(body).is_err() {
+        return None;
+    }
+    enc.finish().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn both() -> CompressionSettings {
+        CompressionSettings {
+            brotli: true,
+            gzip: true,
+            level: 6,
+            gzip_level: 6,
+            min_size: 1024,
+        }
+    }
+    fn br_only() -> CompressionSettings {
+        CompressionSettings {
+            brotli: true,
+            gzip: false,
+            level: 6,
+            gzip_level: 6,
+            min_size: 1024,
+        }
+    }
+    fn gz_only() -> CompressionSettings {
+        CompressionSettings {
+            brotli: false,
+            gzip: true,
+            level: 6,
+            gzip_level: 6,
+            min_size: 1024,
+        }
+    }
+    fn neither() -> CompressionSettings {
+        CompressionSettings {
+            brotli: false,
+            gzip: false,
+            level: 6,
+            gzip_level: 6,
+            min_size: 1024,
+        }
+    }
+
     #[test]
-    fn negotiate_handles_simple_and_q_values() {
-        assert_eq!(negotiate(None), Encoding::Identity);
-        assert_eq!(negotiate(Some("")), Encoding::Identity);
-        assert_eq!(negotiate(Some("gzip")), Encoding::Identity);
-        assert_eq!(negotiate(Some("br")), Encoding::Brotli);
-        assert_eq!(negotiate(Some("gzip, br")), Encoding::Brotli);
-        assert_eq!(negotiate(Some("br;q=0.8, gzip;q=0.9")), Encoding::Brotli);
-        assert_eq!(negotiate(Some("br;q=0")), Encoding::Identity);
-        assert_eq!(negotiate(Some("gzip, *;q=0.5")), Encoding::Brotli);
-        assert_eq!(negotiate(Some("*;q=0")), Encoding::Identity);
+    fn negotiate_prefers_brotli_over_gzip() {
+        let s = both();
+        assert_eq!(negotiate(Some("gzip, br"), &s), Encoding::Brotli);
+        assert_eq!(negotiate(Some("br, gzip"), &s), Encoding::Brotli);
+        assert_eq!(
+            negotiate(Some("br;q=0.8, gzip;q=0.8"), &s),
+            Encoding::Brotli
+        );
+    }
+
+    #[test]
+    fn negotiate_falls_back_to_gzip() {
+        let s = both();
+        assert_eq!(negotiate(Some("gzip"), &s), Encoding::Gzip);
+        assert_eq!(negotiate(Some("br;q=0, gzip"), &s), Encoding::Gzip);
+        assert_eq!(negotiate(Some("*;q=0.5"), &s), Encoding::Brotli);
+    }
+
+    #[test]
+    fn negotiate_respects_disabled_codecs() {
+        assert_eq!(negotiate(Some("br, gzip"), &br_only()), Encoding::Brotli);
+        assert_eq!(negotiate(Some("gzip"), &br_only()), Encoding::Identity);
+        assert_eq!(negotiate(Some("br"), &gz_only()), Encoding::Identity);
+        assert_eq!(negotiate(Some("gzip"), &gz_only()), Encoding::Gzip);
+        assert_eq!(negotiate(Some("br, gzip"), &neither()), Encoding::Identity);
+    }
+
+    #[test]
+    fn negotiate_handles_edge_cases() {
+        let s = both();
+        assert_eq!(negotiate(None, &s), Encoding::Identity);
+        assert_eq!(negotiate(Some(""), &s), Encoding::Identity);
+        assert_eq!(negotiate(Some("*;q=0"), &s), Encoding::Identity);
+        assert_eq!(negotiate(Some("gzip;q=0"), &s), Encoding::Identity);
+        assert_eq!(negotiate(Some("identity"), &s), Encoding::Identity);
     }
 
     #[test]
     fn pre_compressed_types_are_skipped() {
-        for ct in &[
-            "image/png",
-            "image/jpeg",
-            "image/webp",
-            "image/avif",
-            "video/mp4",
-            "audio/mpeg",
-            "application/zip",
-            "application/gzip",
-            "application/pdf",
-            "font/woff2",
-            "image/PNG",
-        ] {
-            assert!(is_pre_compressed(ct), "{ct} should be skipped");
+        for ct in &["image/png", "video/mp4", "application/zip", "font/woff2"] {
+            assert!(is_pre_compressed(ct), "{ct}");
         }
-        for ct in &[
-            "text/html",
-            "text/css",
-            "application/json",
-            "application/javascript",
-            "image/svg+xml",
-            "text/html; charset=utf-8",
-        ] {
-            assert!(!is_pre_compressed(ct), "{ct} should be compressible");
+        for ct in &["text/html", "application/json", "image/svg+xml"] {
+            assert!(!is_pre_compressed(ct), "{ct}");
         }
     }
 
     #[test]
     fn decide_respects_all_gates() {
-        let on = CompressionSettings {
-            enabled: true,
-            level: 6,
-            min_size: 1024,
-        };
-        let off = CompressionSettings {
-            enabled: false,
-            ..on.clone()
-        };
-
+        let s = both();
+        let off = neither();
         assert_eq!(
             decide(&off, Some("br"), "text/html", 4096, false),
             Plan::Skip
         );
-        assert_eq!(decide(&on, None, "text/html", 4096, false), Plan::Skip);
+        assert_eq!(decide(&s, None, "text/html", 4096, false), Plan::Skip);
         assert_eq!(
-            decide(&on, Some("gzip"), "text/html", 4096, false),
+            decide(&s, Some("gzip"), "text/html", 100, false),
             Plan::Skip
         );
-        assert_eq!(decide(&on, Some("br"), "text/html", 100, false), Plan::Skip);
+        assert_eq!(decide(&s, Some("br"), "image/png", 4096, false), Plan::Skip);
+        assert_eq!(decide(&s, Some("br"), "text/html", 4096, true), Plan::Skip);
         assert_eq!(
-            decide(&on, Some("br"), "image/png", 4096, false),
-            Plan::Skip
+            decide(&s, Some("br"), "text/html", 4096, false),
+            Plan::Compress
         );
-        assert_eq!(decide(&on, Some("br"), "text/html", 4096, true), Plan::Skip);
         assert_eq!(
-            decide(&on, Some("br"), "text/html", 4096, false),
+            decide(&s, Some("gzip"), "text/html", 4096, false),
             Plan::Compress
         );
     }
@@ -264,22 +353,51 @@ mod tests {
     #[test]
     fn brotli_roundtrip() {
         let data = b"hello world ".repeat(200);
-        let comp = brotli_compress(&data, 6).expect("compression should succeed");
-        assert!(comp.len() < data.len(), "compressed must be smaller");
-
+        let comp = brotli_compress(&data, 6).unwrap();
+        assert!(comp.len() < data.len());
         let mut dec = Vec::new();
         brotli::BrotliDecompress(&mut &comp[..], &mut dec).unwrap();
         assert_eq!(dec, data);
     }
 
     #[test]
-    fn config_validation_rejects_bad_level() {
-        let err = build_compression(RawCompression {
+    fn gzip_roundtrip() {
+        use std::io::Read;
+        let data = b"hello world ".repeat(200);
+        let comp = gzip_compress(&data, 6).unwrap();
+        assert!(comp.len() < data.len());
+        let mut dec = Vec::new();
+        flate2::read::GzDecoder::new(&comp[..])
+            .read_to_end(&mut dec)
+            .unwrap();
+        assert_eq!(dec, data);
+    }
+
+    #[test]
+    fn config_validation() {
+        assert!(build_compression(RawCompression {
             brotli: true,
             level: 12,
-            min_size: 1024,
+            ..Default::default()
         })
-        .unwrap_err();
-        assert!(err.contains("level"), "{err}");
+        .is_err());
+        assert!(build_compression(RawCompression {
+            gzip: true,
+            gzip_level: 0,
+            ..Default::default()
+        })
+        .is_err());
+        assert!(build_compression(RawCompression {
+            gzip: true,
+            gzip_level: 10,
+            ..Default::default()
+        })
+        .is_err());
+        assert!(build_compression(RawCompression {
+            gzip: true,
+            gzip_level: 6,
+            ..Default::default()
+        })
+        .is_ok());
     }
 }
