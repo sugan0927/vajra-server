@@ -18,6 +18,7 @@
 //! Not implemented (documented limitations): `Expires`, conditional
 //! revalidation, stale-while-revalidate, request coalescing, `Vary`.
 
+pub mod fastcgi;
 use crate::config::CacheSettings;
 use crate::proxy::is_hop_by_hop;
 use std::collections::{BTreeMap, HashMap};
