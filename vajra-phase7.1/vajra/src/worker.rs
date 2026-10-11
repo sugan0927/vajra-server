@@ -541,6 +541,8 @@ pub struct Worker {
     rate_limit: crate::rate_limit::RateLimiter,
     /// Compression policy. Stateless; refreshed on reload.
     compression: crate::compress::CompressionSettings,
+    /// On-disk FastCGI response cache. Settings refreshed on reload.
+    fastcgi_cache: crate::cache::fastcgi::FastcgiCache,
     // control plane
     id: usize,
     ctl: Option<Inbox>,
@@ -627,6 +629,22 @@ impl Worker {
                     .unwrap_or(1),
             ),
             compression: dynamic.compression.clone(),
+            fastcgi_cache: {
+                let s = dynamic.fastcgi_cache.clone();
+                match crate::cache::fastcgi::FastcgiCache::open(s.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!(
+                            "vajra: fastcgi_cache: cannot open {:?}: {e}; disabled",
+                            s.path
+                        );
+                        let mut off = s;
+                        off.enabled = false;
+                        crate::cache::fastcgi::FastcgiCache::open(off)
+                            .expect("disabled cache must open")
+                    }
+                }
+            },
             obs,
             log: LogSink {
                 fd: log_fd,
@@ -832,6 +850,7 @@ impl Worker {
         self.access = d.access.clone();
         self.rate_limit.settings = d.rate_limit.clone();
         self.compression = d.compression.clone();
+        self.fastcgi_cache.settings = d.fastcgi_cache.clone();
         if self.draining.is_some() {
             return Err("worker is shutting down".into());
         }

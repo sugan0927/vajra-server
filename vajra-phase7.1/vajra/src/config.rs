@@ -61,6 +61,7 @@
 //! certificate/key, cache limits and the access-log path. Everything else
 //! needs a restart; [`Settings::restart_required`] reports what changed.
 
+use crate::cache::fastcgi::{build_fastcgi_cache, FastcgiCacheSettings, RawFastcgiCache};
 use crate::compress::{build_compression, CompressionSettings, RawCompression};
 use crate::php::PhpConfig;
 use crate::rate_limit::{build_rate_limit, RateLimitSettings, RawRateLimit};
@@ -132,6 +133,7 @@ pub struct Settings {
     pub access: AccessSettings,
     pub rate_limit: RateLimitSettings,
     pub compression: CompressionSettings,
+    pub fastcgi_cache: FastcgiCacheSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +283,7 @@ pub struct Dynamic {
     pub access: AccessSettings,
     pub rate_limit: RateLimitSettings,
     pub compression: CompressionSettings,
+    pub fastcgi_cache: FastcgiCacheSettings,
 }
 
 impl StaticSettings {
@@ -333,6 +336,7 @@ impl Default for Settings {
             access: AccessSettings::default(),
             rate_limit: RateLimitSettings::default(),
             compression: CompressionSettings::default(),
+            fastcgi_cache: FastcgiCacheSettings::default(),
         }
     }
 }
@@ -365,6 +369,7 @@ struct Raw {
     access: Option<RawAccess>,
     rate_limit: Option<RawRateLimit>,
     compression: Option<RawCompression>,
+    fastcgi_cache: Option<RawFastcgiCache>,
 }
 
 #[derive(Deserialize)]
@@ -849,6 +854,7 @@ impl Settings {
             access: build_access(raw.access.unwrap_or_default())?,
             rate_limit: build_rate_limit(raw.rate_limit.unwrap_or_default())?,
             compression: build_compression(raw.compression.unwrap_or_default())?,
+            fastcgi_cache: build_fastcgi_cache(raw.fastcgi_cache.unwrap_or_default())?,
             health: raw.health,
             listen,
             workers: raw.server.workers,

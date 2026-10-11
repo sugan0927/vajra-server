@@ -118,6 +118,86 @@ fn hex32(v: u128) -> [u8; 32] {
     out
 }
 
+// ─── Glob matching ──────────────────────────────────────────────────
+//
+// Only two forms are supported: exact match (`/wp-login.php`) and a
+// single trailing `*` prefix match (`/wp-admin/*`, `wordpress_logged_in_*`).
+// That covers every example in docs/fastcgi-cache.md and keeps the
+// matcher allocation-free. Anything richer belongs in a real glob crate
+// if the need ever shows up.
+
+/// `true` iff `value` matches `pattern`.
+pub fn glob_matches(pattern: &str, value: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => value.starts_with(prefix),
+        None => pattern == value,
+    }
+}
+
+/// `true` iff any of `patterns` matches `value`.
+pub fn any_glob_matches(patterns: &[String], value: &str) -> bool {
+    patterns.iter().any(|p| glob_matches(p, value))
+}
+
+/// `true` iff the `Cookie:` header carries at least one cookie whose
+/// name matches any pattern in `patterns`.
+///
+/// The header is parsed as `name=value; name=value; ...`. Names are
+/// compared verbatim; no URL-decoding (the transport layer already
+/// decoded the header value once).
+pub fn cookie_name_matches(cookie_header: Option<&str>, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    let Some(h) = cookie_header else {
+        return false;
+    };
+    for pair in h.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let name = pair.split('=').next().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        if any_glob_matches(patterns, name) {
+            return true;
+        }
+    }
+    false
+}
+
+// ─── Cache-key builder ─────────────────────────────────────────────
+
+/// Canonical FastCGI cache key.
+///
+/// ```text
+/// "v1\0" + method + "\0" + host + "\0" + path [+ "\0" + query]
+/// ```
+///
+/// The `v1\0` prefix is a format version: bumping it invalidates the
+/// whole cache without a migration. `host` is expected to already be
+/// lowercased by the caller.
+pub fn build_cache_key(method: &str, host: &str, path: &str, query: Option<&str>) -> Vec<u8> {
+    let mut k = Vec::with_capacity(
+        4 + method.len() + host.len() + path.len() + query.map_or(0, |q| q.len() + 1),
+    );
+    k.extend_from_slice(b"v1\0");
+    k.extend_from_slice(method.as_bytes());
+    k.push(0);
+    k.extend_from_slice(host.as_bytes());
+    k.push(0);
+    k.extend_from_slice(path.as_bytes());
+    if let Some(q) = query {
+        if !q.is_empty() {
+            k.push(0);
+            k.extend_from_slice(q.as_bytes());
+        }
+    }
+    k
+}
+
 // ─── Index entry ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +211,7 @@ struct IndexEntry {
 // ─── Cache ──────────────────────────────────────────────────────────
 
 pub struct FastcgiCache {
-    settings: FastcgiCacheSettings,
+    pub settings: FastcgiCacheSettings,
     index: Vec<IndexEntry>,
     /// key -> position in `index`.
     by_key: HashMap<Vec<u8>, usize>,
@@ -520,6 +600,59 @@ mod tests {
         let a = key_hash(b"GET\0host\0/path");
         let b = key_hash(b"GET\0host\0/path2");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn glob_prefix_and_exact() {
+        assert!(glob_matches("/wp-admin/*", "/wp-admin/"));
+        assert!(glob_matches("/wp-admin/*", "/wp-admin/settings.php"));
+        assert!(!glob_matches("/wp-admin/*", "/wp-admin"));
+        assert!(!glob_matches("/wp-admin/*", "/admin/"));
+        assert!(glob_matches("/wp-login.php", "/wp-login.php"));
+        assert!(!glob_matches("/wp-login.php", "/wp-login.php?x=1"));
+        assert!(glob_matches(
+            "wordpress_logged_in_*",
+            "wordpress_logged_in_abc"
+        ));
+        assert!(!glob_matches("wordpress_logged_in_*", "wplogin"));
+    }
+
+    #[test]
+    fn cookie_name_matching() {
+        let pats = vec![
+            "wordpress_logged_in_*".to_string(),
+            "wp-postpass_*".to_string(),
+        ];
+        assert!(cookie_name_matches(
+            Some("wordpress_logged_in_abc=xyz"),
+            &pats
+        ));
+        assert!(cookie_name_matches(
+            Some("a=1; wordpress_logged_in_x=1; b=2"),
+            &pats
+        ));
+        assert!(cookie_name_matches(Some("wp-postpass_h=1"), &pats));
+        assert!(!cookie_name_matches(Some("PHPSESSID=xyz"), &pats));
+        assert!(!cookie_name_matches(Some(""), &pats));
+        assert!(!cookie_name_matches(None, &pats));
+        assert!(!cookie_name_matches(Some("whatever=1"), &[]));
+    }
+
+    #[test]
+    fn cache_key_shape() {
+        let k = build_cache_key("GET", "example.com", "/", None);
+        assert_eq!(&k[..3], b"v1\0");
+        assert!(k.windows(4).any(|w| w == b"GET\0"));
+        assert!(k.windows(12).any(|w| w == b"example.com\0"));
+
+        let k2 = build_cache_key("GET", "example.com", "/p", Some("a=1"));
+        let k3 = build_cache_key("GET", "example.com", "/p", None);
+        assert_ne!(k2, k3);
+        // Deterministic.
+        assert_eq!(
+            build_cache_key("GET", "h", "/p", Some("q")),
+            build_cache_key("GET", "h", "/p", Some("q"))
+        );
     }
 
     #[test]
