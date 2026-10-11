@@ -1094,6 +1094,9 @@ impl Worker {
         c.peer_known = false;
         c.pending_read = None;
         self.live += 1;
+        if let Some(h) = crate::metrics::http() {
+            h.active_connections.inc();
+        }
         self.obs.m.conns_accepted += 1;
         Some(idx)
     }
@@ -2535,6 +2538,9 @@ impl Worker {
         }
         self.free.push(idx);
         self.live -= 1;
+        if let Some(h) = crate::metrics::http() {
+            h.active_connections.dec();
+        }
         self.obs.m.conns_closed += 1;
     }
 }
