@@ -233,6 +233,44 @@ fn start(root: &Path, proxies: Vec<ProxySettings>, cfg: Config) -> Option<Socket
     rx.recv().unwrap().then_some(addr)
 }
 
+/// Same as `start`, but with a pre-configured `[fastcgi_cache]` block.
+/// Used by the `fastcgi_cache_*` tests.
+fn start_with_cache(
+    root: &Path,
+    proxies: Vec<ProxySettings>,
+    cfg: Config,
+    fcgi: vajra::cache::fastcgi::FastcgiCacheSettings,
+) -> Option<SocketAddr> {
+    let sock = sys::listener("127.0.0.1:0".parse().unwrap(), false, 128).unwrap();
+    let addr = sock.local_addr().unwrap().as_socket().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let l = [Listener {
+            fd: sock.as_raw_fd(),
+            tls: false,
+        }];
+        let dynamic = Dynamic {
+            static_files: Some(StaticSettings::new(&root).unwrap()),
+            proxies,
+            fastcgi_cache: fcgi,
+            ..Dynamic::default()
+        };
+        match Worker::new(&l, cfg, &dynamic, None) {
+            Ok(mut w) => {
+                tx.send(true).unwrap();
+                let _ = w.run();
+            }
+            Err(e) => {
+                eprintln!("io_uring unavailable ({e}); skipping");
+                tx.send(false).unwrap();
+            }
+        }
+        drop(sock);
+    });
+    rx.recv().unwrap().then_some(addr)
+}
+
 struct Resp {
     status: u16,
     head: String,
@@ -663,4 +701,108 @@ fn many_concurrent_requests() {
         64,
         "one FastCGI connection per request"
     );
+}
+
+/// End-to-end coverage of the FastCGI response cache on the H1 path.
+/// Verifies HIT/MISS/BYPASS transitions and that the bypass rules
+/// (exclude_paths, bypass_cookie) prevent any caching.
+#[test]
+fn fastcgi_cache_miss_hit_bypass() {
+    let root = make_site("fcgi-cache");
+
+    // Cache lives in its own temp dir so it never interferes with the
+    // static-file scanner under `root`.
+    let cache_dir = std::env::temp_dir().join(format!(
+        "vajra-fcgi-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+
+    let fpm = spawn_fpm(echo_app());
+
+    let fcgi = vajra::cache::fastcgi::FastcgiCacheSettings {
+        enabled: true,
+        path: cache_dir.clone(),
+        size_mb: 16,
+        ttl_secs: 60,
+        max_entry_size: 1 << 20,
+        bypass_cookie: vec!["wordpress_logged_in_*".into()],
+        exclude_paths: vec!["/wp-admin/*".into()],
+    };
+
+    let Some(addr) = start_with_cache(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+        fcgi,
+    ) else {
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        return;
+    };
+
+    // Case-insensitive extractor for `X-FastCGI-Cache`.
+    let xfcgi = |r: &Resp| -> Option<String> {
+        r.head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            if k.trim().eq_ignore_ascii_case("x-fastcgi-cache") {
+                Some(v.trim().to_ascii_uppercase())
+            } else {
+                None
+            }
+        })
+    };
+
+    // -- First GET: MISS --------------------------------------
+    let r1 = get(addr, "/");
+    assert_eq!(r1.status, 200, "head={}", r1.head);
+    assert_eq!(xfcgi(&r1).as_deref(), Some("MISS"), "head={}", r1.head);
+    let body = r1.text();
+    assert!(body.contains("script="), "body={body}");
+
+    // -- Second GET, same key: HIT, body replayed byte-for-byte ---
+    let r2 = get(addr, "/");
+    assert_eq!(r2.status, 200, "head={}", r2.head);
+    assert_eq!(xfcgi(&r2).as_deref(), Some("HIT"), "head={}", r2.head);
+    assert_eq!(body, r2.text(), "cached body must match original");
+
+    // -- Query string is part of the cache key -------------------
+    let q1 = get(addr, "/?p=1");
+    assert_eq!(xfcgi(&q1).as_deref(), Some("MISS"), "head={}", q1.head);
+    let q2 = get(addr, "/?p=1");
+    assert_eq!(xfcgi(&q2).as_deref(), Some("HIT"), "head={}", q2.head);
+    // Different query string: distinct key, still MISS.
+    let q3 = get(addr, "/?p=2");
+    assert_eq!(xfcgi(&q3).as_deref(), Some("MISS"), "head={}", q3.head);
+
+    // -- exclude_paths: /wp-admin/* always bypasses --------------
+    let a1 = get(addr, "/wp-admin/");
+    assert_eq!(xfcgi(&a1).as_deref(), Some("BYPASS"), "head={}", a1.head);
+    // Second hit: still bypasses, nothing was stored for that path.
+    let a2 = get(addr, "/wp-admin/");
+    assert_eq!(xfcgi(&a2).as_deref(), Some("BYPASS"), "head={}", a2.head);
+
+    // -- bypass_cookie: wordpress_logged_in_* always bypasses ----
+    let c1 = http(
+        addr,
+        "GET",
+        "/",
+        &[("cookie", "wordpress_logged_in_x=abc")],
+        b"",
+    );
+    assert_eq!(xfcgi(&c1).as_deref(), Some("BYPASS"), "head={}", c1.head);
+
+    // A bypass must not have overwritten the previously cached body.
+    let r3 = get(addr, "/");
+    assert_eq!(xfcgi(&r3).as_deref(), Some("HIT"), "head={}", r3.head);
+    assert_eq!(body, r3.text(), "bypass must not touch the cache");
+
+    // -- Non-GET: always bypass ----------------------------------
+    let p1 = http(addr, "POST", "/", &[], b"x=1");
+    assert_eq!(xfcgi(&p1).as_deref(), Some("BYPASS"), "head={}", p1.head);
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
 }
