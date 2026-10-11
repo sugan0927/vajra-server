@@ -618,7 +618,12 @@ impl Worker {
             cache_max_object: dynamic.cache.max_object_bytes,
             sec: dynamic.headers.clone(),
             access: dynamic.access.clone(),
-            rate_limit: crate::rate_limit::RateLimiter::new(dynamic.rate_limit.clone()),
+            rate_limit: crate::rate_limit::RateLimiter::with_worker_count(
+                dynamic.rate_limit.clone(),
+                std::thread::available_parallelism()
+                    .map(|n| n.get() as u32)
+                    .unwrap_or(1),
+            ),
             obs,
             log: LogSink {
                 fd: log_fd,

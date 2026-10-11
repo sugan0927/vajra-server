@@ -64,6 +64,7 @@ pub fn init() -> prometheus::Result<()> {
     init_bytes(&reg)?;
     init_in_flight(&reg)?;
     init_reload(&reg)?;
+    init_rate_limit(&reg)?;
 
     REGISTRY
         .set(reg)
@@ -606,5 +607,85 @@ pub fn record_reload_ok() {
 pub fn record_reload_err() {
     if let Some(m) = RELOADS.get() {
         m.err.inc();
+    }
+}
+
+// ─── Rate-limit counters ─────────────────────────────────────────────
+
+static RATE_LIMIT: OnceLock<RateLimitMetrics> = OnceLock::new();
+
+pub struct RateLimitMetrics {
+    pub denied: prometheus::IntCounter,
+    pub cap_reached: prometheus::IntCounter,
+    pub buckets: prometheus::IntGauge,
+}
+
+pub fn init_rate_limit(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if RATE_LIMIT.get().is_some() {
+        return Ok(());
+    }
+    let denied = prometheus::IntCounter::new(
+        "vajra_rate_limit_denied_total",
+        "Requests denied by the rate limiter (includes cap-reached)",
+    )?;
+    let cap_reached = prometheus::IntCounter::new(
+        "vajra_rate_limit_cap_reached_total",
+        "Requests denied because max_tracked_ips was reached",
+    )?;
+    let buckets = prometheus::IntGauge::new(
+        "vajra_rate_limit_buckets",
+        "Tracked rate-limit buckets (sampled at cleanup boundary)",
+    )?;
+    reg.register(Box::new(denied.clone()))?;
+    reg.register(Box::new(cap_reached.clone()))?;
+    reg.register(Box::new(buckets.clone()))?;
+    RATE_LIMIT
+        .set(RateLimitMetrics {
+            denied,
+            cap_reached,
+            buckets,
+        })
+        .map_err(|_| prometheus::Error::Msg("rate-limit metrics already set".into()))?;
+    Ok(())
+}
+
+#[inline]
+pub fn record_rate_limit_denied() {
+    if let Some(m) = RATE_LIMIT.get() {
+        m.denied.inc();
+    }
+}
+
+#[inline]
+pub fn record_rate_limit_cap_reached() {
+    if let Some(m) = RATE_LIMIT.get() {
+        m.cap_reached.inc();
+    }
+}
+
+#[inline]
+pub fn record_rate_limit_buckets(n: usize) {
+    if let Some(m) = RATE_LIMIT.get() {
+        m.buckets.set(n as i64);
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_counters_and_gauge() {
+        init().unwrap();
+        record_rate_limit_denied();
+        record_rate_limit_cap_reached();
+        record_rate_limit_buckets(7);
+        let text = render();
+        assert!(text.contains("vajra_rate_limit_denied_total"), "{text}");
+        assert!(
+            text.contains("vajra_rate_limit_cap_reached_total"),
+            "{text}"
+        );
+        assert!(text.contains("vajra_rate_limit_buckets"), "{text}");
     }
 }

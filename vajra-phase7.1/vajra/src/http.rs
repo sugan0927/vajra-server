@@ -318,7 +318,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 // ─── Rate limiting ──────────────────────────────────
                 let rl_decision = match (ctx.rate_limit.as_deref_mut(), ctx.client_ip) {
                     (Some(rl), Some(peer)) if !rl.is_disabled() => {
-                        Some(rl.check(peer, std::time::Instant::now()))
+                        Some(rl.check_with_path(peer, std::time::Instant::now(), path))
                     }
                     _ => None,
                 };
