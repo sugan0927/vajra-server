@@ -147,3 +147,15 @@ Integration tests (tests/rate_limit_e2e.rs, Day 12):
    behavior explicitly.
 5. Metrics plumbing: confirm whether the metrics module exposes
    atomic-global counters or per-worker counters.
+
+## Implementation note (Day 12)
+
+Each worker holds its own `RateLimiter` and uses the full configured
+`requests_per_second` — the `rps / N` division described above is
+aspirational and not yet implemented. The effective global rate is
+therefore `N x requests_per_second` in the worst case for a client
+spraying across workers; the common single-worker case is exact. To
+target a specific global rate X, set `requests_per_second = X / N`.
+
+Reload preserves existing buckets and only refreshes
+`RateLimiter::settings`.

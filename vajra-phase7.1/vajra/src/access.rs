@@ -94,7 +94,7 @@ impl AccessSettings {
 
 /// Collapse `::ffff:a.b.c.d` to plain IPv4 so V4 rules match clients
 /// presented as IPv4-mapped IPv6 by some kernels/proxies.
-fn normalize(ip: IpAddr) -> IpAddr {
+pub(crate) fn normalize(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
             Some(v4) => IpAddr::V4(v4),
@@ -106,7 +106,7 @@ fn normalize(ip: IpAddr) -> IpAddr {
 
 /// `IpNet::contains` requires same-family; try the given address, then
 /// its IPv4-mapped form if any.
-fn contains(net: &IpNet, ip: IpAddr) -> bool {
+pub(crate) fn contains(net: &IpNet, ip: IpAddr) -> bool {
     if net.contains(&ip) {
         return true;
     }

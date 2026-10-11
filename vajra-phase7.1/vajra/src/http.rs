@@ -45,6 +45,7 @@ pub struct Ctx<'a> {
     /// Access-control policy from the running config.
     /// `None` disables the check (used by tests).
     pub access: Option<&'a crate::access::AccessSettings>,
+    pub rate_limit: Option<&'a mut crate::rate_limit::RateLimiter>,
 }
 
 /// Case-insensitive lookup of a header value as `&str`.
@@ -205,6 +206,24 @@ pub fn fail(
 
 /// Parse as many complete (possibly pipelined) requests as `input` holds,
 /// appending responses to `out`. Stops after a request that needs an action.
+pub fn fail_429(
+    out: &mut Vec<u8>,
+    obs: &mut Observer,
+    client_ip: Option<IpAddr>,
+    retry_after_secs: u32,
+    date: &[u8; DATE_LEN],
+) {
+    let start = out.len();
+    fail(out, obs, client_ip, 429, date);
+    if let Some(pos) = out[start..].windows(4).position(|w| w == b"\r\n\r\n") {
+        let insert_at = start + pos;
+        let mut buf: Vec<u8> = Vec::with_capacity(32);
+        buf.extend_from_slice(b"\r\nRetry-After: ");
+        push_u64(&mut buf, retry_after_secs as u64);
+        out.splice(insert_at..insert_at, buf);
+    }
+}
+
 pub fn process(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &mut Ctx) -> Outcome {
     let out_start = out.len();
     let result = process_inner(input, out, date, ctx);
@@ -294,6 +313,24 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                             return done(input.len(), true);
                         }
                     }
+                }
+
+                // ─── Rate limiting ──────────────────────────────────
+                let rl_decision = match (ctx.rate_limit.as_deref_mut(), ctx.client_ip) {
+                    (Some(rl), Some(peer)) if !rl.is_disabled() => {
+                        Some(rl.check(peer, std::time::Instant::now()))
+                    }
+                    _ => None,
+                };
+                if let Some(crate::rate_limit::Decision::Deny { retry_after_secs }) = rl_decision {
+                    eprintln!(
+                        "vajra: rate-limit denied client={} path={path} retry_after={retry_after_secs}",
+                        ctx.client_ip
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_else(|| "-".into())
+                    );
+                    fail_429(out, ctx.obs, ctx.client_ip, retry_after_secs, date);
+                    return done(input.len(), true);
                 }
 
                 let head_only = method == "HEAD";
@@ -870,6 +907,7 @@ mod tests {
             client_ip: Some("192.0.2.7".parse().unwrap()),
             sec: None,
             access: None,
+            rate_limit: None,
         };
         let o = process(input.as_bytes(), &mut out, DATE, &mut ctx);
         (o, String::from_utf8(out).unwrap())

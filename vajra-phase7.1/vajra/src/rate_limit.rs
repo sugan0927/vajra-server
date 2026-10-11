@@ -1,10 +1,5 @@
 //! Token-bucket rate limiting.
-//!
-//! **Status: design skeleton.** The types and signatures are final; the
-//! hot-path body of [`RateLimiter::check`] and the `http.rs` wiring land
-//! in Day 12. See `docs/rate-limiting.md` for the design rationale.
-//!
-//! Nothing in this file is called from the request path yet.
+//! See `docs/rate-limiting.md` for the design rationale.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -13,26 +8,16 @@ use std::time::Instant;
 use ipnet::IpNet;
 use serde::Deserialize;
 
-/// Runtime configuration. `Default::default()` yields a disabled limiter.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RateLimitSettings {
-    /// Master switch. If `false`, every `check()` returns `Allow`.
     pub enabled: bool,
-    /// Sustained refill rate, tokens per second, per worker.
     pub requests_per_second: u32,
-    /// Bucket capacity, i.e. maximum burst above the sustained rate.
     pub burst: u32,
-    /// Client IPs exempt from limiting. Matched against the *effective*
-    /// client IP, i.e. after trusted-proxy / XFF resolution.
     pub whitelist_ips: Vec<IpNet>,
-    /// Hard cap on the number of buckets kept per worker. When reached,
-    /// new client IPs are denied. See design doc §"Memory bounds".
     pub max_tracked_ips: usize,
-    /// Interval between lazy cleanup sweeps. `0` disables the sweep.
     pub cleanup_interval_secs: u64,
 }
 
-/// TOML shape for `[rate_limit]`.
 #[derive(Debug, Default, Deserialize)]
 pub struct RawRateLimit {
     #[serde(default)]
@@ -49,18 +34,15 @@ pub struct RawRateLimit {
     pub cleanup_interval_secs: u64,
 }
 
-/// Parse and validate `[rate_limit]`. Called from `config.rs`.
 pub fn build_rate_limit(raw: RawRateLimit) -> Result<RateLimitSettings, String> {
-    fn parse_list(field: &str, list: Vec<String>) -> Result<Vec<IpNet>, String> {
-        list.into_iter()
-            .map(|s| {
-                crate::access::parse_one_net(&s)
-                    .map_err(|e| format!("[rate_limit] {field}: invalid CIDR {s:?}: {e}"))
-            })
-            .collect()
-    }
-
-    let whitelist_ips = parse_list("whitelist_ips", raw.whitelist_ips)?;
+    let whitelist_ips = raw
+        .whitelist_ips
+        .into_iter()
+        .map(|s| {
+            crate::access::parse_one_net(&s)
+                .map_err(|e| format!("[rate_limit] whitelist_ips: invalid CIDR {s:?}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     if raw.enabled {
         if raw.requests_per_second == 0 {
@@ -84,85 +66,104 @@ pub fn build_rate_limit(raw: RawRateLimit) -> Result<RateLimitSettings, String> 
     })
 }
 
-/// One bucket per tracked client IP. Refilled lazily on each `check`.
 #[derive(Debug)]
 pub struct Bucket {
-    /// Fractional so refills don't quantize below 1 token/s.
     pub tokens: f64,
-    /// Monotonic time of the last refill.
     pub last_refill: Instant,
-    /// Monotonic time of the last request, used by cleanup.
     pub last_seen: Instant,
 }
 
-/// Outcome of a single `check`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// Request is within budget.
     Allow,
-    /// Request is over budget. The caller emits 429 + `Retry-After`.
     Deny { retry_after_secs: u32 },
 }
 
-/// Per-worker token-bucket state.
 #[derive(Debug)]
 pub struct RateLimiter {
     pub settings: RateLimitSettings,
-    /// Keyed on the effective client IP.
     pub buckets: HashMap<IpAddr, Bucket>,
-    /// Timestamp of the last cleanup sweep.
     pub last_cleanup: Instant,
 }
 
 impl RateLimiter {
-    /// Build a fresh limiter. Allocates the map with a capacity hint
-    /// derived from `max_tracked_ips`.
-    ///
-    /// Day 12.
-    pub fn new(_settings: RateLimitSettings) -> Self {
-        todo!("Day 12")
+    pub fn new(settings: RateLimitSettings) -> Self {
+        let cap = settings.max_tracked_ips.min(4096);
+        Self {
+            settings,
+            buckets: HashMap::with_capacity(cap),
+            last_cleanup: Instant::now(),
+        }
     }
 
-    /// Fast-path skip: `true` iff `enabled == false`.
     pub fn is_disabled(&self) -> bool {
         !self.settings.enabled
     }
 
-    /// True if `ip` matches the whitelist.
-    ///
-    /// Day 12.
-    pub fn is_whitelisted(&self, _ip: IpAddr) -> bool {
-        todo!("Day 12")
+    pub fn is_whitelisted(&self, ip: IpAddr) -> bool {
+        let ip = crate::access::normalize(ip);
+        self.settings
+            .whitelist_ips
+            .iter()
+            .any(|n| crate::access::contains(n, ip))
     }
 
-    /// Consume one token for `ip`, or deny.
-    ///
-    /// Refill math (see design doc §"Algorithm"):
-    ///
-    /// ```text
-    /// tokens = min(burst, tokens + elapsed * rps)
-    /// if tokens >= 1.0 { tokens -= 1.0; Allow }
-    /// else { Deny { retry_after_secs: ceil((1 - tokens) / rps) } }
-    /// ```
-    ///
-    /// Also triggers `cleanup(now)` on the configured interval.
-    ///
-    /// Day 12.
-    pub fn check(&mut self, _ip: IpAddr, _now: Instant) -> Decision {
-        todo!("Day 12")
+    pub fn check(&mut self, ip: IpAddr, now: Instant) -> Decision {
+        if self.is_disabled() {
+            return Decision::Allow;
+        }
+        if self.settings.cleanup_interval_secs > 0
+            && now.duration_since(self.last_cleanup).as_secs()
+                >= self.settings.cleanup_interval_secs
+        {
+            self.cleanup(now);
+        }
+
+        if self.is_whitelisted(ip) {
+            return Decision::Allow;
+        }
+
+        let rps = self.settings.requests_per_second as f64;
+        let burst = self.settings.burst as f64;
+
+        if !self.buckets.contains_key(&ip) && self.buckets.len() >= self.settings.max_tracked_ips {
+            return Decision::Deny {
+                retry_after_secs: 1,
+            };
+        }
+
+        let bucket = self.buckets.entry(ip).or_insert_with(|| Bucket {
+            tokens: burst,
+            last_refill: now,
+            last_seen: now,
+        });
+
+        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * rps).min(burst);
+        bucket.last_refill = now;
+        bucket.last_seen = now;
+
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            Decision::Allow
+        } else {
+            let needed = 1.0 - bucket.tokens;
+            let retry = (needed / rps).ceil() as u32;
+            Decision::Deny {
+                retry_after_secs: retry.max(1),
+            }
+        }
     }
 
-    /// Evict buckets whose `last_seen` is older than `2 * (burst / rps)`
-    /// seconds — a bucket that would already be full again if kept.
-    ///
-    /// Day 12.
-    pub fn cleanup(&mut self, _now: Instant) {
-        todo!("Day 12")
+    pub fn cleanup(&mut self, now: Instant) {
+        self.last_cleanup = now;
+        let rps = self.settings.requests_per_second as f64;
+        let burst = self.settings.burst as f64;
+        if rps <= 0.0 {
+            return;
+        }
+        let threshold_secs = 2.0 * burst / rps;
+        self.buckets
+            .retain(|_, b| now.duration_since(b.last_seen).as_secs_f64() < threshold_secs);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    // Test matrix is documented in docs/rate-limiting.md §"Testing plan".
-    // Bodies land in Day 12.
 }
