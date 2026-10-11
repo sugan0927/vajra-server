@@ -65,6 +65,7 @@ pub fn init() -> prometheus::Result<()> {
     init_in_flight(&reg)?;
     init_reload(&reg)?;
     init_rate_limit(&reg)?;
+    init_fastcgi_cache(&reg)?;
 
     REGISTRY
         .set(reg)
@@ -681,6 +682,163 @@ pub fn record_rate_limit_cap_reached() {
 pub fn record_rate_limit_tracked_ips(n: usize) {
     if let Some(m) = RATE_LIMIT.get() {
         m.tracked_ips.set(n as i64);
+    }
+}
+
+// ─── FastCGI cache counters ──────────────────────────────────────────
+
+/// Index into `FastcgiCacheMetrics::requests`.
+pub const FASTCGI_CACHE_RESULTS: [&str; 3] = ["hit", "miss", "bypass"];
+
+pub const FASTCGI_CACHE_HIT: usize = 0;
+pub const FASTCGI_CACHE_MISS: usize = 1;
+pub const FASTCGI_CACHE_BYPASS: usize = 2;
+
+pub struct FastcgiCacheMetrics {
+    /// `vajra_fastcgi_cache_requests_total{result=...}`.
+    pub requests: Vec<prometheus::IntCounter>,
+    /// `vajra_fastcgi_cache_evictions_total`.
+    pub evictions: prometheus::IntCounter,
+    /// `vajra_fastcgi_cache_entries`.
+    ///
+    /// Vajra workers are share-nothing, so this gauge reports the last
+    /// cache size observed by any worker. A `sum across workers` would
+    /// require per-worker slots; that is deferred. See
+    /// `docs/fastcgi-cache.md` for the precise semantics.
+    pub entries: prometheus::IntGauge,
+    /// `vajra_fastcgi_cache_bytes`. Same caveat as `entries`.
+    pub bytes: prometheus::IntGauge,
+}
+
+static FASTCGI_CACHE: OnceLock<FastcgiCacheMetrics> = OnceLock::new();
+
+pub fn init_fastcgi_cache(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if FASTCGI_CACHE.get().is_some() {
+        return Ok(());
+    }
+
+    let mut requests = Vec::with_capacity(FASTCGI_CACHE_RESULTS.len());
+    for result in FASTCGI_CACHE_RESULTS {
+        let labels: std::collections::HashMap<String, String> =
+            [("result".to_string(), result.to_string())]
+                .into_iter()
+                .collect();
+        let c = prometheus::IntCounter::with_opts(
+            prometheus::Opts::new(
+                "vajra_fastcgi_cache_requests_total",
+                "FastCGI response cache lookups by outcome",
+            )
+            .const_labels(labels),
+        )?;
+        reg.register(Box::new(c.clone()))?;
+        requests.push(c);
+    }
+
+    let evictions = prometheus::IntCounter::new(
+        "vajra_fastcgi_cache_evictions_total",
+        "FastCGI cache entries removed from the index (LRU, expiry, overwrite)",
+    )?;
+    reg.register(Box::new(evictions.clone()))?;
+
+    let entries = prometheus::IntGauge::new(
+        "vajra_fastcgi_cache_entries",
+        "FastCGI cache entries (single-worker view; see docs)",
+    )?;
+    reg.register(Box::new(entries.clone()))?;
+
+    let bytes = prometheus::IntGauge::new(
+        "vajra_fastcgi_cache_bytes",
+        "FastCGI cache bytes on disk (single-worker view; see docs)",
+    )?;
+    reg.register(Box::new(bytes.clone()))?;
+
+    FASTCGI_CACHE
+        .set(FastcgiCacheMetrics {
+            requests,
+            evictions,
+            entries,
+            bytes,
+        })
+        .map_err(|_| prometheus::Error::Msg("fastcgi cache metrics already set".into()))?;
+    Ok(())
+}
+
+pub fn fastcgi_cache() -> Option<&'static FastcgiCacheMetrics> {
+    FASTCGI_CACHE.get()
+}
+
+#[inline]
+pub fn record_fastcgi_cache_hit() {
+    if let Some(m) = FASTCGI_CACHE.get() {
+        if let Some(c) = m.requests.get(FASTCGI_CACHE_HIT) {
+            c.inc();
+        }
+    }
+}
+
+#[inline]
+pub fn record_fastcgi_cache_miss() {
+    if let Some(m) = FASTCGI_CACHE.get() {
+        if let Some(c) = m.requests.get(FASTCGI_CACHE_MISS) {
+            c.inc();
+        }
+    }
+}
+
+#[inline]
+pub fn record_fastcgi_cache_bypass() {
+    if let Some(m) = FASTCGI_CACHE.get() {
+        if let Some(c) = m.requests.get(FASTCGI_CACHE_BYPASS) {
+            c.inc();
+        }
+    }
+}
+
+#[inline]
+pub fn record_fastcgi_cache_eviction() {
+    if let Some(m) = FASTCGI_CACHE.get() {
+        m.evictions.inc();
+    }
+}
+
+/// Push the current cache shape into the `entries` / `bytes` gauges.
+/// Called after every mutation; cheap (two atomic stores).
+#[inline]
+pub fn record_fastcgi_cache_stats(entries: u64, bytes: u64) {
+    if let Some(m) = FASTCGI_CACHE.get() {
+        m.entries.set(entries as i64);
+        m.bytes.set(bytes as i64);
+    }
+}
+
+#[cfg(test)]
+mod fastcgi_cache_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn fastcgi_cache_counters_and_gauges() {
+        init().unwrap();
+        record_fastcgi_cache_hit();
+        record_fastcgi_cache_hit();
+        record_fastcgi_cache_miss();
+        record_fastcgi_cache_bypass();
+        record_fastcgi_cache_eviction();
+        record_fastcgi_cache_stats(17, 4096);
+
+        let text = render();
+        assert!(
+            text.contains("vajra_fastcgi_cache_requests_total"),
+            "{text}"
+        );
+        assert!(text.contains("result=\"hit\""), "{text}");
+        assert!(text.contains("result=\"miss\""), "{text}");
+        assert!(text.contains("result=\"bypass\""), "{text}");
+        assert!(
+            text.contains("vajra_fastcgi_cache_evictions_total"),
+            "{text}"
+        );
+        assert!(text.contains("vajra_fastcgi_cache_entries"), "{text}");
+        assert!(text.contains("vajra_fastcgi_cache_bytes"), "{text}");
     }
 }
 

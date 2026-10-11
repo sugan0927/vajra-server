@@ -430,6 +430,7 @@ impl FastcgiCache {
         });
         self.by_key.insert(key.to_vec(), idx);
         self.total_bytes += need;
+        crate::metrics::record_fastcgi_cache_stats(self.entries() as u64, self.total_bytes);
         Ok(())
     }
 
@@ -444,12 +445,16 @@ impl FastcgiCache {
             self.by_key.insert(moved_key, i);
         }
 
+        crate::metrics::record_fastcgi_cache_eviction();
+
         let path = self.data_path(&removed.key);
-        match fs::remove_file(&path) {
+        let r = match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
-        }
+        };
+        crate::metrics::record_fastcgi_cache_stats(self.entries() as u64, self.total_bytes);
+        r
     }
 
     /// Evict LRU entries until `extra` bytes fit within `size_mb`.

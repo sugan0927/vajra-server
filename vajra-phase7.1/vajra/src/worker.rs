@@ -1462,6 +1462,7 @@ impl Worker {
                             );
                             match self.fastcgi_cache.get(&key) {
                                 Ok(Some((status, headers, cached))) => {
+                                    crate::metrics::record_fastcgi_cache_hit();
                                     let bodyless = status == 204 || status == 304;
                                     let bytes = if bodyless { 0 } else { cached.len() as u64 };
                                     let owned = if bodyless { Vec::new() } else { cached };
@@ -1489,9 +1490,12 @@ impl Worker {
                                     continue;
                                 }
                                 _ => {
+                                    crate::metrics::record_fastcgi_cache_miss();
                                     spec.fcgi_cache_key = Some(key);
                                 }
                             }
+                        } else {
+                            crate::metrics::record_fastcgi_cache_bypass();
                         }
                     }
                 }
@@ -2324,6 +2328,7 @@ impl Worker {
             }
             Some("MISS")
         } else if job.fcgi.is_some() {
+            crate::metrics::record_fastcgi_cache_bypass();
             Some("BYPASS")
         } else {
             None

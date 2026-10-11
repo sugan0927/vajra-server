@@ -228,3 +228,43 @@ On BYPASS (any rule fired, or non-GET/HEAD):
 `src/cache/fastcgi.rs` round-trips status + headers + body through the
 storage layer, including empty-header entries; the previous single-body
 tests are still present under adapted signatures.
+
+---
+
+## Update — Day 19e: Prometheus metrics
+
+Four metrics are now exported via the existing `prometheus` registry
+(rendered by the admin `/metrics` endpoint):
+
+- `vajra_fastcgi_cache_requests_total{result="hit|miss|bypass"}`
+  Counter. Incremented for every FastCGI request that reaches the
+  cache gate while the cache is enabled.
+- `vajra_fastcgi_cache_evictions_total`
+  Counter. Incremented on every `remove_at` — LRU eviction, expiry,
+  overwrite, or a missing data file being reconciled.
+- `vajra_fastcgi_cache_entries`
+  Gauge. Current number of index entries.
+- `vajra_fastcgi_cache_bytes`
+  Gauge. Current on-disk body size (sum of `IndexEntry::size`).
+
+### Semantics under multi-worker
+
+Vajra workers are share-nothing: each owns its own `FastcgiCache`.
+The `entries` and `bytes` gauges therefore report the value observed
+by the *last writer* (some worker, some cache), not a sum across
+workers. The counters (`requests_total`, `evictions_total`) are
+accurate in aggregate because every worker increments the same
+`IntCounter`.
+
+A shared, additive gauge would require per-worker slots and a
+cooperative flush at scrape time. That is deferred; the current
+behaviour is the same trade-off other per-worker state in Vajra
+makes, and it is documented here so operators are not surprised.
+
+### Hooks
+
+- H1 gate (`src/http.rs`) and H2 gate (`src/worker.rs`) record
+  `hit` / `miss` / `bypass` at the point of decision.
+- `proxy_done` also records `bypass` when a request that would
+  otherwise have been cached was bypassed by a rule or method.
+- `FastcgiCache::put` and `remove_at` refresh `entries` / `bytes`.

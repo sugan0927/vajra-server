@@ -489,6 +489,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 );
                                 match fc.get(&key) {
                                     Ok(Some((status, headers, cached))) => {
+                                        crate::metrics::record_fastcgi_cache_hit();
                                         write_proxy_response(
                                             out,
                                             status,
@@ -521,9 +522,12 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                         continue;
                                     }
                                     _ => {
+                                        crate::metrics::record_fastcgi_cache_miss();
                                         spec.fcgi_cache_key = Some(key);
                                     }
                                 }
+                            } else {
+                                crate::metrics::record_fastcgi_cache_bypass();
                             }
                         }
                     }
