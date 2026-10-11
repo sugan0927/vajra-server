@@ -84,3 +84,12 @@ groups:
         annotations:
           summary: "vajra: egress > 50 MiB/s sustained"
           description: "{{ $value | humanize1024 }}B/s outbound — possible DoS or large transfer"
+
+  - alert: VajraReloadErrors
+    expr: increase(vajra_config_reload_errors_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Vajra config reload failed"
+      description: "{{ $value }} reload error(s) in last 5m — check `journalctl -u vajra` and config file syntax."

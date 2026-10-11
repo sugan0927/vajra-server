@@ -49,6 +49,16 @@ Clients से पढ़े गए total bytes (request head + body)।
 - FastCGI decode error पर status="parse" observe होता है, और fpm_observed = true
   set किया जाता है ताकि बाद का proxy_fail भी double-count न करे।
 
+## Gauges and operational counters
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `vajra_requests_in_flight` | gauge | HTTP requests currently being processed (all workers) |
+| `vajra_active_connections` | gauge | Open client connections |
+| `vajra_uptime_seconds` | gauge | Seconds since start |
+| `vajra_config_reloads_total` | counter | Successful config reloads |
+| `vajra_config_reload_errors_total` | counter | Reload attempts that failed validation |
+
 ## Alerts
 
 /etc/vajra/alerts/vajra.yaml — Prometheus rule file।
