@@ -43,6 +43,7 @@ struct TxSlot {
     data: Vec<u8>,
 }
 
+#[allow(clippy::vec_box)] // Box pins io_uring buffers at stable addresses
 pub(super) struct QuicRt {
     fd: RawFd,
     engine: Quic,

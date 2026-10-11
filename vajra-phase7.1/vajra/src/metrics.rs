@@ -38,7 +38,8 @@ pub fn init() -> prometheus::Result<()> {
         Opts::new("vajra_build_info", "Vajra build information"),
         &["version", "profile"],
     )?;
-    bi.with_label_values(&[env!("CARGO_PKG_VERSION"), "release"]).set(1);
+    bi.with_label_values(&[env!("CARGO_PKG_VERSION"), "release"])
+        .set(1);
     reg.register(Box::new(bi))?;
 
     // vajra_uptime_seconds — updated on each /metrics scrape.
@@ -92,12 +93,12 @@ pub fn render() -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
-
 // ─── HTTP metrics ─────────────────────────────────────────────────────
 
-pub const METHODS: [&str; 10] =
-    ["GET","POST","PUT","DELETE","HEAD","OPTIONS","PATCH","CONNECT","TRACE","OTHER"];
-pub const CLASSES: [&str; 5] = ["1xx","2xx","3xx","4xx","5xx"];
+pub const METHODS: [&str; 10] = [
+    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE", "OTHER",
+];
+pub const CLASSES: [&str; 5] = ["1xx", "2xx", "3xx", "4xx", "5xx"];
 
 pub struct HttpMetrics {
     pub requests: Vec<prometheus::IntCounter>,
@@ -110,45 +111,66 @@ static HTTP: OnceLock<HttpMetrics> = OnceLock::new();
 #[inline]
 pub fn method_idx(m: &str) -> usize {
     match m {
-        "GET" => 0, "POST" => 1, "PUT" => 2, "DELETE" => 3,
-        "HEAD" => 4, "OPTIONS" => 5, "PATCH" => 6, "CONNECT" => 7,
-        "TRACE" => 8, _ => 9,
+        "GET" => 0,
+        "POST" => 1,
+        "PUT" => 2,
+        "DELETE" => 3,
+        "HEAD" => 4,
+        "OPTIONS" => 5,
+        "PATCH" => 6,
+        "CONNECT" => 7,
+        "TRACE" => 8,
+        _ => 9,
     }
 }
 
 #[inline]
 pub fn class_idx(status: u16) -> usize {
-    match status / 100 { 1 => 0, 2 => 1, 3 => 2, 4 => 3, _ => 4 }
+    match status / 100 {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        _ => 4,
+    }
 }
 
 pub fn init_http(reg: &prometheus::Registry) -> prometheus::Result<()> {
-    if HTTP.get().is_some() { return Ok(()); }
+    if HTTP.get().is_some() {
+        return Ok(());
+    }
 
-    let buckets = vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                       0.5, 1.0, 2.5, 5.0, 10.0];
+    let buckets = vec![
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    ];
 
     let mut requests = Vec::with_capacity(METHODS.len() * CLASSES.len());
     let mut durations = Vec::with_capacity(METHODS.len() * CLASSES.len());
 
     for m in METHODS {
         for c in CLASSES {
-            let labels: std::collections::HashMap<String, String> =
-                [("method".into(), m.to_string()),
-                 ("status_class".into(), c.to_string())]
-                .into_iter().collect();
+            let labels: std::collections::HashMap<String, String> = [
+                ("method".into(), m.to_string()),
+                ("status_class".into(), c.to_string()),
+            ]
+            .into_iter()
+            .collect();
 
             let ctr = prometheus::IntCounter::with_opts(
                 prometheus::Opts::new("vajra_requests_total", "HTTP requests")
-                    .const_labels(labels.clone()))?;
+                    .const_labels(labels.clone()),
+            )?;
             reg.register(Box::new(ctr.clone()))?;
             requests.push(ctr);
 
             let hist = prometheus::Histogram::with_opts(
                 prometheus::HistogramOpts::new(
                     "vajra_request_duration_seconds",
-                    "HTTP request duration in seconds")
-                    .buckets(buckets.clone())
-                    .const_labels(labels))?;
+                    "HTTP request duration in seconds",
+                )
+                .buckets(buckets.clone())
+                .const_labels(labels),
+            )?;
             reg.register(Box::new(hist.clone()))?;
             durations.push(hist);
         }
@@ -156,15 +178,22 @@ pub fn init_http(reg: &prometheus::Registry) -> prometheus::Result<()> {
 
     let active_connections = prometheus::IntGauge::new(
         "vajra_active_connections",
-        "Current open client connections")?;
+        "Current open client connections",
+    )?;
     reg.register(Box::new(active_connections.clone()))?;
 
-    HTTP.set(HttpMetrics { requests, durations, active_connections })
-        .map_err(|_| prometheus::Error::Msg("http metrics already set".into()))?;
+    HTTP.set(HttpMetrics {
+        requests,
+        durations,
+        active_connections,
+    })
+    .map_err(|_| prometheus::Error::Msg("http metrics already set".into()))?;
     Ok(())
 }
 
-pub fn http() -> Option<&'static HttpMetrics> { HTTP.get() }
+pub fn http() -> Option<&'static HttpMetrics> {
+    HTTP.get()
+}
 
 impl HttpMetrics {
     /// Zero-allocation hot path. Called once per response.
@@ -218,7 +247,6 @@ mod http_tests {
         assert!(text.contains("vajra_active_connections"));
     }
 }
-
 
 // ─── Request-timing helpers (hot path, zero-alloc) ─────────────────────
 
@@ -279,7 +307,6 @@ mod timing_tests {
     }
 }
 
-
 // ─── PHP-FPM metrics ──────────────────────────────────────────────────
 
 pub const FPM_STATUSES: [&str; 4] = ["ok", "error", "timeout", "parse"];
@@ -292,47 +319,64 @@ pub struct FpmMetrics {
 static FPM: OnceLock<FpmMetrics> = OnceLock::new();
 
 pub fn init_fpm(reg: &prometheus::Registry) -> prometheus::Result<()> {
-    if FPM.get().is_some() { return Ok(()); }
+    if FPM.get().is_some() {
+        return Ok(());
+    }
 
-    let buckets = vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25,
-                       0.5, 1.0, 2.5, 5.0, 10.0];
+    let buckets = vec![
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    ];
 
     let mut requests = Vec::with_capacity(FPM_STATUSES.len());
     let mut durations = Vec::with_capacity(FPM_STATUSES.len());
 
     for st in FPM_STATUSES {
         let labels: std::collections::HashMap<String, String> =
-            [("status".to_string(), st.to_string())].into_iter().collect();
+            [("status".to_string(), st.to_string())]
+                .into_iter()
+                .collect();
 
         let ctr = prometheus::IntCounter::with_opts(
-            prometheus::Opts::new("vajra_php_fpm_requests_total",
-                                  "PHP-FPM (FastCGI) requests by outcome")
-                .const_labels(labels.clone()))?;
+            prometheus::Opts::new(
+                "vajra_php_fpm_requests_total",
+                "PHP-FPM (FastCGI) requests by outcome",
+            )
+            .const_labels(labels.clone()),
+        )?;
         reg.register(Box::new(ctr.clone()))?;
         requests.push(ctr);
 
         let hist = prometheus::Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "vajra_php_fpm_duration_seconds",
-                "PHP-FPM (FastCGI) request duration in seconds")
-                .buckets(buckets.clone())
-                .const_labels(labels))?;
+                "PHP-FPM (FastCGI) request duration in seconds",
+            )
+            .buckets(buckets.clone())
+            .const_labels(labels),
+        )?;
         reg.register(Box::new(hist.clone()))?;
         durations.push(hist);
     }
 
-    FPM.set(FpmMetrics { requests, durations })
-        .map_err(|_| prometheus::Error::Msg("fpm metrics already set".into()))?;
+    FPM.set(FpmMetrics {
+        requests,
+        durations,
+    })
+    .map_err(|_| prometheus::Error::Msg("fpm metrics already set".into()))?;
     Ok(())
 }
 
-pub fn fpm() -> Option<&'static FpmMetrics> { FPM.get() }
+pub fn fpm() -> Option<&'static FpmMetrics> {
+    FPM.get()
+}
 
 impl FpmMetrics {
     /// `status_idx` must be an index into `FPM_STATUSES`.
     #[inline]
     pub fn observe(&self, status_idx: usize, dur: std::time::Duration) {
-        if let Some(c) = self.requests.get(status_idx) { c.inc(); }
+        if let Some(c) = self.requests.get(status_idx) {
+            c.inc();
+        }
         if let Some(h) = self.durations.get(status_idx) {
             h.observe(dur.as_secs_f64());
         }
@@ -347,13 +391,14 @@ static BYTES_SENT_FAST: AtomicU64 = AtomicU64::new(0);
 static BYTES_RECEIVED_FAST: AtomicU64 = AtomicU64::new(0);
 
 pub fn init_bytes(reg: &prometheus::Registry) -> prometheus::Result<()> {
-    if BYTES_SENT.get().is_some() { return Ok(()); }
+    if BYTES_SENT.get().is_some() {
+        return Ok(());
+    }
     let s = prometheus::IntCounter::new(
         "vajra_bytes_sent_total",
-        "Bytes written to clients (request+response)")?;
-    let r = prometheus::IntCounter::new(
-        "vajra_bytes_received_total",
-        "Bytes read from clients")?;
+        "Bytes written to clients (request+response)",
+    )?;
+    let r = prometheus::IntCounter::new("vajra_bytes_received_total", "Bytes read from clients")?;
     reg.register(Box::new(s.clone()))?;
     reg.register(Box::new(r.clone()))?;
     let _ = BYTES_SENT.set(s);
@@ -364,7 +409,9 @@ pub fn init_bytes(reg: &prometheus::Registry) -> prometheus::Result<()> {
 /// Record response bytes. Cheap: single atomic add.
 #[inline]
 pub fn record_bytes_sent(n: u64) {
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     let prev = BYTES_SENT_FAST.fetch_add(n, Ordering::Relaxed);
     // Flush to the counter every ~1 MiB to avoid atomic-heavy hot path.
     if (prev + n) & 0x000F_FFFF < prev & 0x000F_FFFF {
@@ -375,7 +422,9 @@ pub fn record_bytes_sent(n: u64) {
 
 #[inline]
 pub fn record_bytes_received(n: u64) {
-    if n == 0 { return; }
+    if n == 0 {
+        return;
+    }
     BYTES_RECEIVED_FAST.fetch_add(n, Ordering::Relaxed);
 }
 
@@ -384,11 +433,15 @@ pub fn record_bytes_received(n: u64) {
 pub fn flush_bytes() {
     if let Some(c) = BYTES_SENT.get() {
         let n = BYTES_SENT_FAST.swap(0, Ordering::Relaxed);
-        if n > 0 { c.inc_by(n); }
+        if n > 0 {
+            c.inc_by(n);
+        }
     }
     if let Some(c) = BYTES_RECEIVED.get() {
         let n = BYTES_RECEIVED_FAST.swap(0, Ordering::Relaxed);
-        if n > 0 { c.inc_by(n); }
+        if n > 0 {
+            c.inc_by(n);
+        }
     }
 }
 

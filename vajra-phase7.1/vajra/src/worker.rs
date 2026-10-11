@@ -2116,7 +2116,7 @@ impl Worker {
             if job.fcgi.is_some() && !job.fpm_observed {
                 job.fpm_observed = true;
                 if let Some(m) = crate::metrics::fpm() {
-                    m.observe(0, job.started.elapsed());  // 0 == "ok"
+                    m.observe(0, job.started.elapsed()); // 0 == "ok"
                 }
             }
         }
@@ -2763,6 +2763,7 @@ mod tests {
 
     fn job_on(st: Rc<ProxyState>, head: bool) -> ProxyJob {
         let spec = ProxySpec {
+            started: std::time::Instant::now(),
             route: 0,
             request: Vec::new(),
             head,

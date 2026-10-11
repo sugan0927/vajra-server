@@ -75,6 +75,10 @@ impl RequestId {
     pub fn len(&self) -> usize {
         self.len as usize
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     #[inline]
     pub fn kind(&self) -> IdKind {
         self.kind

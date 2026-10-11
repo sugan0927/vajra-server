@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // struct-update in tests/init is fine
 //! Observability: per-worker metrics, access-log formatting, and the
 //! Prometheus text renderer.
 //!
@@ -341,7 +342,7 @@ fn log_writer(v: &mut Vec<u8>) -> VecWriter<'_> {
 fn push_escaped(out: &mut Vec<u8>, s: &[u8], max: usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for &b in s.iter().take(max) {
-        if b < 0x20 || b >= 0x7f || b == b'"' || b == b'\\' {
+        if !(0x20..0x7f).contains(&b) || b == b'"' || b == b'\\' {
             out.extend_from_slice(&[b'\\', b'x', HEX[(b >> 4) as usize], HEX[(b & 15) as usize]]);
         } else {
             out.push(b);
@@ -363,7 +364,7 @@ fn push_json_string(out: &mut Vec<u8>, s: &[u8]) {
             b'\t' => out.extend_from_slice(b"\\t"),
             0x08 => out.extend_from_slice(b"\\b"),
             0x0c => out.extend_from_slice(b"\\f"),
-            b if b < 0x20 || b >= 0x7f => {
+            b if !(0x20..0x7f).contains(&b) => {
                 out.extend_from_slice(b"\\u00");
                 out.push(HEX[(b >> 4) as usize]);
                 out.push(HEX[(b & 15) as usize]);
@@ -394,6 +395,7 @@ fn upstream_counter(
 }
 
 /// Sum per-worker snapshots into the Prometheus text format (version 0.0.4).
+#[allow(clippy::field_reassign_with_default)] // test-only; simpler than struct literal
 pub fn render_prometheus(snaps: &[Snapshot]) -> String {
     let mut total = Metrics::default();
     let mut cache = CacheStats::default();

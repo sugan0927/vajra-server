@@ -494,6 +494,9 @@ impl Quic {
 
     /// Fire every expired connection timer.
     pub fn on_timeout(&mut self, now: Instant) {
+        #[allow(clippy::while_let_loop)]
+        // clippy suggests while let but borrow checker makes it awkward
+        #[allow(clippy::while_let_loop)]
         loop {
             let Some((&(when, g), &ch)) = self.timers.iter().next() else {
                 break;
@@ -684,6 +687,8 @@ impl Quic {
         if qc.closing {
             return;
         }
+        #[allow(clippy::while_let_loop)]
+        // clippy suggests while let but borrow checker makes it awkward here
         loop {
             let Some(id) = qc.conn.streams().accept(Dir::Bi) else {
                 break;
@@ -697,6 +702,8 @@ impl Quic {
             qc.reqs.insert(id, RequestStream::new(self.cfg.max_body));
             self.on_readable(qc, id, now);
         }
+        #[allow(clippy::while_let_loop)]
+        // clippy suggests while let but borrow checker makes it awkward here
         loop {
             let Some(id) = qc.conn.streams().accept(Dir::Uni) else {
                 break;

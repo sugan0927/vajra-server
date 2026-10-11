@@ -669,6 +669,7 @@ fn find_crlf(b: &[u8]) -> Option<usize> {
 }
 
 impl Chunked {
+    #[allow(clippy::result_unit_err)] // WIP: () error type; TODO use a real error
     pub fn advance(&mut self, raw: &[u8], max_body: usize) -> Result<(), ()> {
         while !self.done {
             let rest = &raw[self.pos..];

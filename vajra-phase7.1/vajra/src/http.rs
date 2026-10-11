@@ -724,6 +724,7 @@ pub fn h2_proxy_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::CacheMode;
     use crate::cache::CachedResponse;
     use crate::config::{CacheSettings, ProxySettings};
 

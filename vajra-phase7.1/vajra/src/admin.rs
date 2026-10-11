@@ -252,10 +252,8 @@ pub fn serve(addr: SocketAddr, mgr: Arc<Manager>) -> std::io::Result<(SocketAddr
     let h = thread::Builder::new()
         .name("vajra-admin".into())
         .spawn(move || {
-            for conn in listener.incoming() {
-                if let Ok(s) = conn {
-                    handle(s, &mgr);
-                }
+            for s in listener.incoming().flatten() {
+                handle(s, &mgr);
             }
         })?;
     Ok((bound, h))

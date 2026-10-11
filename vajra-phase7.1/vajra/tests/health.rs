@@ -25,8 +25,11 @@ fn get(addr: SocketAddr, path: &str, method: &str) -> (u16, String) {
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).unwrap();
     let text = String::from_utf8_lossy(&buf).into_owned();
-    let status = text.split_whitespace().nth(1)
-        .and_then(|x| x.parse::<u16>().ok()).unwrap_or(0);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|x| x.parse::<u16>().ok())
+        .unwrap_or(0);
     (status, text)
 }
 
@@ -80,6 +83,9 @@ fn head_has_no_body() {
     // correctly advertises Content-Length: 0.
     assert!(text.contains("Content-Length: 0"), "headers: {text}");
     let after_headers = text.split("\r\n\r\n").nth(1).unwrap_or("");
-    assert!(after_headers.is_empty(), "unexpected body: {after_headers:?}");
+    assert!(
+        after_headers.is_empty(),
+        "unexpected body: {after_headers:?}"
+    );
     h.stop();
 }

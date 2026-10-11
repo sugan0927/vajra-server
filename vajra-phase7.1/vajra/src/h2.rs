@@ -1788,7 +1788,7 @@ mod tests {
         put_int(&mut v, 7, 0, 10);
         assert_eq!(v, [10]);
         v.clear();
-        put_int(&mut v, 7, 0, 1337 - 0);
+        put_int(&mut v, 7, 0, 1337);
         // 1337 with a 7-bit prefix: 127, then 1210 as base-128 varint.
         assert_eq!(v, [127, (1210 % 128) as u8 | 0x80, (1210 / 128) as u8]);
     }

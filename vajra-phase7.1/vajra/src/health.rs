@@ -75,7 +75,7 @@ pub fn spawn(cfg: HealthConfig, php_upstream: Option<String>) -> io::Result<Heal
     let thread = thread::Builder::new()
         .name("vajra-health".into())
         .spawn(move || accept_loop(listener, stop_bg, stats_bg, cfg_bg, php_bg))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn health: {e}")))?;
+        .map_err(|e| io::Error::other(format!("spawn health: {e}")))?;
 
     Ok(HealthHandle {
         stop,
