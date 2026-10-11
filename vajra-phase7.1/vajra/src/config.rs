@@ -61,6 +61,7 @@
 //! certificate/key, cache limits and the access-log path. Everything else
 //! needs a restart; [`Settings::restart_required`] reports what changed.
 
+use crate::compress::{build_compression, CompressionSettings, RawCompression};
 use crate::php::PhpConfig;
 use crate::rate_limit::{build_rate_limit, RateLimitSettings, RawRateLimit};
 use crate::worker::Config as WorkerConfig;
@@ -130,6 +131,7 @@ pub struct Settings {
     pub headers: HeaderSettings,
     pub access: AccessSettings,
     pub rate_limit: RateLimitSettings,
+    pub compression: CompressionSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +280,7 @@ pub struct Dynamic {
     pub headers: HeaderSettings,
     pub access: AccessSettings,
     pub rate_limit: RateLimitSettings,
+    pub compression: CompressionSettings,
 }
 
 impl StaticSettings {
@@ -329,6 +332,7 @@ impl Default for Settings {
             headers: HeaderSettings::default(),
             access: AccessSettings::default(),
             rate_limit: RateLimitSettings::default(),
+            compression: CompressionSettings::default(),
         }
     }
 }
@@ -360,6 +364,7 @@ struct Raw {
     headers: Option<RawHeaders>,
     access: Option<RawAccess>,
     rate_limit: Option<RawRateLimit>,
+    compression: Option<RawCompression>,
 }
 
 #[derive(Deserialize)]
@@ -843,6 +848,7 @@ impl Settings {
             headers: build_headers(raw.headers)?,
             access: build_access(raw.access.unwrap_or_default())?,
             rate_limit: build_rate_limit(raw.rate_limit.unwrap_or_default())?,
+            compression: build_compression(raw.compression.unwrap_or_default())?,
             health: raw.health,
             listen,
             workers: raw.server.workers,
