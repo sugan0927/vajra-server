@@ -42,6 +42,18 @@ pub struct Ctx<'a> {
     pub client_ip: Option<IpAddr>,
     /// Security-header policy from the running config.
     pub sec: Option<&'a crate::config::HeaderSettings>,
+    /// Access-control policy from the running config.
+    /// `None` disables the check (used by tests).
+    pub access: Option<&'a crate::access::AccessSettings>,
+}
+
+/// Case-insensitive lookup of a header value as `&str`.
+/// Returns `None` if the header is absent or non-UTF-8.
+fn lookup_header<'a>(headers: &'a [httparse::Header<'_>], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case(name))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
 }
 
 thread_local! {
@@ -264,6 +276,24 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 if bad_length {
                     fail(out, ctx.obs, ctx.client_ip, 400, date);
                     return done(input.len(), true);
+                }
+
+                // ─── IP access control ──────────────────────────────
+                // Runs after headers are parsed, before routing. Deny
+                // wins over allow; empty policy is a no-op.
+                if let (Some(access), Some(peer)) = (ctx.access, ctx.client_ip) {
+                    if !access.is_empty() {
+                        let xff = lookup_header(req.headers, "x-forwarded-for");
+                        let xri = lookup_header(req.headers, "x-real-ip");
+                        let client = access.effective_client_ip(peer, xff, xri);
+                        if access.evaluate(client) == crate::access::AccessDecision::Deny {
+                            eprintln!(
+                                "vajra: access denied client={client} peer={peer} path={path}"
+                            );
+                            fail(out, ctx.obs, ctx.client_ip, 403, date);
+                            return done(input.len(), true);
+                        }
+                    }
                 }
 
                 let head_only = method == "HEAD";
@@ -839,6 +869,7 @@ mod tests {
             secure: false,
             client_ip: Some("192.0.2.7".parse().unwrap()),
             sec: None,
+            access: None,
         };
         let o = process(input.as_bytes(), &mut out, DATE, &mut ctx);
         (o, String::from_utf8(out).unwrap())

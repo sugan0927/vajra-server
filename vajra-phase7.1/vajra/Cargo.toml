@@ -38,6 +38,7 @@ quinn-proto = { version = "0.11", default-features = false, features = ["rustls-
 bytes = "1"
 # HPACK *decoder* (Huffman + dynamic table). The encoder is hand-written in h2.rs.
 hpack = { package = "hpack-patched", version = "0.3.0" }
+ipnet = "2.12.2"
 
 [dev-dependencies]
 # Self-signed certificates for the TLS / HTTP/2 end-to-end tests.

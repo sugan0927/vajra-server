@@ -74,6 +74,7 @@ pub enum LogFormat {
     Text,
     Json,
 }
+use crate::access::{build_access, AccessSettings, RawAccess};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
@@ -126,6 +127,7 @@ pub struct Settings {
     pub log_format: LogFormat,
     pub admin: Option<SocketAddr>,
     pub headers: HeaderSettings,
+    pub access: AccessSettings,
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +274,7 @@ pub struct Dynamic {
     pub log_format: LogFormat,
     pub cache: CacheSettings,
     pub headers: HeaderSettings,
+    pub access: AccessSettings,
 }
 
 impl StaticSettings {
@@ -321,6 +324,7 @@ impl Default for Settings {
             log_format: LogFormat::Text,
             admin: None,
             headers: HeaderSettings::default(),
+            access: AccessSettings::default(),
         }
     }
 }
@@ -350,6 +354,7 @@ struct Raw {
     admin: Option<RawAdmin>,
     #[serde(default)]
     headers: Option<RawHeaders>,
+    access: Option<RawAccess>,
 }
 
 #[derive(Deserialize)]
@@ -831,6 +836,7 @@ impl Settings {
 
         Ok(Self {
             headers: build_headers(raw.headers)?,
+            access: build_access(raw.access.unwrap_or_default())?,
             health: raw.health,
             listen,
             workers: raw.server.workers,
@@ -871,6 +877,7 @@ impl Settings {
             log_format: self.log_format,
             cache: self.cache,
             headers: self.headers.clone(),
+            ..Default::default()
         }
     }
 
