@@ -64,6 +64,7 @@
 use crate::php::PhpConfig;
 use crate::worker::Config as WorkerConfig;
 use serde::Deserialize;
+use serde::Serialize;
 
 /// Access-log line format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -80,8 +81,28 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 const DEFAULT_INDEX: &str = "index.html";
 const MAX_UPSTREAMS: usize = 64;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HealthConfig {
+    #[serde(default = "default_health_listen")]
+    pub listen: String,
+    #[serde(default = "default_health_path")]
+    pub path: String,
+    #[serde(default = "default_health_ready_path")]
+    pub ready_path: String,
+    #[serde(default = "default_health_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub mariadb: Option<String>,
+}
+
+fn default_health_listen() -> String { "127.0.0.1:9201".into() }
+fn default_health_path() -> String { "/health".into() }
+fn default_health_ready_path() -> String { "/ready".into() }
+fn default_health_enabled() -> bool { true }
+
+#[derive(Clone, Debug)]
 pub struct Settings {
+    pub health: Option<HealthConfig>,
     pub listen: SocketAddr,
     /// 0 means "one per CPU" (resolved by `main`).
     pub workers: usize,
@@ -256,6 +277,7 @@ impl StaticSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            health: None,
             listen: DEFAULT_LISTEN.parse().unwrap(),
             workers: 1,
             pin: true,
@@ -278,6 +300,8 @@ impl Default for Settings {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    #[serde(default)]
+    health: Option<HealthConfig>,
     #[serde(default)]
     server: RawServer,
     #[serde(default)]
@@ -742,6 +766,7 @@ impl Settings {
         };
 
         Ok(Self {
+            health: raw.health,
             listen,
             workers: raw.server.workers,
             pin: raw.server.pin,

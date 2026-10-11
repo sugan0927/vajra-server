@@ -89,6 +89,22 @@ fn main() {
         Some(path) => Settings::load(path).unwrap_or_else(|e| die(e)),
         None => Settings::default(),
     };
+
+    let _health = match settings.health.take() {
+        Some(h) if h.enabled => {
+            match vajra::health::spawn(h, None) {
+                Ok(handle) => {
+                    println!("vajra: health listener on http://{}", handle.addr);
+                    Some(handle)
+                }
+                Err(e) => {
+                    eprintln!("vajra: health listener failed: {e}");
+                    die(e.to_string());
+                }
+            }
+        }
+        _ => None,
+    };
     if let Some(a) = cli.listen {
         settings.listen = a;
     }
