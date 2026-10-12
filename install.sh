@@ -170,8 +170,15 @@ php -v | head -1
 log "3/8 — Vajra binary"
 if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then
   [[ -x /usr/local/bin/vajra ]] || die "/usr/local/bin/vajra missing"
-  /usr/local/bin/vajra --help >/dev/null 2>&1 || die "vajra does not run"
+  # `vajra --help` exits non-zero even on success. Also pipefail would
+  # break `if ! cmd | grep`, so capture output first.
+  VAJRA_HELP_OUT="$(/usr/local/bin/vajra --help 2>&1 || true)"
+  if ! grep -q 'thread-per-core' <<<"$VAJRA_HELP_OUT"; then
+    printf 'vajra --help output was:\n%s\n' "$VAJRA_HELP_OUT" >&2
+    die "vajra does not run"
+  fi
   warn "VAJRA_SKIP_BINARY=1 — using existing binary"
+  echo "   → $(head -1 <<<"$VAJRA_HELP_OUT")"
 else
   if [[ "$VAJRA_VERSION" == "latest" ]]; then
     VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
@@ -413,18 +420,18 @@ cmd_add() {
   mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;"
 
   log "4/8 — wp-config.php + WordPress install (WP-CLI)"
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root config create \
+  wp --path="$SITE_ROOT" --allow-root config create \
       --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" \
       --dbhost=localhost --dbcharset=utf8mb4 --skip-check --force
 
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root config set WP_HOME    "https://${DOMAIN}" --type=constant
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root config set WP_SITEURL "https://${DOMAIN}" --type=constant
+  wp --path="$SITE_ROOT" --allow-root config set WP_HOME    "https://${DOMAIN}" --type=constant
+  wp --path="$SITE_ROOT" --allow-root config set WP_SITEURL "https://${DOMAIN}" --type=constant
 
   # Reverse-proxy HTTPS awareness
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root config set \
+  wp --path="$SITE_ROOT" --allow-root config set \
       VAJRA_PROXY_FIX "1" --raw --type=constant 2>/dev/null || true
 
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root core install \
+  wp --path="$SITE_ROOT" --allow-root core install \
       --url="https://${DOMAIN}" \
       --title="$TITLE" \
       --admin_user="$ADMIN_USER" \
@@ -433,8 +440,8 @@ cmd_add() {
       --skip-email
 
   # Small security/UX defaults
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root option update blogdescription "" 2>/dev/null || true
-  sudo -u www-data -- wp --path="$SITE_ROOT" --allow-root rewrite structure '/%postname%/' --hard 2>/dev/null || true
+  wp --path="$SITE_ROOT" --allow-root option update blogdescription "" 2>/dev/null || true
+  wp --path="$SITE_ROOT" --allow-root rewrite structure '/%postname%/' --hard 2>/dev/null || true
 
   log "5/8 — Vajra config + service"
   cat > "${SITES_DIR}/${DOMAIN}.toml" <<TOML
@@ -534,6 +541,7 @@ server {
         proxy_set_header X-Real-IP         \$remote_addr;
         proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host  $host;
         proxy_set_header Connection        "";
         proxy_read_timeout 120s;
         proxy_buffering off;
