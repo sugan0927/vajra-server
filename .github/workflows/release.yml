@@ -24,7 +24,12 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -35,10 +40,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('vajra-phase7.1/vajra/Cargo.lock') }}
 
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
 
       - name: Test
-        run: cargo test --release --locked
+        run: cargo test --release --locked --target x86_64-unknown-linux-musl
 
       - name: Package
         run: |
@@ -46,7 +51,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           DIR="vajra-${VERSION}-x86_64-linux"
           mkdir -p "${DIR}"
-          cp target/release/vajra "${DIR}/"
+          cp target/x86_64-unknown-linux-musl/release/vajra "${DIR}/"
           cp install.sh "${DIR}/"
           cp docs/wp-cli.md docs/backup.md docs/check.md docs/setup.md "${DIR}/"
           cp CHANGELOG.md README.md SECURITY.md "${DIR}/"
