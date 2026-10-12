@@ -6,6 +6,7 @@
 //! See `docs/backup.md` for the design.
 
 pub mod local;
+pub mod s3;
 
 use std::path::PathBuf;
 
