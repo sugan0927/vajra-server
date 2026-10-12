@@ -175,8 +175,14 @@ impl Manager {
 
 /// Map an admin request to `(status, content-type, body)`.
 pub fn route_admin(method: &str, path: &str, mgr: &Manager) -> (u16, &'static str, String) {
-    let path = path.split('?').next().unwrap_or(path);
+    let (path, query) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
+    };
     match (method, path) {
+        ("GET", "/admin/cache/stats") => cache_stats(mgr),
+        ("POST", "/admin/cache/purge-all") => cache_purge_all(mgr),
+        ("POST", "/admin/cache/purge") => cache_purge(mgr, query),
         ("GET" | "HEAD", "/metrics") => (200, PROM, mgr.scrape()),
         ("GET" | "HEAD", "/healthz") => (200, TEXT, "ok\n".to_string()),
         ("POST", "/reload") => match mgr.reload() {
@@ -189,7 +195,15 @@ pub fn route_admin(method: &str, path: &str, mgr: &Manager) -> (u16, &'static st
                 (500, TEXT, format!("reload failed: {e}\n"))
             }
         },
-        (_, "/metrics" | "/healthz" | "/reload") => (405, TEXT, "method not allowed\n".to_string()),
+        (
+            _,
+            "/metrics"
+            | "/healthz"
+            | "/reload"
+            | "/admin/cache/stats"
+            | "/admin/cache/purge"
+            | "/admin/cache/purge-all",
+        ) => (405, TEXT, "method not allowed\n".to_string()),
         _ => (404, TEXT, "not found\n".to_string()),
     }
 }
@@ -326,5 +340,115 @@ mod tests {
         assert!(r.contains("version=0.0.4") && r.contains("vajra_workers 0"));
         assert!(get("GET /zzz HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
         assert!(get("garbage\r\n\r\n").starts_with("HTTP/1.1 400"));
+    }
+}
+
+// ─── FastCGI cache control ───────────────────────────────────────────
+//
+// तीनों routes admin listener पर। सब कुछ on-disk; workers share-nothing
+// हैं इसलिए कोई in-process RPC नहीं। Purge के बाद PURGE_GEN बढ़ता है
+// और workers अपनी अगली read पर index drop कर देते हैं।
+
+const JSON: &str = "application/json; charset=utf-8";
+
+/// Manager की running settings से live cache directory। Cache disabled
+/// हो तो None।
+fn cache_dir(mgr: &Manager) -> Option<PathBuf> {
+    let running = mgr.running.lock().ok()?;
+    let dyn_cfg = running.dynamic();
+    if !dyn_cfg.fastcgi_cache.enabled {
+        return None;
+    }
+    Some(dyn_cfg.fastcgi_cache.path.clone())
+}
+
+/// `?key=value` में से `key` का raw value (undecoded)।
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    let q = query?;
+    for pair in q.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+fn cache_purge(mgr: &Manager, query: Option<&str>) -> (u16, &'static str, String) {
+    let Some(dir) = cache_dir(mgr) else {
+        return (503, JSON, r#"{"error":"fastcgi cache disabled"}"#.into());
+    };
+    let Some(raw) = query_param(query, "path") else {
+        return (
+            400,
+            JSON,
+            r#"{"error":"missing query parameter: path"}"#.into(),
+        );
+    };
+    let Some(decoded) = crate::static_files::percent_decode(&raw) else {
+        return (
+            400,
+            JSON,
+            r#"{"error":"malformed percent-encoding"}"#.into(),
+        );
+    };
+    if decoded.is_empty() || !decoded.starts_with('/') {
+        return (400, JSON, r#"{"error":"path must start with '/'"}"#.into());
+    }
+    match crate::cache::fastcgi::purge_path_on_disk(&dir, decoded.as_bytes()) {
+        Ok(n) => (
+            200,
+            JSON,
+            format!(
+                r#"{{"purged":{n},"generation":{}}}"#,
+                crate::cache::fastcgi::purge_generation()
+            ),
+        ),
+        Err(e) => (500, JSON, format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn cache_purge_all(mgr: &Manager) -> (u16, &'static str, String) {
+    let Some(dir) = cache_dir(mgr) else {
+        return (503, JSON, r#"{"error":"fastcgi cache disabled"}"#.into());
+    };
+    match crate::cache::fastcgi::purge_all_on_disk(&dir) {
+        Ok(n) => (
+            200,
+            JSON,
+            format!(
+                r#"{{"purged":{n},"generation":{}}}"#,
+                crate::cache::fastcgi::purge_generation()
+            ),
+        ),
+        Err(e) => (500, JSON, format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+fn cache_stats(mgr: &Manager) -> (u16, &'static str, String) {
+    let Some(dir) = cache_dir(mgr) else {
+        return (503, JSON, r#"{"error":"fastcgi cache disabled"}"#.into());
+    };
+    match crate::cache::fastcgi::stats_on_disk(&dir) {
+        Ok(s) => {
+            let cap = mgr
+                .running
+                .lock()
+                .ok()
+                .map(|r| r.dynamic().fastcgi_cache.size_mb * 1024 * 1024)
+                .unwrap_or(0);
+            (
+                200,
+                JSON,
+                format!(
+                    r#"{{"entries":{},"bytes":{},"capacity_bytes":{},"generation":{}}}"#,
+                    s.entries,
+                    s.bytes,
+                    cap,
+                    crate::cache::fastcgi::purge_generation()
+                ),
+            )
+        }
+        Err(e) => (500, JSON, format!(r#"{{"error":"{}"}}"#, e)),
     }
 }

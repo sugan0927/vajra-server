@@ -221,7 +221,7 @@ impl FileCache {
 }
 
 /// Decode `%XX` escapes. Rejects invalid escapes, NUL bytes and non-UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

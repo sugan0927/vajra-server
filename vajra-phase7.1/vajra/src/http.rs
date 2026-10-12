@@ -13,6 +13,8 @@
 //! [`Observer`] (metrics + access log), and proxied `GET`s are answered from the
 //! per-core response cache when a fresh entry exists (`X-Cache: HIT`).
 
+#![allow(clippy::items_after_test_module)]
+
 use crate::cache::{self, Cache};
 use crate::date::DATE_LEN;
 use crate::h2::{H2Body, H2Response};
@@ -164,6 +166,7 @@ fn push_alt_svc_h2(out: &mut Vec<(Vec<u8>, Vec<u8>)>) {
     });
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum Action {
     None,
     /// Stream this file as the body of the response whose head is in `out`.
@@ -487,6 +490,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 let key = crate::cache::fastcgi::build_cache_key(
                                     method, host_str, path_only, query,
                                 );
+                                fc.poll_purge();
                                 match fc.get(&key) {
                                     Ok(Some((status, headers, cached))) => {
                                         crate::metrics::record_fastcgi_cache_hit();
@@ -523,6 +527,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                     }
                                     _ => {
                                         crate::metrics::record_fastcgi_cache_miss();
+                                        spec.fcgi_cache_path = Some(path_only.as_bytes().to_vec());
                                         spec.fcgi_cache_key = Some(key);
                                     }
                                 }

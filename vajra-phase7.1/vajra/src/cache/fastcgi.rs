@@ -249,14 +249,42 @@ pub struct FastcgiCache {
     /// key -> position in `index`.
     by_key: HashMap<Vec<u8>, usize>,
     total_bytes: u64,
+    /// Last observed PURGE_GEN; polled before each get.
+    last_gen: u64,
 }
 
 impl FastcgiCache {
     /// Open (or create) the cache under `settings.path`. Loads the
     /// on-disk index if present and consistent; otherwise starts
     /// empty.
+    /// आम case में एक atomic load। जब generation बदली हो, उन index
+    /// entries को drop करो जिनकी file disk पर नहीं रही।
+    pub fn poll_purge(&mut self) {
+        let cur = purge_generation();
+        if cur == self.last_gen {
+            return;
+        }
+        let mut i = 0;
+        while i < self.index.len() {
+            let key = self.index[i].key.clone();
+            if self.data_path(&key).exists() {
+                i += 1;
+            } else {
+                let removed = self.index.swap_remove(i);
+                self.total_bytes = self.total_bytes.saturating_sub(removed.size);
+                self.by_key.remove(&removed.key);
+                if i < self.index.len() {
+                    let moved = self.index[i].key.clone();
+                    self.by_key.insert(moved, i);
+                }
+            }
+        }
+        self.last_gen = cur;
+    }
+
     pub fn open(settings: FastcgiCacheSettings) -> std::io::Result<Self> {
         fs::create_dir_all(settings.path.join("data"))?;
+        fs::create_dir_all(settings.path.join("paths"))?;
         let index = load_index(&settings.path).unwrap_or_default();
         let total_bytes = index.iter().map(|e| e.size).sum();
         let mut by_key = HashMap::with_capacity(index.len());
@@ -268,6 +296,7 @@ impl FastcgiCache {
             index,
             by_key,
             total_bytes,
+            last_gen: purge_generation(),
         })
     }
 
@@ -294,6 +323,12 @@ impl FastcgiCache {
             .unwrap_or(0)
     }
 
+    /// `<cache>/paths/<hex(key)>` — `put` द्वारा लिखी गई request path की
+    /// sidecar file। Entry file (v2 format) में कुछ नहीं बदलता।
+    fn sidecar_path(&self, key: &[u8]) -> std::path::PathBuf {
+        let h = format!("{:032x}", key_hash(key));
+        self.settings.path.join("paths").join(h)
+    }
     fn data_path(&self, key: &[u8]) -> PathBuf {
         let h = hex32(key_hash(key));
         let shard = std::str::from_utf8(&h[0..2]).unwrap();
@@ -372,6 +407,7 @@ impl FastcgiCache {
     pub fn put(
         &mut self,
         key: &[u8],
+        req_path: &[u8],
         status: u16,
         headers: &[(Vec<u8>, Vec<u8>)],
         body: &[u8],
@@ -431,6 +467,15 @@ impl FastcgiCache {
         self.by_key.insert(key.to_vec(), idx);
         self.total_bytes += need;
         crate::metrics::record_fastcgi_cache_stats(self.entries() as u64, self.total_bytes);
+
+        // sidecar: request path record करो ताकि admin `purge?path=...`
+        // सिर्फ़ छोटी फ़ाइलें पढ़कर match कर सके।
+        let sidecar = self.sidecar_path(key);
+        if let Some(d) = sidecar.parent() {
+            let _ = fs::create_dir_all(d);
+        }
+        let _ = fs::write(&sidecar, req_path);
+
         Ok(())
     }
 
@@ -598,7 +643,7 @@ mod tests {
             (b"content-type".to_vec(), b"text/html".to_vec()),
             (b"x-test".to_vec(), b"yes".to_vec()),
         ];
-        c.put(b"k1", 200, &hdrs, b"hello world", 60).unwrap();
+        c.put(b"k1", b"/", 200, &hdrs, b"hello world", 60).unwrap();
         let got = c.get(b"k1").unwrap().expect("hit");
         assert_eq!(got.0, 200);
         assert_eq!(got.1, hdrs);
@@ -620,8 +665,8 @@ mod tests {
     fn overwrite_replaces_entry() {
         let dir = scratch("ow");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"k", 200, &[], b"aa", 60).unwrap();
-        c.put(b"k", 200, &[], b"bbbb", 60).unwrap();
+        c.put(b"k", b"/", 200, &[], b"aa", 60).unwrap();
+        c.put(b"k", b"/", 200, &[], b"bbbb", 60).unwrap();
         assert_eq!(c.entries(), 1);
         let (_, _, body) = c.get(b"k").unwrap().expect("hit");
         assert_eq!(body, b"bbbb");
@@ -632,7 +677,7 @@ mod tests {
     fn expiry_on_read() {
         let dir = scratch("expiry");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"k", 200, &[], b"payload", 0).unwrap();
+        c.put(b"k", b"/", 200, &[], b"payload", 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(c.get(b"k").unwrap().is_none());
         assert_eq!(c.entries(), 0);
@@ -644,11 +689,11 @@ mod tests {
         let dir = scratch("lru");
         let mut c = FastcgiCache::open(settings(&dir, 1)).unwrap();
         let big = vec![b'A'; 400 * 1024];
-        c.put(b"first", 200, &[], &big, 60).unwrap();
+        c.put(b"first", b"/", 200, &[], &big, 60).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        c.put(b"second", 200, &[], &big, 60).unwrap();
+        c.put(b"second", b"/", 200, &[], &big, 60).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        c.put(b"third", 200, &[], &big, 60).unwrap();
+        c.put(b"third", b"/", 200, &[], &big, 60).unwrap();
 
         assert!(
             c.get(b"first").unwrap().is_none(),
@@ -665,7 +710,7 @@ mod tests {
         let mut s = settings(&dir, 16);
         s.max_entry_size = 4;
         let mut c = FastcgiCache::open(s).unwrap();
-        c.put(b"k", 200, &[], b"0123456789", 60).unwrap();
+        c.put(b"k", b"/", 200, &[], b"0123456789", 60).unwrap();
         assert_eq!(c.entries(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -675,8 +720,8 @@ mod tests {
         let dir = scratch("persist");
         {
             let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-            c.put(b"k1", 200, &[], b"v1", 60).unwrap();
-            c.put(b"k2", 200, &[], b"v2", 60).unwrap();
+            c.put(b"k1", b"/", 200, &[], b"v1", 60).unwrap();
+            c.put(b"k2", b"/", 200, &[], b"v2", 60).unwrap();
             c.save_index().unwrap();
         }
         let mut c2 = FastcgiCache::open(settings(&dir, 16)).unwrap();
@@ -690,10 +735,10 @@ mod tests {
     fn cleanup_expired_sweeps_stale_entries() {
         let dir = scratch("cleanup");
         let mut c = FastcgiCache::open(settings(&dir, 16)).unwrap();
-        c.put(b"a", 200, &[], b"payload", 0).unwrap();
-        c.put(b"b", 200, &[], b"payload", 0).unwrap();
+        c.put(b"a", b"/", 200, &[], b"payload", 0).unwrap();
+        c.put(b"b", b"/", 200, &[], b"payload", 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        c.put(b"c", 200, &[], b"payload", 600).unwrap();
+        c.put(b"c", b"/", 200, &[], b"payload", 600).unwrap();
         let removed = c.cleanup_expired().unwrap();
         assert_eq!(removed, 2);
         assert_eq!(c.entries(), 1);
@@ -791,5 +836,222 @@ mod tests {
             ..Default::default()
         })
         .is_ok());
+    }
+}
+
+// ─── Cross-worker purge signalling ───────────────────────────────────
+//
+// Workers share-nothing हैं; admin सीधे उनकी in-memory index तक नहीं
+// पहुँच सकता। इसलिए purge disk पर होता है (admin entry files हटाता है)
+// और process-global generation counter बढ़ाता है। हर worker वह
+// generation याद रखता है जो उसने आख़िरी बार देखी; अगले cache read से
+// पहले एक atomic load करता है और बदलाव मिलने पर unlinked entries को
+// अपनी index से drop कर देता है। Hot path lock-free रहता है।
+
+static PURGE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// मौजूदा purge generation। Monotonic रूप से बढ़ती है।
+pub fn purge_generation() -> u64 {
+    PURGE_GEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn bump_purge() -> u64 {
+    PURGE_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Cache shape, किसी भी thread से पढ़ने के लिए safe।
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheStats {
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+/// `dir` के अंदर हर entry file हटाओ (data/ और paths/ दोनों)।
+/// ग़ायब directory error नहीं है।
+pub fn purge_all_on_disk(dir: &std::path::Path) -> std::io::Result<usize> {
+    let mut n = 0usize;
+    for sub in ["data", "paths"] {
+        n += purge_dir_rec(&dir.join(sub))?;
+    }
+    if n > 0 {
+        bump_purge();
+    }
+    Ok(n)
+}
+
+/// Recursively delete every file under `d`, then try to remove the
+/// now-empty subdirectories. Missing directory is `Ok(0)`.
+fn purge_dir_rec(d: &std::path::Path) -> std::io::Result<usize> {
+    let rd = match std::fs::read_dir(d) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut n = 0usize;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            n += purge_dir_rec(&p)?;
+            let _ = std::fs::remove_dir(&p);
+        } else if std::fs::remove_file(&p).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// वे सारी entries हटाओ जिनका stored request path ठीक `path` के बराबर है।
+/// Exact match; कोई globbing नहीं।
+pub fn purge_path_on_disk(dir: &std::path::Path, path: &[u8]) -> std::io::Result<usize> {
+    let paths_dir = dir.join("paths");
+    let data_dir = dir.join("data");
+    let mut n = 0usize;
+    match std::fs::read_dir(&paths_dir) {
+        Ok(rd) => {
+            for e in rd.flatten() {
+                let p = e.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&p) else {
+                    continue;
+                };
+                if bytes != path {
+                    continue;
+                }
+                let Some(name) = p.file_name() else { continue };
+                let name_str = name.to_string_lossy();
+                // data files live at `<cache>/data/<2-hex>/<32-hex>`.
+                if name_str.len() >= 2 {
+                    let shard = &name_str[0..2];
+                    let _ = std::fs::remove_file(data_dir.join(shard).join(name_str.as_ref()));
+                }
+                let _ = std::fs::remove_file(&p);
+                n += 1;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    if n > 0 {
+        bump_purge();
+    }
+    Ok(n)
+}
+
+/// `dir/data` को स्कैन करके cache का shape बताओ। Mid-purge भी accurate,
+/// क्योंकि किसी worker state को नहीं छूता।
+pub fn stats_on_disk(dir: &std::path::Path) -> std::io::Result<CacheStats> {
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    walk_files_rec(&dir.join("data"), &mut |md| {
+        entries += 1;
+        bytes += md.len();
+    })?;
+    Ok(CacheStats { entries, bytes })
+}
+
+/// Recursively walk `d`, calling `f` for every regular file.
+/// Missing directory is `Ok(())` (nothing to visit).
+fn walk_files_rec<F: FnMut(&std::fs::Metadata)>(
+    d: &std::path::Path,
+    f: &mut F,
+) -> std::io::Result<()> {
+    let rd = match std::fs::read_dir(d) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            walk_files_rec(&p, f)?;
+        } else if let Ok(md) = e.metadata() {
+            f(&md);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "vajra-fcgi-purge-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn cfg(dir: &std::path::Path) -> FastcgiCacheSettings {
+        FastcgiCacheSettings {
+            enabled: true,
+            path: dir.to_path_buf(),
+            size_mb: 16,
+            ttl_secs: 60,
+            max_entry_size: 1 << 20,
+            bypass_cookie: vec![],
+            exclude_paths: vec![],
+        }
+    }
+
+    #[test]
+    fn purge_path_removes_only_matching_entries() {
+        let dir = tmpdir("path");
+        let mut c = FastcgiCache::open(cfg(&dir)).unwrap();
+        c.put(b"k1", b"/foo", 200, &[], b"payload-1", 60).unwrap();
+        c.put(b"k2", b"/bar", 200, &[], b"payload-2", 60).unwrap();
+        c.put(b"k3", b"/foo", 200, &[], b"payload-3", 60).unwrap();
+        c.save_index().unwrap();
+        assert_eq!(c.entries(), 3);
+
+        let n = purge_path_on_disk(&dir, b"/foo").unwrap();
+        assert_eq!(n, 2);
+
+        let mut c2 = FastcgiCache::open(cfg(&dir)).unwrap();
+        assert!(c2.get(b"k1").unwrap().is_none());
+        assert!(c2.get(b"k3").unwrap().is_none());
+        assert!(c2.get(b"k2").unwrap().is_some());
+    }
+
+    #[test]
+    fn purge_all_clears_directory_and_bumps_generation() {
+        let dir = tmpdir("all");
+        let mut c = FastcgiCache::open(cfg(&dir)).unwrap();
+        c.put(b"k1", b"/a", 200, &[], b"1", 60).unwrap();
+        c.put(b"k2", b"/b", 200, &[], b"2", 60).unwrap();
+
+        let gen_before = purge_generation();
+        assert_eq!(purge_all_on_disk(&dir).unwrap(), 4); // 2 data + 2 paths
+        assert!(purge_generation() > gen_before);
+
+        c.poll_purge();
+        assert_eq!(c.entries(), 0);
+    }
+
+    #[test]
+    fn purge_on_missing_dir_is_noop_ok() {
+        let nope = std::path::Path::new("/nope-does-not-exist");
+        assert_eq!(purge_all_on_disk(nope).unwrap(), 0);
+        assert_eq!(purge_path_on_disk(nope, b"/x").unwrap(), 0);
+    }
+
+    #[test]
+    fn stats_on_disk_reports_entries_and_bytes() {
+        let dir = tmpdir("stats");
+        let mut c = FastcgiCache::open(cfg(&dir)).unwrap();
+        c.put(b"k1", b"/a", 200, &[], b"hello", 60).unwrap();
+        c.put(b"k2", b"/b", 200, &[], b"world!", 60).unwrap();
+        let s = stats_on_disk(&dir).unwrap();
+        assert_eq!(s.entries, 2);
+        assert!(s.bytes > 0);
     }
 }

@@ -396,6 +396,9 @@ pub struct ProxySpec {
     /// to store the eventual response under. `None` when the request is
     /// not FastCGI, cache is disabled, or a bypass rule fired.
     pub fcgi_cache_key: Option<Vec<u8>>,
+    /// Request path (query के बिना) — sidecar के लिए ताकि admin
+    /// `purge?path=...` match कर सके।
+    pub fcgi_cache_path: Option<Vec<u8>>,
 }
 
 pub struct ReqParts<'a> {
@@ -458,6 +461,7 @@ pub fn make_spec(table: &ProxyTable, route: usize, p: &ReqParts) -> ProxySpec {
             .find(|(n, _)| n.eq_ignore_ascii_case(b"cookie"))
             .map(|(_, v)| String::from_utf8_lossy(v).into_owned()),
         fcgi_cache_key: None,
+        fcgi_cache_path: None,
     }
 }
 

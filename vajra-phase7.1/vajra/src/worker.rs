@@ -270,6 +270,9 @@ struct ProxyJob {
     /// response should be stored on completion. `None` when cache is off
     /// or the request bypassed.
     fcgi_cache_key: Option<Vec<u8>>,
+    /// Request path (query के बिना) — sidecar के लिए, ताकि admin
+    /// `purge?path=...` match कर सके।
+    fcgi_cache_path: Option<Vec<u8>>,
 }
 
 impl ProxyJob {
@@ -305,6 +308,7 @@ impl ProxyJob {
             upgrade: spec.upgrade,
             fcgi: spec.fcgi.then(|| Box::new(fastcgi::Decoder::new())),
             fcgi_cache_key: spec.fcgi_cache_key,
+            fcgi_cache_path: spec.fcgi_cache_path,
         }
     }
 
@@ -1460,6 +1464,7 @@ impl Worker {
                                 path_only,
                                 query,
                             );
+                            self.fastcgi_cache.poll_purge();
                             match self.fastcgi_cache.get(&key) {
                                 Ok(Some((status, headers, cached))) => {
                                     crate::metrics::record_fastcgi_cache_hit();
@@ -1491,6 +1496,7 @@ impl Worker {
                                 }
                                 _ => {
                                     crate::metrics::record_fastcgi_cache_miss();
+                                    spec.fcgi_cache_path = Some(path_only.as_bytes().to_vec());
                                     spec.fcgi_cache_key = Some(key);
                                 }
                             }
@@ -2317,10 +2323,14 @@ impl Worker {
             if cacheable {
                 let ttl = self.fastcgi_cache.settings.ttl_secs;
                 let storable = cache::storable_headers(&head.headers);
-                if let Err(e) =
-                    self.fastcgi_cache
-                        .put(key, head.status, &storable, body.as_slice(), ttl)
-                {
+                if let Err(e) = self.fastcgi_cache.put(
+                    key,
+                    job.fcgi_cache_path.as_deref().unwrap_or(b"/"),
+                    head.status,
+                    &storable,
+                    body.as_slice(),
+                    ttl,
+                ) {
                     eprintln!("vajra: fastcgi_cache put: {e}");
                 } else if let Err(e) = self.fastcgi_cache.save_index() {
                     eprintln!("vajra: fastcgi_cache save_index: {e}");
@@ -2948,6 +2958,7 @@ mod tests {
             host: String::new(),
             cookie: None,
             fcgi_cache_key: None,
+            fcgi_cache_path: None,
         };
         ProxyJob::new(spec, st, None, 0)
     }

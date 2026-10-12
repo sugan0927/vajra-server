@@ -268,3 +268,56 @@ makes, and it is documented here so operators are not surprised.
 - `proxy_done` also records `bypass` when a request that would
   otherwise have been cached was bypassed by a rule or method.
 - `FastcgiCache::put` and `remove_at` refresh `entries` / `bytes`.
+
+---
+
+## Update — Day 20: admin cache control (purge, purge-all, stats)
+
+तीन endpoints admin listener पर। वे **on-disk** cache पर काम करते हैं;
+workers share-nothing हैं, इसलिए कोई in-process RPC नहीं।
+
+### Endpoints
+
+| Method | Path | Body |
+|---|---|---|
+| POST | `/admin/cache/purge?path=/foo` | `{"purged":N,"generation":G}` |
+| POST | `/admin/cache/purge-all`       | `{"purged":N,"generation":G}` |
+| GET  | `/admin/cache/stats`           | `{"entries":E,"bytes":B,"capacity_bytes":C,"generation":G}` |
+
+`path` **exact match** है, entry में stored request path के ख़िलाफ़
+(कोई globbing नहीं)। `/` से शुरू होना ज़रूरी। Errors: 400
+(missing/malformed `path`), 503 (cache disabled), 500 (I/O)।
+
+### Path record (sidecar)
+
+हर `put(key, path, ...)` के साथ एक छोटी sidecar file लिखी जाती है:
+
+    <cache>/paths/<hex(key)>   →   कच्चा request path (जैसे "/foo")
+
+Entry file (`data/<hex(key)>`) का on-disk v2 format **नहीं बदला**।
+Purge इसलिए सिर्फ़ छोटी sidecars पढ़ता है, bodies को छूता नहीं।
+
+### Multi-worker synchronisation
+
+Workers share-nothing हैं, इसलिए purge unke in-memory index को सीधे
+नहीं छू सकता। इसलिए:
+
+1. Admin matching files हटाता है (`data/` और `paths/` दोनों से)।
+2. Admin प्रक्रिया-व्यापी `PURGE_GEN: AtomicU64` को बढ़ाता है।
+3. हर worker अपनी आख़िरी देखी हुई generation याद रखता है। हर `get()`
+   से पहले एक `SeqCst` load; बदलाव पर वे index entries drop करता है
+   जिनकी file disk पर नहीं रही।
+
+Hot path पर लागत: **एक atomic load**। Purge के बाद: हर worker पर, पहली
+read पर एक pass over its index। `purge_all` ख़ाली directory पर
+generation नहीं बढ़ाता, इसलिए no-op मुफ़्त है। हर endpoint का
+`generation` field workers में एक ही है और "क्या मेरा purge लगा?"
+token की तरह काम करता है।
+
+### शामिल नहीं
+
+- **Glob wildcards।** `?path=/wp-admin/*` नहीं है; `purge-all` use करें
+  या हर path के लिए अलग purge।
+- **Age-based purge।** `?older_than=60s` possible है पर लागू नहीं।
+- **Admin auth।** इन routes को उसी auth के पीछे रखें जो `/metrics` की
+  रक्षा करता है।
