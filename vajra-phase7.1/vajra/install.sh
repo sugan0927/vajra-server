@@ -21,6 +21,11 @@
 set -euo pipefail
 
 # ─── Defaults ────────────────────────────────────────────────────────
+# Version of the binary this script was tested with. Purely
+# informational; the binary itself reports its version via
+# `vajra --help`.
+VAJRA_VERSION="v0.14.0"
+
 VAJRA_BIN_SRC="${VAJRA_BIN_SRC:-}"           # path to the built binary
 VAJRA_WP_PATH="${VAJRA_WP_PATH:-/var/www/html}"
 WP_USER="${WP_USER:-www-data}"
