@@ -13,7 +13,7 @@ fn parse(src: &str) -> Result<BackupConfig, toml::de::Error> {
 fn empty_section_uses_defaults() {
     let c = parse("").expect("empty section must parse");
     assert!(!c.enabled);
-    assert_eq!(c.schedule, "0 3 * * *");
+    assert_eq!(c.schedule, "0 0 3 * * *");
     assert_eq!(c.keep_days, 7);
     assert!(c.destinations.is_empty());
     assert_eq!(c.s3_prefix, "vajra/");
