@@ -99,6 +99,16 @@ fn die(msg: String) -> ! {
 }
 
 fn main() {
+    // ── `vajra wp` subcommand ────────────────────────────────────
+    // Fast path: if the first arg is `wp`, hand everything after it to
+    // wp-cli and exit. Nothing else in main runs (no config load, no
+    // io_uring setup) so this is safe to call anywhere.
+    {
+        let raw: Vec<String> = std::env::args().collect();
+        if raw.get(1).map(|s| s.as_str()) == Some("wp") {
+            std::process::exit(vajra::wp::run(&raw[2..]));
+        }
+    }
     if let Err(e) = vajra::metrics::init() {
         eprintln!("vajra: metrics init failed: {e}");
     }
