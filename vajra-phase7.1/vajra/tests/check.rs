@@ -25,8 +25,10 @@ fn clean_default_has_no_errors() {
 
 #[test]
 fn loopback_admin_is_info_not_warning() {
-    let mut s = Settings::default();
-    s.admin = Some("127.0.0.1:9100".parse().unwrap());
+    let s = Settings {
+        admin: Some("127.0.0.1:9100".parse().unwrap()),
+        ..Settings::default()
+    };
     let r = check::run(&s);
     assert!(!scopes(&r, Severity::Warning).contains(&"[admin]"));
     assert!(scopes(&r, Severity::Info).contains(&"[admin]"));
@@ -34,16 +36,20 @@ fn loopback_admin_is_info_not_warning() {
 
 #[test]
 fn non_loopback_admin_is_warning() {
-    let mut s = Settings::default();
-    s.admin = Some("0.0.0.0:9100".parse().unwrap());
+    let s = Settings {
+        admin: Some("0.0.0.0:9100".parse().unwrap()),
+        ..Settings::default()
+    };
     let r = check::run(&s);
     assert!(scopes(&r, Severity::Warning).contains(&"[admin]"));
 }
 
 #[test]
 fn tiny_grace_is_warning() {
-    let mut s = Settings::default();
-    s.grace_secs = 1;
+    let s = Settings {
+        grace_secs: 1,
+        ..Settings::default()
+    };
     let r = check::run(&s);
     assert!(scopes(&r, Severity::Warning).contains(&"[server]"));
 }

@@ -263,9 +263,9 @@ fn render(a: &Answers) -> String {
 
     if a.enable_rate_limit {
         s.push_str("[rate_limit]\n");
-        s.push_str("enabled = true\n");
-        s.push_str(&format!("rps     = {}\n", a.rate_rps));
-        s.push_str("burst   = 100\n\n");
+        s.push_str("enabled              = true\n");
+        s.push_str(&format!("requests_per_second  = {}\n", a.rate_rps));
+        s.push_str("burst                = 100\n\n");
     }
 
     if a.enable_backups {
@@ -335,7 +335,7 @@ mod tests {
         assert!(s.contains("[[proxy]]"));
         assert!(s.contains("unix:/run/php/php8.2-fpm.sock"));
         assert!(s.contains("[rate_limit]"));
-        assert!(s.contains("rps     = 75"));
+        assert!(s.contains("requests_per_second  = 75"));
         assert!(s.contains("[backup]"));
         assert!(s.contains("[backup.database]"));
         assert!(s.contains("Redis detected"));

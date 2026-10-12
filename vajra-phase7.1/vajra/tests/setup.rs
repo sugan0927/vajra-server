@@ -41,11 +41,19 @@ fn writes_valid_config_with_defaults() {
     assert!(raw.contains("[backup]"));
     assert!(raw.contains("[rate_limit]"));
 
-    // Round-trip through the config parser. Second arg is the base
-    // dir for relative paths; "/" is a fine anchor for a config that
-    // only uses absolute paths.
+    // Round-trip through the config parser. Two adjustments:
+    //   * `Settings::from_toml_str` probes `static.root` for existence,
+    //     so swap the hardcoded `/var/www/html` for a real temp dir.
+    //     This keeps the round-trip meaningful without requiring a
+    //     global, root-level path to exist on every test host.
+    //   * The second argument is the base dir for relative paths; "/"
+    //     is fine for a config that only uses absolute paths.
+    let html_dir = tmp.join("html");
+    fs::create_dir_all(&html_dir).unwrap();
+    let raw_for_parse = raw.replace("/var/www/html", &html_dir.to_string_lossy());
+
     let _: vajra::config::Settings =
-        vajra::config::Settings::from_toml_str(&raw, std::path::Path::new("/"))
+        vajra::config::Settings::from_toml_str(&raw_for_parse, std::path::Path::new("/"))
             .expect("generated TOML must parse as Settings");
 
     let _ = fs::remove_dir_all(&tmp);
