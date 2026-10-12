@@ -5,6 +5,14 @@ on:
     tags:
       - "v*"
 
+# The default GITHUB_TOKEN issued to workflows on this repo is
+# read-only (repo setting: 'Read repository contents and packages
+# permissions'). softprops/action-gh-release needs write access to
+# create the release and upload assets. Grant it explicitly here
+# rather than changing the repo-wide default.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
