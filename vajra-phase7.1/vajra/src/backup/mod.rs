@@ -53,9 +53,3 @@ impl From<std::io::Error> for BackupError {
         BackupError::Io(e)
     }
 }
-
-impl From<crate::config::BackupError> for BackupError {
-    fn from(e: crate::config::BackupError) -> Self {
-        BackupError::Config(e.to_string())
-    }
-}

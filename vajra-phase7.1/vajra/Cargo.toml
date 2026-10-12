@@ -45,6 +45,7 @@ ipnet = "2.12.2"
 tar = "0.4.46"
 zstd = "0.14.2"
 tempfile = "3.27.0"
+rust-s3 = { version = "0.38.0", default-features = false, features = ["blocking", "tokio-rustls-tls"] }
 
 [dev-dependencies]
 # Self-signed certificates for the TLS / HTTP/2 end-to-end tests.
