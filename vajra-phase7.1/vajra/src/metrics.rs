@@ -708,6 +708,15 @@ pub struct FastcgiCacheMetrics {
     pub entries: prometheus::IntGauge,
     /// `vajra_fastcgi_cache_bytes`. Same caveat as `entries`.
     pub bytes: prometheus::IntGauge,
+    // ── Day 21 canonical flat metrics ────────────────────────────
+    /// `vajra_cache_hits_total`.
+    pub hits: prometheus::IntCounter,
+    /// `vajra_cache_misses_total`.
+    pub misses: prometheus::IntCounter,
+    /// `vajra_cache_evictions_total`.
+    pub evictions_flat: prometheus::IntCounter,
+    /// `vajra_cache_size_bytes`.
+    pub size_bytes: prometheus::IntGauge,
 }
 
 static FASTCGI_CACHE: OnceLock<FastcgiCacheMetrics> = OnceLock::new();
@@ -752,12 +761,41 @@ pub fn init_fastcgi_cache(reg: &prometheus::Registry) -> prometheus::Result<()> 
     )?;
     reg.register(Box::new(bytes.clone()))?;
 
+    // ── Day 21 canonical flat metrics ────────────────────────────
+    let hits = prometheus::IntCounter::new(
+        "vajra_cache_hits_total",
+        "FastCGI cache hits (flat counter)",
+    )?;
+    reg.register(Box::new(hits.clone()))?;
+
+    let misses = prometheus::IntCounter::new(
+        "vajra_cache_misses_total",
+        "FastCGI cache misses (flat counter)",
+    )?;
+    reg.register(Box::new(misses.clone()))?;
+
+    let evictions_flat = prometheus::IntCounter::new(
+        "vajra_cache_evictions_total",
+        "FastCGI cache evictions (flat counter)",
+    )?;
+    reg.register(Box::new(evictions_flat.clone()))?;
+
+    let size_bytes = prometheus::IntGauge::new(
+        "vajra_cache_size_bytes",
+        "FastCGI cache on-disk size (flat gauge)",
+    )?;
+    reg.register(Box::new(size_bytes.clone()))?;
+
     FASTCGI_CACHE
         .set(FastcgiCacheMetrics {
             requests,
             evictions,
             entries,
             bytes,
+            hits,
+            misses,
+            evictions_flat,
+            size_bytes,
         })
         .map_err(|_| prometheus::Error::Msg("fastcgi cache metrics already set".into()))?;
     Ok(())
@@ -773,6 +811,7 @@ pub fn record_fastcgi_cache_hit() {
         if let Some(c) = m.requests.get(FASTCGI_CACHE_HIT) {
             c.inc();
         }
+        m.hits.inc();
     }
 }
 
@@ -782,6 +821,7 @@ pub fn record_fastcgi_cache_miss() {
         if let Some(c) = m.requests.get(FASTCGI_CACHE_MISS) {
             c.inc();
         }
+        m.misses.inc();
     }
 }
 
@@ -798,6 +838,7 @@ pub fn record_fastcgi_cache_bypass() {
 pub fn record_fastcgi_cache_eviction() {
     if let Some(m) = FASTCGI_CACHE.get() {
         m.evictions.inc();
+        m.evictions_flat.inc();
     }
 }
 
@@ -808,6 +849,7 @@ pub fn record_fastcgi_cache_stats(entries: u64, bytes: u64) {
     if let Some(m) = FASTCGI_CACHE.get() {
         m.entries.set(entries as i64);
         m.bytes.set(bytes as i64);
+        m.size_bytes.set(bytes as i64);
     }
 }
 
@@ -861,5 +903,24 @@ mod rate_limit_metrics_tests {
             "{text}"
         );
         assert!(text.contains("vajra_rate_limit_tracked_ips"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod flat_metrics_tests {
+    use super::*;
+
+    #[test]
+    fn flat_metrics_are_exported() {
+        init().unwrap();
+        record_fastcgi_cache_hit();
+        record_fastcgi_cache_miss();
+        record_fastcgi_cache_eviction();
+        record_fastcgi_cache_stats(3, 4096);
+        let text = render();
+        assert!(text.contains("vajra_cache_hits_total"), "{text}");
+        assert!(text.contains("vajra_cache_misses_total"), "{text}");
+        assert!(text.contains("vajra_cache_evictions_total"), "{text}");
+        assert!(text.contains("vajra_cache_size_bytes"), "{text}");
     }
 }

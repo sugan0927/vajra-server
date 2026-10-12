@@ -806,3 +806,85 @@ fn fastcgi_cache_miss_hit_bypass() {
 
     let _ = std::fs::remove_dir_all(&cache_dir);
 }
+
+/// Case-insensitive extractor for `X-FastCGI-Cache` response header.
+fn xfcgi(r: &Resp) -> Option<String> {
+    r.head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if k.trim().eq_ignore_ascii_case("x-fastcgi-cache") {
+            Some(v.trim().to_ascii_uppercase())
+        } else {
+            None
+        }
+    })
+}
+
+/// Full FastCGI cache lifecycle in one test:
+///   MISS (fill) → HIT (replay) → purge → MISS (worker resynced).
+///
+/// Purge is done directly via the on-disk helper so the test does not
+/// need to spin up the admin listener. Admin HTTP wrapping of the same
+/// helpers is covered by `admin.rs`'s unit tests.
+#[test]
+fn fastcgi_cache_lifecycle_miss_hit_purge() {
+    let root = make_site("fcgi-lifecycle");
+    let cache_dir = std::env::temp_dir().join(format!(
+        "vajra-fcgi-lifecycle-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+
+    let fpm = spawn_fpm(echo_app());
+    let fcgi = vajra::cache::fastcgi::FastcgiCacheSettings {
+        enabled: true,
+        path: cache_dir.clone(),
+        size_mb: 16,
+        ttl_secs: 60,
+        max_entry_size: 1 << 20,
+        bypass_cookie: vec![],
+        exclude_paths: vec![],
+    };
+
+    let Some(addr) = start_with_cache(
+        &root,
+        vec![php_route(&root, vec![fpm.addr.into()], 5)],
+        Config::default(),
+        fcgi,
+    ) else {
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        return;
+    };
+
+    // ── 1. MISS: first request fills the cache. ─────────────────
+    let r1 = get(addr, "/");
+    assert_eq!(r1.status, 200, "head={}", r1.head);
+    assert_eq!(xfcgi(&r1).as_deref(), Some("MISS"), "head={}", r1.head);
+    let body = r1.text();
+    assert!(body.contains("script="), "body={body}");
+
+    // ── 2. HIT: second request replays the stored entry. ────────
+    let r2 = get(addr, "/");
+    assert_eq!(r2.status, 200, "head={}", r2.head);
+    assert_eq!(xfcgi(&r2).as_deref(), Some("HIT"), "head={}", r2.head);
+    assert_eq!(body, r2.text(), "cached body must match original");
+
+    // ── 3. PURGE: on-disk removal of every entry for "/" ────────
+    // Done directly — the admin HTTP wrapper is exercised by
+    // `metrics`/`admin` unit tests, and spinning up the listener here
+    // would not add coverage.
+    let purged =
+        vajra::cache::fastcgi::purge_path_on_disk(&cache_dir, b"/").expect("purge_path_on_disk");
+    assert!(purged >= 1, "expected >=1 entry purged, got {purged}");
+
+    // ── 4. MISS again: worker sees the generation bump and rescans.
+    let r3 = get(addr, "/");
+    assert_eq!(r3.status, 200, "head={}", r3.head);
+    assert_eq!(xfcgi(&r3).as_deref(), Some("MISS"), "head={}", r3.head);
+    assert_eq!(body, r3.text(), "refill produces the same body");
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
+}

@@ -321,3 +321,43 @@ token की तरह काम करता है।
 - **Age-based purge।** `?older_than=60s` possible है पर लागू नहीं।
 - **Admin auth।** इन routes को उसी auth के पीछे रखें जो `/metrics` की
   रक्षा करता है।
+
+---
+
+## Update — Day 21: canonical cache metrics
+
+Four flat, dashboard-friendly metrics are now exported alongside the
+Day 19e FastCGI-specific ones. Both sets update together:
+
+| Metric | Type | Source |
+|---|---|---|
+| `vajra_cache_hits_total` | counter | every `get()` that returned `Some` |
+| `vajra_cache_misses_total` | counter | every `get()` that returned `None` (miss, expired, corrupt) |
+| `vajra_cache_evictions_total` | counter | every `remove_at` (LRU, expiry, overwrite) |
+| `vajra_cache_size_bytes` | gauge | current on-disk `data/` size (last writer) |
+
+The Day 19e metrics are kept for compatibility, so both
+`vajra_cache_*` and `vajra_fastcgi_cache_*` appear in `/metrics`:
+
+- `vajra_cache_hits_total` ⇔ `vajra_fastcgi_cache_requests_total{result="hit"}`
+- `vajra_cache_misses_total` ⇔ `vajra_fastcgi_cache_requests_total{result="miss"}`
+- `vajra_cache_evictions_total` ⇔ `vajra_fastcgi_cache_evictions_total`
+- `vajra_cache_size_bytes` ⇔ `vajra_fastcgi_cache_bytes`
+
+(Day 19e also exports `vajra_fastcgi_cache_requests_total{result="bypass"}`
+and `vajra_fastcgi_cache_entries`, which have no Day 21 flat equivalent.)
+
+`vajra_cache_size_bytes` reports the last value written by any worker —
+Vajra is share-nothing, so this is not a sum across workers. See the
+Day 19e note for the same caveat.
+
+### Integration test
+
+`tests/php.rs::fastcgi_cache_lifecycle_miss_hit_purge` walks the full
+lifecycle in one test:
+
+1. First `GET /` → `X-FastCGI-Cache: MISS`, cache is filled.
+2. Second `GET /` → `HIT`, body replayed byte-for-byte.
+3. `purge_path_on_disk(cache_dir, "/")` → at least one entry removed.
+4. Next `GET /` → `MISS` again, proving the worker saw the `PURGE_GEN`
+   bump and resynced its in-memory index.
