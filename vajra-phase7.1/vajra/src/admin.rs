@@ -31,6 +31,8 @@
 //! The swap is per worker, so a reload is not atomic across cores: for a few
 //! milliseconds different cores can serve different generations.
 
+#![allow(clippy::items_after_test_module)]
+
 use crate::config::Settings;
 use crate::control::{Cmd, Handle, Snapshot};
 use crate::observe;
@@ -279,70 +281,6 @@ pub fn serve(addr: SocketAddr, mgr: Arc<Manager>) -> std::io::Result<(SocketAddr
     Ok((bound, h))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn empty_manager() -> Manager {
-        Manager::new(Vec::new(), None, Settings::default())
-    }
-
-    #[test]
-    fn routing_table() {
-        let m = empty_manager();
-        let (s, c, b) = route_admin("GET", "/healthz", &m);
-        assert_eq!((s, c, b.as_str()), (200, TEXT, "ok\n"));
-        let (s, c, b) = route_admin("GET", "/metrics?x=1", &m);
-        assert_eq!((s, c), (200, PROM));
-        assert!(b.contains("vajra_workers 0\n"));
-        assert_eq!(route_admin("DELETE", "/metrics", &m).0, 405);
-        assert_eq!(route_admin("GET", "/reload", &m).0, 405);
-        assert_eq!(route_admin("GET", "/nope", &m).0, 404);
-    }
-
-    #[test]
-    fn reload_without_config_file_is_an_error() {
-        let m = empty_manager();
-        let (s, _, b) = route_admin("POST", "/reload", &m);
-        assert_eq!(s, 500);
-        assert!(b.contains("nothing to reload"), "{b}");
-    }
-
-    #[test]
-    fn reload_rejects_invalid_config_without_touching_workers() {
-        let dir = std::env::temp_dir().join(format!("vajra-admin-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("bad.toml");
-        std::fs::write(&p, "this is = not [valid").unwrap();
-        let m = Manager::new(Vec::new(), Some(p), Settings::default());
-        assert!(m.reload().is_err());
-    }
-
-    #[test]
-    fn http_roundtrip_over_a_socket() {
-        let m = Arc::new(empty_manager());
-        let (addr, _h) = serve("127.0.0.1:0".parse().unwrap(), m).unwrap();
-        let get = |req: &str| {
-            let mut s = TcpStream::connect(addr).unwrap();
-            s.write_all(req.as_bytes()).unwrap();
-            let mut out = String::new();
-            s.read_to_string(&mut out).unwrap();
-            out
-        };
-        let r = get("GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
-        assert!(
-            r.starts_with("HTTP/1.1 200 OK") && r.ends_with("ok\n"),
-            "{r}"
-        );
-        let r = get("HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
-        assert!(r.contains("Content-Length: 3") && r.ends_with("\r\n\r\n"));
-        let r = get("GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n");
-        assert!(r.contains("version=0.0.4") && r.contains("vajra_workers 0"));
-        assert!(get("GET /zzz HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
-        assert!(get("garbage\r\n\r\n").starts_with("HTTP/1.1 400"));
-    }
-}
-
 // ─── FastCGI cache control ───────────────────────────────────────────
 //
 // तीनों routes admin listener पर। सब कुछ on-disk; workers share-nothing
@@ -450,5 +388,69 @@ fn cache_stats(mgr: &Manager) -> (u16, &'static str, String) {
             )
         }
         Err(e) => (500, JSON, format!(r#"{{"error":"{}"}}"#, e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_manager() -> Manager {
+        Manager::new(Vec::new(), None, Settings::default())
+    }
+
+    #[test]
+    fn routing_table() {
+        let m = empty_manager();
+        let (s, c, b) = route_admin("GET", "/healthz", &m);
+        assert_eq!((s, c, b.as_str()), (200, TEXT, "ok\n"));
+        let (s, c, b) = route_admin("GET", "/metrics?x=1", &m);
+        assert_eq!((s, c), (200, PROM));
+        assert!(b.contains("vajra_workers 0\n"));
+        assert_eq!(route_admin("DELETE", "/metrics", &m).0, 405);
+        assert_eq!(route_admin("GET", "/reload", &m).0, 405);
+        assert_eq!(route_admin("GET", "/nope", &m).0, 404);
+    }
+
+    #[test]
+    fn reload_without_config_file_is_an_error() {
+        let m = empty_manager();
+        let (s, _, b) = route_admin("POST", "/reload", &m);
+        assert_eq!(s, 500);
+        assert!(b.contains("nothing to reload"), "{b}");
+    }
+
+    #[test]
+    fn reload_rejects_invalid_config_without_touching_workers() {
+        let dir = std::env::temp_dir().join(format!("vajra-admin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("bad.toml");
+        std::fs::write(&p, "this is = not [valid").unwrap();
+        let m = Manager::new(Vec::new(), Some(p), Settings::default());
+        assert!(m.reload().is_err());
+    }
+
+    #[test]
+    fn http_roundtrip_over_a_socket() {
+        let m = Arc::new(empty_manager());
+        let (addr, _h) = serve("127.0.0.1:0".parse().unwrap(), m).unwrap();
+        let get = |req: &str| {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(req.as_bytes()).unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out
+        };
+        let r = get("GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(
+            r.starts_with("HTTP/1.1 200 OK") && r.ends_with("ok\n"),
+            "{r}"
+        );
+        let r = get("HEAD /healthz HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(r.contains("Content-Length: 3") && r.ends_with("\r\n\r\n"));
+        let r = get("GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(r.contains("version=0.0.4") && r.contains("vajra_workers 0"));
+        assert!(get("GET /zzz HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 404"));
+        assert!(get("garbage\r\n\r\n").starts_with("HTTP/1.1 400"));
     }
 }

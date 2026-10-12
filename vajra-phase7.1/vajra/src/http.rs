@@ -13,8 +13,6 @@
 //! [`Observer`] (metrics + access log), and proxied `GET`s are answered from the
 //! per-core response cache when a fresh entry exists (`X-Cache: HIT`).
 
-#![allow(clippy::items_after_test_module)]
-
 use crate::cache::{self, Cache};
 use crate::date::DATE_LEN;
 use crate::h2::{H2Body, H2Response};
