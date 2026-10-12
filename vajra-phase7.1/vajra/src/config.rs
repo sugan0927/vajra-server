@@ -134,6 +134,9 @@ pub struct Settings {
     pub rate_limit: RateLimitSettings,
     pub compression: CompressionSettings,
     pub fastcgi_cache: FastcgiCacheSettings,
+
+    /// Day 23: auto-backup policy. Executor is `vajra backup run`.
+    pub backup: BackupConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +340,7 @@ impl Default for Settings {
             rate_limit: RateLimitSettings::default(),
             compression: CompressionSettings::default(),
             fastcgi_cache: FastcgiCacheSettings::default(),
+            backup: BackupConfig::default(),
         }
     }
 }
@@ -855,6 +859,7 @@ impl Settings {
             rate_limit: build_rate_limit(raw.rate_limit.unwrap_or_default())?,
             compression: build_compression(raw.compression.unwrap_or_default())?,
             fastcgi_cache: build_fastcgi_cache(raw.fastcgi_cache.unwrap_or_default())?,
+            backup: BackupConfig::default(),
             health: raw.health,
             listen,
             workers: raw.server.workers,
@@ -1504,4 +1509,156 @@ fn build_headers(raw: Option<RawHeaders>) -> Result<HeaderSettings, String> {
         content_security_policy: r.content_security_policy,
         overrides,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Day 23: [backup] config schema
+//
+// The `[backup]` section describes POLICY only. The executor is
+// `vajra backup run` (Day 24+), fired by a systemd timer or cron.
+// No scheduler runs inside the worker threads.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Which backends to ship a completed archive to.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupDestination {
+    Local,
+    S3,
+}
+
+/// `[backup]` — auto-backup policy. See `docs/backup.md`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupConfig {
+    /// Master switch. When `false`, other fields are ignored.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Cron expression the operator's systemd timer is built from.
+    /// Parsed at load time to catch typos early.
+    #[serde(default = "BackupConfig::default_schedule")]
+    pub schedule: String,
+
+    /// Delete archives older than this many days after each run.
+    #[serde(default = "BackupConfig::default_keep_days")]
+    pub keep_days: u32,
+
+    /// Where to write archives. Empty + `enabled = true` is a load error.
+    #[serde(default)]
+    pub destinations: Vec<BackupDestination>,
+
+    /// Local destination directory. Must be absolute.
+    #[serde(default = "BackupConfig::default_local_dir")]
+    pub local_dir: PathBuf,
+
+    #[serde(default)]
+    pub s3_bucket: Option<String>,
+    #[serde(default)]
+    pub s3_region: Option<String>,
+    #[serde(default)]
+    pub s3_access_key: Option<String>,
+    #[serde(default)]
+    pub s3_secret_key: Option<String>,
+    /// Custom endpoint for MinIO / Cloudflare R2 / Backblaze B2.
+    #[serde(default)]
+    pub s3_endpoint: Option<String>,
+    #[serde(default = "BackupConfig::default_s3_prefix")]
+    pub s3_prefix: String,
+}
+
+impl BackupConfig {
+    fn default_schedule() -> String {
+        "0 3 * * *".into()
+    }
+    fn default_keep_days() -> u32 {
+        7
+    }
+    fn default_local_dir() -> PathBuf {
+        PathBuf::from("/var/backups/vajra")
+    }
+    fn default_s3_prefix() -> String {
+        "vajra/".into()
+    }
+
+    /// Resolve S3 credentials env-first, then config.
+    /// Empty env values are treated as unset.
+    pub fn resolved_s3_creds(&self) -> (Option<String>, Option<String>) {
+        let ak = std::env::var("VAJRA_S3_ACCESS_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.s3_access_key.clone().filter(|s| !s.is_empty()));
+        let sk = std::env::var("VAJRA_S3_SECRET_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.s3_secret_key.clone().filter(|s| !s.is_empty()));
+        (ak, sk)
+    }
+
+    /// Validate this section in isolation. Errors are operator-facing.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.destinations.is_empty() {
+            return Err("backup.enabled = true but destinations is empty".into());
+        }
+        if let Err(e) = self.schedule.parse::<cron::Schedule>() {
+            return Err(format!("backup.schedule {:?}: {e}", self.schedule));
+        }
+        if !(1..=3650).contains(&self.keep_days) {
+            return Err(format!(
+                "backup.keep_days must be 1..=3650, got {}",
+                self.keep_days
+            ));
+        }
+        if self.destinations.contains(&BackupDestination::Local) && !self.local_dir.is_absolute() {
+            return Err(format!(
+                "backup.local_dir must be absolute: {:?}",
+                self.local_dir
+            ));
+        }
+        if self.destinations.contains(&BackupDestination::S3) {
+            if self.s3_bucket.as_deref().unwrap_or("").is_empty() {
+                return Err(r#"backup.s3_bucket is required when "s3" is a destination"#.into());
+            }
+            if self.s3_region.as_deref().unwrap_or("").is_empty() {
+                return Err(r#"backup.s3_region is required when "s3" is a destination"#.into());
+            }
+            let (ak, sk) = self.resolved_s3_creds();
+            if ak.is_none() || sk.is_none() {
+                eprintln!(
+                    "vajra: warning: backup s3 destination set but no credentials in \
+                     VAJRA_S3_* env or [backup] config; will fall back to instance role \
+                     or ~/.aws/credentials"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            schedule: Self::default_schedule(),
+            keep_days: Self::default_keep_days(),
+            destinations: Vec::new(),
+            local_dir: Self::default_local_dir(),
+            s3_bucket: None,
+            s3_region: None,
+            s3_access_key: None,
+            s3_secret_key: None,
+            s3_endpoint: None,
+            s3_prefix: Self::default_s3_prefix(),
+        }
+    }
+}
+
+impl Settings {
+    /// Validate the `[backup]` section. Delegates to `BackupConfig::validate`.
+    pub fn validate_backup(&self) -> Result<(), String> {
+        self.backup.validate()
+    }
 }
