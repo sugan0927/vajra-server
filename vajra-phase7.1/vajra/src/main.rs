@@ -110,6 +110,40 @@ fn main() {
             std::process::exit(vajra::wp::run(&raw[2..]));
         }
     }
+
+    // ── `vajra setup` subcommand ─────────────────────────────────
+    // Interactive wizard. Dispatches before any config load.
+    {
+        let raw: Vec<String> = std::env::args().collect();
+        if raw.get(1).map(|s| s.as_str()) == Some("setup") {
+            let mut cfg_path = std::path::PathBuf::from("/etc/vajra/app.toml");
+            let mut it = raw[2..].iter();
+            while let Some(a) = it.next() {
+                if let Some(v) = a.strip_prefix("--config=") {
+                    cfg_path = v.into();
+                } else if a == "--config" {
+                    if let Some(v) = it.next() {
+                        cfg_path = v.into();
+                    }
+                }
+            }
+            match vajra::setup::run(vajra::setup::StdinPrompter, &cfg_path) {
+                Ok(_) => {
+                    println!();
+                    println!("wrote {}", cfg_path.display());
+                    println!(
+                        "run `vajra --check --config {}` to validate",
+                        cfg_path.display()
+                    );
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("vajra setup: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     if let Err(e) = vajra::metrics::init() {
         eprintln!("vajra: metrics init failed: {e}");
     }
