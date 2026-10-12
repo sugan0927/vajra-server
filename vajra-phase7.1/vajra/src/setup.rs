@@ -262,10 +262,18 @@ fn render(a: &Answers) -> String {
     s.push_str("balance   = \"round_robin\"\n\n");
 
     if a.enable_rate_limit {
+        // RateLimitSettings requires requests_per_second >= 1,
+        // burst >= 1, and max_tracked_ips >= 1 when enabled.
+        // A burst slightly above the sustained rate gives a bit of
+        // headroom without letting a single IP hoard the bucket.
         s.push_str("[rate_limit]\n");
         s.push_str("enabled              = true\n");
         s.push_str(&format!("requests_per_second  = {}\n", a.rate_rps));
-        s.push_str("burst                = 100\n\n");
+        s.push_str(&format!(
+            "burst                = {}\n",
+            (a.rate_rps * 2).max(100)
+        ));
+        s.push_str("max_tracked_ips      = 10000\n\n");
     }
 
     if a.enable_backups {
@@ -336,6 +344,7 @@ mod tests {
         assert!(s.contains("unix:/run/php/php8.2-fpm.sock"));
         assert!(s.contains("[rate_limit]"));
         assert!(s.contains("requests_per_second  = 75"));
+        assert!(s.contains("max_tracked_ips      = 10000"));
         assert!(s.contains("[backup]"));
         assert!(s.contains("[backup.database]"));
         assert!(s.contains("Redis detected"));

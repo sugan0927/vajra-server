@@ -57,9 +57,10 @@ upstreams = ["unix:/run/php/php8.2-fpm.sock"]
 balance   = "round_robin"
 
 [rate_limit]
-enabled = true
-rps     = 50
-burst   = 100
+enabled              = true
+requests_per_second  = 50
+burst                = 100
+max_tracked_ips      = 10000
 
 [backup]
 enabled      = true
