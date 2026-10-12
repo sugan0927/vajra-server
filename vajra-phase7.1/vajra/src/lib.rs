@@ -21,6 +21,7 @@
 pub mod access;
 pub mod admin;
 pub mod arena;
+pub mod backup;
 pub mod cache;
 pub mod compress;
 pub mod config;

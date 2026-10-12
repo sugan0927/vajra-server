@@ -1565,6 +1565,14 @@ pub struct BackupConfig {
     pub s3_endpoint: Option<String>,
     #[serde(default = "BackupConfig::default_s3_prefix")]
     pub s3_prefix: String,
+
+    /// Database dump settings (Day 24). `None` skips mysqldump.
+    #[serde(default)]
+    pub database: Option<BackupDatabase>,
+
+    /// Filesystem paths to archive (Day 24). `None` archives nothing.
+    #[serde(default)]
+    pub files: Option<BackupFiles>,
 }
 
 impl BackupConfig {
@@ -1652,6 +1660,8 @@ impl Default for BackupConfig {
             s3_secret_key: None,
             s3_endpoint: None,
             s3_prefix: Self::default_s3_prefix(),
+            database: None,
+            files: None,
         }
     }
 }
@@ -1661,4 +1671,45 @@ impl Settings {
     pub fn validate_backup(&self) -> Result<(), String> {
         self.backup.validate()
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Day 24: db + files subsections of [backup]
+// ─────────────────────────────────────────────────────────────────────
+
+/// `[backup.database]` — mysqldump settings.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupDatabase {
+    pub host: String,
+    #[serde(default = "BackupDatabase::default_port")]
+    pub port: u16,
+    pub user: String,
+    /// Prefer `VAJRA_DB_PASSWORD` (or `MYSQL_PWD`) env over this field.
+    #[serde(default)]
+    pub password: Option<String>,
+    pub name: String,
+}
+
+impl BackupDatabase {
+    fn default_port() -> u16 {
+        3306
+    }
+
+    /// Env-first password, mirroring `resolved_s3_creds`.
+    pub fn resolved_password(&self) -> Option<String> {
+        std::env::var("VAJRA_DB_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.password.clone().filter(|s| !s.is_empty()))
+    }
+}
+
+/// `[backup.files]` — paths to include in the archive.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupFiles {
+    /// Absolute paths. Each is archived under its basename.
+    #[serde(default)]
+    pub include: Vec<PathBuf>,
 }
