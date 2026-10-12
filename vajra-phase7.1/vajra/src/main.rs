@@ -39,7 +39,7 @@ struct Cli {
 
 fn usage() -> ! {
     eprintln!(
-        "vajra 0.7.1 - thread-per-core io_uring web server\n\n\
+        "vajra {} - thread-per-core io_uring web server\n\n\
          USAGE: vajra [--config FILE] [--listen ADDR] [--admin ADDR] [--workers N]\n\
          \x20            [--root DIR] [--no-pin] [--check]\n\n\
          \x20 --config FILE   TOML configuration file (enables SIGHUP / POST /reload)\n\
@@ -50,7 +50,8 @@ fn usage() -> ! {
          \x20 --no-pin        do not pin workers to CPUs\n\
          \x20 --check         validate the configuration and exit\n\n\
          Command-line flags override values from the config file.\n\
-         Signals: SIGHUP reloads the config, SIGINT/SIGTERM shut down gracefully."
+         Signals: SIGHUP reloads the config, SIGINT/SIGTERM shut down gracefully.",
+        env!("CARGO_PKG_VERSION")
     );
     exit(2);
 }
