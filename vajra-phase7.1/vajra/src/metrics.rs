@@ -10,12 +10,18 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use prometheus::{Encoder, Gauge, IntGaugeVec, Opts, Registry, TextEncoder};
 
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
+/// Serialises `init()` so concurrent first-callers cannot each build
+/// their own `Registry` and then race on `REGISTRY.set()`. Without
+/// this, the losing thread's `FPM`/`HTTP`/... OnceLocks can end up
+/// pointing at a registry that was never installed, which makes
+/// `render()` omit those families non-deterministically.
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 static START: OnceLock<Instant> = OnceLock::new();
 static UPTIME: OnceLock<Gauge> = OnceLock::new();
 
@@ -23,6 +29,15 @@ static UPTIME: OnceLock<Gauge> = OnceLock::new();
 pub fn init() -> prometheus::Result<()> {
     let _ = START.set(Instant::now());
 
+    if REGISTRY.get().is_some() {
+        return Ok(());
+    }
+
+    // Take the lock before the second check: exactly one thread builds
+    // the registry; the rest wait here and then observe REGISTRY set.
+    // This is what keeps every sub-init (HTTP, FPM, bytes, ...) pointing
+    // at the same `Registry` that is actually installed.
+    let _guard = INIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if REGISTRY.get().is_some() {
         return Ok(());
     }

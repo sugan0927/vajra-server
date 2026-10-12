@@ -5,8 +5,10 @@
 use std::collections::BTreeSet;
 
 fn ensure_init() {
-    // Idempotent — first call sets up the global registry.
-    let _ = vajra::metrics::init();
+    // Idempotent — first call sets up the global registry. Do NOT swallow
+    // the error: a silent failure here previously surfaced as a confusing
+    // "missing FPM series" panic.
+    vajra::metrics::init().expect("metrics::init() failed");
 }
 
 /// Prometheus histograms emit `# HELP name` + `# TYPE name histogram`, but
