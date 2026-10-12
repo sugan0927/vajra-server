@@ -431,6 +431,35 @@ cmd_add() {
   wp --path="$SITE_ROOT" --allow-root config set \
       VAJRA_PROXY_FIX "1" --raw --type=constant 2>/dev/null || true
 
+  # Vajra's FastCGI bridge (v0.14.0) does not forward X-Forwarded-*
+  # headers into PHP's $_SERVER, so WordPress cannot detect that TLS
+  # was terminated by Nginx. Force HTTPS unconditionally: the site is
+  # only ever reached via the Nginx TLS front. If Vajra later learns
+  # to propagate X-Forwarded-* into FastCGI, this can become
+  # conditional again.
+  python3 - "$SITE_ROOT/wp-config.php" <<'PYEOF'
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+s = p.read_text()
+anchor = "/* That's all, stop editing!"
+inject = (
+    "/** Vajra reverse-proxy: force HTTPS (TLS is terminated by Nginx). */\n"
+    "$_SERVER['HTTPS']       = 'on';\n"
+    "$_SERVER['SERVER_PORT'] = 443;\n"
+    "if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {\n"
+    "    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];\n"
+    "}\n\n"
+)
+if 'Vajra reverse-proxy: force HTTPS' not in s and anchor in s:
+    s = s.replace(anchor, inject + anchor, 1)
+    p.write_text(s)
+    print("   → wp-config.php: HTTPS force-injected")
+else:
+    print("   → wp-config.php: no change needed")
+PYEOF
+
   wp --path="$SITE_ROOT" --allow-root core install \
       --url="https://${DOMAIN}" \
       --title="$TITLE" \
