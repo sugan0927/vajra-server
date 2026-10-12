@@ -11,9 +11,10 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
+    defaults:
+      run:
+        working-directory: vajra-phase7.1/vajra
     steps:
     - uses: actions/checkout@v4
     - name: Build

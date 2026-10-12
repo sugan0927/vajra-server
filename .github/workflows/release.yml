@@ -8,6 +8,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vajra-phase7.1/vajra
     steps:
       - uses: actions/checkout@v4
 
@@ -20,8 +23,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            vajra-phase7.1/vajra/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('vajra-phase7.1/vajra/Cargo.lock') }}
 
       - name: Build
         run: cargo build --release --locked
@@ -36,7 +39,8 @@ jobs:
           DIR="vajra-${VERSION}-x86_64-linux"
           mkdir -p "${DIR}"
           cp target/release/vajra "${DIR}/"
-          cp install.sh docs/wp-cli.md docs/backup.md docs/check.md docs/setup.md "${DIR}/"
+          cp install.sh "${DIR}/"
+          cp docs/wp-cli.md docs/backup.md docs/check.md docs/setup.md "${DIR}/"
           cp CHANGELOG.md README.md SECURITY.md "${DIR}/"
           tar -czf "${DIR}.tar.gz" "${DIR}"
           sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
@@ -45,8 +49,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            vajra-*.tar.gz
-            vajra-*.tar.gz.sha256
+            vajra-phase7.1/vajra/vajra-*.tar.gz
+            vajra-phase7.1/vajra/vajra-*.tar.gz.sha256
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
