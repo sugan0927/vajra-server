@@ -1,3 +1,4 @@
+START COPY
 # Vajra Web Server + WordPress Multi-Site Installer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -6,9 +7,10 @@
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 **One VPS. Unlimited WordPress sites.** Install the full stack with a
-single command, then create isolated sites with `vajra-site add`.
-curl -fsSL https://raw.githubusercontent.com/sugan0927/vajra-server/main/install.sh | bash
-vajra-site add blog.example.com you@example.com
+single command, then create isolated sites with vajra-site add.
+
+    curl -fsSL https://raw.githubusercontent.com/sugan0927/vajra-server/main/install.sh | bash
+    vajra-site add blog.example.com you@example.com
 
 Requirements: Linux kernel 5.1+ (io_uring), systemd, x86_64.
 
@@ -22,9 +24,9 @@ Requirements: Linux kernel 5.1+ (io_uring), systemd, x86_64.
 | **Fedora** | 38+ | PHP via Remi repo |
 | **Arch / Manjaro** | rolling | PHP from main repo |
 
-The installer detects the OS family from `/etc/os-release`, picks
-the right package manager (apt / dnf / pacman), PHP source
-(SURY / Remi / main repo), and Nginx path layout.
+The installer detects the OS family from /etc/os-release, picks
+the right package manager (apt, dnf, or pacman), PHP source
+(SURY, Remi, or main repo), and Nginx path layout.
 
 It downloads a statically-linked musl binary from the GitHub
 release, so no compilation is needed and glibc version does not
@@ -32,44 +34,48 @@ matter. If no tarball exists for the tag, it falls back to
 building from source on the target machine.
 
 ## Architecture
-Client -> Nginx :443 (TLS) -> Vajra :8080+N -> PHP-FPM -> MariaDB
+
+    Client -> Nginx :443 (TLS) -> Vajra :8080+N -> PHP-FPM -> MariaDB
 
 Each site gets its own:
 
-* `/var/www/sites/<domain>/` - WordPress root
-* `<db>_<domain>` - MariaDB database + user
-* `vajra-site@<domain>.service` - systemd unit, auto-allocated port
-* `/etc/nginx/conf.d/<domain>.conf` - Nginx server block
+* /var/www/sites/DOMAIN/ - WordPress root
+* wp_DOMAIN - MariaDB database and user
+* vajra-site@DOMAIN.service - systemd unit, auto-allocated port
+* /etc/nginx/conf.d/DOMAIN.conf - Nginx server block
 * Let's Encrypt cert via certbot webroot
 
 ## Common commands
-vajra-site add <domain> <email> [--title "Site"] [--admin-user NAME]
-vajra-site list
-vajra-site info <domain>
-vajra-site remove <domain> [--keep-files] [--keep-db]
 
-systemctl restart vajra-site@<domain>.service
-systemctl restart php8.5-fpm
+    vajra-site add DOMAIN EMAIL
+    vajra-site list
+    vajra-site info DOMAIN
+    vajra-site remove DOMAIN
 
-journalctl -u vajra-site@<domain>.service -f
-tail -f /var/log/vajra/<domain>.access.log
+    systemctl restart vajra-site@DOMAIN.service
+    systemctl restart php8.5-fpm
+
+    journalctl -u vajra-site@DOMAIN.service -f
+    tail -f /var/log/vajra/DOMAIN.access.log
 
 ## Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
-| `VAJRA_REPO` | `sugan0927/vajra-server` | GitHub repo |
-| `VAJRA_VERSION` | `latest` | Release tag or `latest` |
-| `VAJRA_SKIP_BINARY` | `0` | Keep existing `/usr/local/bin/vajra` |
+| VAJRA_REPO | sugan0927/vajra-server | GitHub repo |
+| VAJRA_VERSION | latest | Release tag or latest |
+| VAJRA_SKIP_BINARY | 0 | Keep existing /usr/local/bin/vajra |
 
 ## Building from source
-git clone https://github.com/sugan0927/vajra-server.git
-cd vajra-server/vajra-phase7.1/vajra
-cargo build --release --locked
-Portable musl build
-rustup target add x86_64-unknown-linux-musl
-apt install musl-tools
-cargo build --release --locked --target x86_64-unknown-linux-musl
+
+    git clone https://github.com/sugan0927/vajra-server.git
+    cd vajra-server/vajra-phase7.1/vajra
+    cargo build --release --locked
+
+    # Portable musl build
+    rustup target add x86_64-unknown-linux-musl
+    apt install musl-tools
+    cargo build --release --locked --target x86_64-unknown-linux-musl
 
 ## Troubleshooting
 
@@ -85,19 +91,11 @@ The generated wp-config.php forces $_SERVER['HTTPS'] = 'on'
 unconditionally. If you see the loop on an old site, add this just
 above the /* That's all, stop editing! */ line:
 
-S
-​
- ERVER[ 
-′
- HTTPS 
-′
- ]= 
-′
- on 
-′
- ;_SERVER['SERVER_PORT'] = 443;
-if (isset(_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
-}
+    $_SERVER['HTTPS']       = 'on';
+    $_SERVER['SERVER_PORT'] = 443;
+    if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+        $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+    }
 
 ## License
 
@@ -107,4 +105,5 @@ MIT - see LICENSE.
 
 * Issues: https://github.com/sugan0927/vajra-server/issues
 * Security: see SECURITY.md
+END COPY
 
