@@ -304,7 +304,7 @@ install_vajra_binary() {
   fi
   echo "   → tag: $VAJRA_VERSION"
 
-  local TARBALL="vajra-${VAJRA_VERSION}-x86_64-linux-musl.tar.gz"
+  local TARBALL="vajra-${VAJRA_VERSION}-x86_64-linux.tar.gz"
   local URL="https://github.com/${VAJRA_REPO}/releases/download/${VAJRA_VERSION}/${TARBALL}"
   local TMP; TMP="$(mktemp -d)"
   trap '[[ -n "${TMP:-}" ]] && rm -rf "$TMP"' EXIT
