@@ -7,7 +7,7 @@
 //! scripted answers and never touch `stdin`.
 
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::Path;
 
 /// Interface for asking the operator. `StdinPrompter` is the real

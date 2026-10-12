@@ -12,6 +12,7 @@
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::os::unix::fs::FileTypeExt; // is_socket()
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
