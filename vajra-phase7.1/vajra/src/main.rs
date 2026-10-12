@@ -176,14 +176,13 @@ fn main() {
     }
 
     if cli.check {
-        println!(
-            "vajra: configuration ok ({} worker(s), {} proxy route(s), tls: {}, http3: {}, admin: {})",
-            settings.workers,
-            settings.proxies.len(),
-            settings.tls.is_some(),
-            settings.quic.is_some(),
-            settings.admin.is_some()
-        );
+        let report = vajra::check::run(&settings);
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        let _ = report.render(&mut lock);
+        if report.errors() > 0 {
+            std::process::exit(1);
+        }
         return;
     }
 

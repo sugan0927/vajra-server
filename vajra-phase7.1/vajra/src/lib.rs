@@ -23,6 +23,7 @@ pub mod admin;
 pub mod arena;
 pub mod backup;
 pub mod cache;
+pub mod check;
 pub mod compress;
 pub mod config;
 pub mod control;
