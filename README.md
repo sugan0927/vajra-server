@@ -1,4 +1,3 @@
-START COPY
 # Vajra Web Server + WordPress Multi-Site Installer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -105,5 +104,3 @@ MIT - see LICENSE.
 
 * Issues: https://github.com/sugan0927/vajra-server/issues
 * Security: see SECURITY.md
-END COPY
-
