@@ -1,7 +1,10 @@
 # FastCGI cache - design
 
-**Status:** design only. No code yet. Day 18 lands the storage layer;
-Days 19+ wire it into the request path.
+**Status:** shipped. Days 19–21 landed the storage layer, request-path
+integration, dual metric families (`vajra_cache_*` flat + legacy
+`vajra_fastcgi_cache_*`), and the `fastcgi_cache_lifecycle_miss_hit_purge`
+integration test. See the implementation in `src/cache/fastcgi.rs` and the
+sections below for details.
 
 ## Goals
 

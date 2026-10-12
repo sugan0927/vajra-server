@@ -1,7 +1,9 @@
 # Rate limiting — design
 
-**Status:** design only. src/rate_limit.rs has types + signatures;
-RateLimiter::check is not yet called from the request path.
+**Status:** shipped. `RateLimiter::check` is wired into the request
+path (see `src/worker.rs`); `tests/rate_limit_*.rs` exercise per-IP
+buckets, whitelist bypass, and trusted-proxy interaction with
+`X-Forwarded-For`.
 
 ## Goals
 

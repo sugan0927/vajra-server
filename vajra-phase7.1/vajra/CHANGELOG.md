@@ -4,6 +4,75 @@ All notable changes to Vajra are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-10-12
+
+### Added
+- **In-process backup scheduler** (`src/backup/scheduler.rs`). A
+  dedicated `std::thread` ("vajra-backup") wakes every
+  `VAJRA_BACKUP_TICK_SECS` (default 5 s), checks whether the cron
+  schedule fired in `(last_check, now]`, and runs the local (+ optional
+  S3) backup once per firing. Shutdown is signal-based; the loop
+  observes it within one tick. Reverses the Day 23 decision to rely on
+  a systemd timer.
+- **S3 backup destination** (`src/backup/s3.rs`). Uses `rust-s3`'s
+  blocking client (`tokio-free`). Region::Custom + path-style for
+  MinIO / R2 / B2. Credentials env-first. Multipart above the crate
+  threshold.
+- **Backup Prometheus metrics**: `vajra_backup_runs_total`,
+  `vajra_backup_last_success_timestamp_seconds`,
+  `vajra_backup_archive_bytes`.
+- **`Raw` config plumbing** so `[backup]` in a real TOML file parses
+  end-to-end.
+
+## [0.11.0] — 2026-10-12
+
+### Added
+- **[backup] config schema** (`src/config.rs`): `BackupConfig`,
+  `BackupDestination` (Local | S3), `BackupDatabase`, `BackupFiles`.
+  Validation covers schedule cron grammar, `keep_days` bounds,
+  `local_dir` absolute, S3 bucket/region required. Credentials are
+  env-first (`VAJRA_S3_ACCESS_KEY`, `VAJRA_S3_SECRET_KEY`,
+  `VAJRA_DB_PASSWORD`).
+- **Local backup** (`src/backup/local.rs`): `mysqldump`
+  (`--single-transaction --quick --skip-lock-tables --hex-blob`,
+  password via `MYSQL_PWD`), `tar` + `zstd`, atomic `.partial` ->
+  `rename(2)`, retention via `keep_days`. Never leaves a torn archive.
+- `docs/backup.md`.
+
+### Fixed
+- Day 24 / Day 25 landed with a broken build; fixes included
+  `rust-s3 --features blocking,tokio-rustls-tls` (not `rustls-tls`),
+  removing a stray `From<crate::config::BackupError>` impl, and
+  rewriting `s3.rs` to drop a prune path that relied on an async
+  `bucket.list()`.
+
+## [0.13.0] — 2026-10-12
+
+### Added
+- **`vajra --check` — deep config validation** (`src/check.rs`).
+  Prints a structured report with error / warning / info severities;
+  exit code 1 on any error. Checks include: `[server]` bind privilege,
+  worker count vs CPU count, grace; `[admin]` non-loopback exposure;
+  `[tls]` cert/key readability and expiry (`openssl x509 -checkend`);
+  `[php]` PHP-FPM unix socket reachable, TCP upstream reachable;
+  `[backup]` local_dir writable, DB host:port reachable, S3 creds
+  presence. Never mutates; bounded I/O (2 s connect_timeout).
+- **`vajra setup` — interactive config wizard** (`src/setup.rs`).
+  Asks domain / email / PHP version / redis / backups / rate limit,
+  writes `/etc/vajra/app.toml` (refuses to overwrite without
+  confirmation), and leaves validation to `vajra --check`. Wizard is
+  driven by a `Prompter` trait so it is testable without a TTY.
+- `docs/check.md`, `docs/setup.md`.
+
+### Fixed
+- `BackupConfig::default().schedule` used a 5-field cron expression
+  (`"0 3 * * *"`) that the `cron` crate rejects; corrected to
+  `"0 0 3 * * *"`. Would have failed load for any minimal `[backup]`
+  config with `enabled = true`.
+- `setup::render()` now emits the full `[rate_limit]` block:
+  `requests_per_second`, `burst`, and `max_tracked_ips` — the last two
+  are required by the schema when `enabled = true`.
+
 ## [0.10.0] — 2026-10-12
 
 ### Added

@@ -40,3 +40,44 @@ Open a private advisory with the repository owner; include a reproducer and the 
 ## Known limitations
 No client-certificate authentication, no OCSP stapling, no HTTP/2 or HTTP/3 server push (never sent), no per-IP connection limits,
 WebSocket tunnels have no idle timeout, symlinks inside the document root are followed for PHP scripts, chunked request bodies to PHP get 411, upstream TLS is not supported (plain TCP to upstreams only).
+
+## Newer components (Day 22–28)
+
+* **`vajra wp` (WP-CLI wrapper, `src/wp.rs`).** Resolves `wp` via `$PATH`
+  before dropping privileges, then (as root) execs
+  `sudo -u www-data -- wp ...`. The caller cannot inject extra argv
+  because arguments are passed as a `Vec<String>` and only forwarded
+  verbatim; no shell is involved. Set `VAJRA_WP_NO_SUDO=1` to skip the
+  sudo step entirely (used by tests).
+
+* **Auto-backup (`src/backup/`).** The scheduler runs a
+  `std::thread` inside the server process; it never interacts with the
+  io_uring workers. Archives contain the SQL dump and declared file
+  paths verbatim — treat the local archive directory (default
+  `/var/backups/vajra`, mode 0700) as sensitive data.
+  * S3 credentials are read env-first: `VAJRA_S3_ACCESS_KEY` /
+    `VAJRA_S3_SECRET_KEY`. Prefer these over the config file.
+  * DB password is read env-first: `VAJRA_DB_PASSWORD`, which is
+    exported as `MYSQL_PWD` to `mysqldump` so it never appears in
+    `/proc/<pid>/cmdline`.
+  * `mysqldump` runs with `--single-transaction --quick --skip-lock-tables`
+    (consistent snapshot, no long locks).
+
+* **`vajra --check` (`src/check.rs`).** Never mutates anything on disk:
+  local_dir writability is probed with a `tempfile::NamedTempFile`
+  that is unlinked immediately. TCP probes use a 2-second
+  `connect_timeout`. Cert expiry is shelled out to
+  `openssl x509 -checkend`; a missing `openssl` degrades to an info
+  line, never an error.
+
+* **`vajra setup` (`src/setup.rs`).** Runs interactively; writes at
+  most one file. It refuses to overwrite an existing config without a
+  Y/N confirmation. The wizard is driven by a `Prompter` trait so it
+  can be exercised without a TTY (`ScriptedPrompter`). No network
+  I/O, no subprocesses, no privilege changes.
+
+## Admin endpoint
+
+`[admin].listen` has **no authentication and no TLS**. Bind it to a
+loopback or a private network only. `vajra --check` emits a warning
+whenever the configured admin address is not loopback.
