@@ -374,6 +374,10 @@ struct Raw {
     rate_limit: Option<RawRateLimit>,
     compression: Option<RawCompression>,
     fastcgi_cache: Option<RawFastcgiCache>,
+
+    /// Day 26: [backup] section, parsed by the scheduler.
+    #[serde(default)]
+    backup: Option<BackupConfig>,
 }
 
 #[derive(Deserialize)]
@@ -859,7 +863,7 @@ impl Settings {
             rate_limit: build_rate_limit(raw.rate_limit.unwrap_or_default())?,
             compression: build_compression(raw.compression.unwrap_or_default())?,
             fastcgi_cache: build_fastcgi_cache(raw.fastcgi_cache.unwrap_or_default())?,
-            backup: BackupConfig::default(),
+            backup: raw.backup.unwrap_or_default(),
             health: raw.health,
             listen,
             workers: raw.server.workers,
@@ -1577,7 +1581,10 @@ pub struct BackupConfig {
 
 impl BackupConfig {
     fn default_schedule() -> String {
-        "0 3 * * *".into()
+        // 6-field cron (sec min hour dom month dow) — the cron crate
+        // does not accept 5-field expressions. See docs/backup.md
+        // §Schedule. 03:00:00 UTC daily.
+        "0 0 3 * * *".into()
     }
     fn default_keep_days() -> u32 {
         7

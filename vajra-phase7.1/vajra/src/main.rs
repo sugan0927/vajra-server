@@ -196,6 +196,12 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
+    // ── Day 26: backup scheduler ────────────────────────────────
+    // Spawned after `block_signals()` so the thread inherits the
+    // signal mask; only main ever sees SIGINT/SIGTERM. The handle
+    // is dropped at end of main, which joins the thread.
+    let mut backup_scheduler = vajra::backup::scheduler::spawn(settings.backup.clone());
+
     let ncpu = sys::available_cpus();
     println!(
         "vajra: http  on {}  ({} worker(s))",
@@ -383,6 +389,11 @@ fn main() {
             exit(130);
         }
     });
+
+    // ── Day 26: stop the backup scheduler before joining workers
+    // so an in-flight mysqldump finishes cleanly and never races
+    // the graceful drain.
+    backup_scheduler.shutdown();
 
     for j in joins {
         let _ = j.join();

@@ -66,6 +66,7 @@ pub fn init() -> prometheus::Result<()> {
     init_reload(&reg)?;
     init_rate_limit(&reg)?;
     init_fastcgi_cache(&reg)?;
+    init_backup_metrics(&reg)?;
 
     REGISTRY
         .set(reg)
@@ -922,5 +923,81 @@ mod flat_metrics_tests {
         assert!(text.contains("vajra_cache_misses_total"), "{text}");
         assert!(text.contains("vajra_cache_evictions_total"), "{text}");
         assert!(text.contains("vajra_cache_size_bytes"), "{text}");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Day 26: auto-backup metrics
+//
+// Three families, all label-typed. The scheduler is the only writer.
+// ─────────────────────────────────────────────────────────────────────
+
+/// `vajra_backup_*` — populated by the background scheduler thread.
+pub struct BackupMetrics {
+    /// `vajra_backup_runs_total{destination,result}`.
+    pub runs: prometheus::IntCounterVec,
+    /// `vajra_backup_last_success_timestamp_seconds{destination}`.
+    pub last_success: prometheus::IntGaugeVec,
+    /// `vajra_backup_archive_bytes{destination}`.
+    pub bytes: prometheus::IntGaugeVec,
+}
+
+static BACKUP: std::sync::OnceLock<BackupMetrics> = std::sync::OnceLock::new();
+
+/// Idempotent — safe to call from any init path.
+pub fn init_backup_metrics(reg: &prometheus::Registry) -> prometheus::Result<()> {
+    if BACKUP.get().is_some() {
+        return Ok(());
+    }
+    let runs = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "vajra_backup_runs_total",
+            "Auto-backup runs by destination and result",
+        ),
+        &["destination", "result"],
+    )?;
+    reg.register(Box::new(runs.clone()))?;
+
+    let last_success = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "vajra_backup_last_success_timestamp_seconds",
+            "UNIX timestamp of the last successful run per destination",
+        ),
+        &["destination"],
+    )?;
+    reg.register(Box::new(last_success.clone()))?;
+
+    let bytes = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "vajra_backup_archive_bytes",
+            "Size of the most recently written archive per destination",
+        ),
+        &["destination"],
+    )?;
+    reg.register(Box::new(bytes.clone()))?;
+
+    BACKUP
+        .set(BackupMetrics {
+            runs,
+            last_success,
+            bytes,
+        })
+        .map_err(|_| prometheus::Error::Msg("backup metrics already set".into()))?;
+    Ok(())
+}
+
+/// Record one run's outcome. `dest` is `"local"` or `"s3"`. On success
+/// also bumps `last_success` and `bytes`.
+pub fn record_backup_run(dest: &str, ok: bool, bytes: u64) {
+    let Some(m) = BACKUP.get() else { return };
+    let result = if ok { "ok" } else { "fail" };
+    m.runs.with_label_values(&[dest, result]).inc();
+    if ok {
+        m.bytes.with_label_values(&[dest]).set(bytes as i64);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        m.last_success.with_label_values(&[dest]).set(now);
     }
 }

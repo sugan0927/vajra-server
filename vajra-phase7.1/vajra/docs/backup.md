@@ -16,7 +16,7 @@ config, one-shot executors as subcommands.
 ```toml
 [backup]
 enabled       = false             # opt-in; other fields ignored when false
-schedule      = "0 3 * * *"       # cron expression
+schedule      = "0 0 3 * * *"       # cron expression
 keep_days     = 7                 # retention in days, 1..=3650
 destinations  = ["local"]         # subset of ["local","s3"]
 local_dir     = "/var/backups/vajra"
@@ -33,7 +33,7 @@ s3_prefix     = "vajra/"
 | Field | Default |
 |---|---|
 | `enabled` | `false` |
-| `schedule` | `"0 3 * * *"` |
+| `schedule` | `"0 0 3 * * *"` |
 | `keep_days` | `7` |
 | `destinations` | `[]` |
 | `local_dir` | `/var/backups/vajra` |
@@ -54,12 +54,14 @@ Unknown keys inside `[backup]` are rejected (`deny_unknown_fields`).
 
 ## Schedule
 
+`schedule` is a **6-field** cron expression — `sec min hour dom month dow` — as required by the `cron` crate. A plain 5-field expression such as `0 3 * * *` will fail to parse; prepend `0 ` for the seconds field: `0 0 3 * * *`.
+
 Vajra does not run the schedule itself; it feeds a systemd timer or cron:
 
 ```
 vajra backup install-timer
 # or:
-0 3 * * * root /usr/local/bin/vajra backup run >>/var/log/vajra-backup.log 2>&1
+0 0 3 * * * root /usr/local/bin/vajra backup run >>/var/log/vajra-backup.log 2>&1
 ```
 
 ---
@@ -145,3 +147,53 @@ Manual and offline. Never automatic.
 4. S3 client: **must be tokio-free**.
 5. Metrics wired into the existing Prometheus registry.
 6. Integration test with fake local + fake S3 HTTP endpoint.
+
+---
+
+## Update — Day 26: in-process scheduler
+
+Days 23–25 leaned on a systemd timer to invoke `vajra backup run`. Day
+26 moves the scheduler **into Vajra itself**: a dedicated
+`std::thread` named `vajra-backup` wakes every few seconds, checks the
+cron expression against wall-clock time, and runs the local (+ optional
+S3) backup. No tokio, no interaction with the io_uring worker cores.
+
+### Why change the design?
+
+* **Single binary.** Operators no longer need to write a systemd unit,
+  install a `vajra backup run` subcommand, or remember to reload the
+  timer when `schedule` changes.
+* **Consistent config.** `[backup].schedule` is authoritative — no
+  drift between the config file and a hand-written timer.
+* **Testable.** The scheduler is a pure function of `(schedule, now)`;
+  it can be exercised without wall-clock waiting.
+
+### Behaviour
+
+* Wakes every `VAJRA_BACKUP_TICK_SECS` seconds (default 5).
+* A firing in `(last_check, now]` triggers exactly one backup.
+* Only one backup runs at a time. A missed tick (because the previous
+  backup overran) is **skipped**, not queued.
+* Shutdown is signalled via a shared `AtomicBool`; the loop observes it
+  within one tick. An in-flight backup completes; only the next firing
+  is suppressed.
+* `[backup].enabled = false` → no thread is spawned.
+
+### Metrics
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `vajra_backup_runs_total` | `destination="local\|s3"`, `result="ok\|fail"` | Total runs since start |
+| `vajra_backup_last_success_timestamp_seconds` | `destination` | UNIX time of last successful run |
+| `vajra_backup_archive_bytes` | `destination` | Size of the most recent archive |
+
+### Logging
+
+Every run emits one line per destination to stderr, prefixed with
+`vajra backup:`. Successful runs name the archive path (or S3 key) and
+size; failures carry the underlying error.
+
+```text
+vajra backup: scheduler started (schedule="0 0 3 * * *", next=2026-10-13T03:00:00+00:00)
+vajra backup: local ok: /var/backups/vajra/vajra-2026-10-13T03-00-01Z.tar.zst (2871341 bytes, 0 pruned)
+vajra backup: s3 ok: key=vajra/vajra-2026-10-13T03-00-01Z.tar.zst (2871341 bytes)

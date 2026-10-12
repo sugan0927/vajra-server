@@ -107,3 +107,14 @@ fn env_overrides_config_secret() {
     std::env::remove_var("VAJRA_S3_ACCESS_KEY");
     std::env::remove_var("VAJRA_S3_SECRET_KEY");
 }
+
+/// Regression: `BackupConfig::default().schedule` must itself parse.
+/// A previous default used a 5-field expression (`"0 3 * * *"`) that the
+/// `cron` crate rejects — so `enabled = true` with a minimal config
+/// would fail load. This test would have caught it.
+#[test]
+fn default_schedule_is_valid() {
+    let src = "enabled = true\ndestinations = [\"local\"]\n";
+    let c = parse(src).expect("parse ok");
+    c.validate().expect("default schedule must validate");
+}
