@@ -56,8 +56,8 @@ vajra_detect_distro
 # ── Package manager ──────────────────────────────────────────────────
 case "$VAJRA_DISTRO_FAMILY" in
     debian)
-        PKG_UPDATE="$PKG_UPDATE -qq"
-        PKG_INSTALL="$PKG_INSTALL -qq"
+        PKG_UPDATE="apt-get update -qq"
+        PKG_INSTALL="env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq"
         PKG_INSTALL_LOCAL="dpkg -i"
         PKG_QUERY="dpkg -s"
         PKG_ADD_REPO_DEB="add-apt-repository -y"
