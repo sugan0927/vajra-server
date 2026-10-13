@@ -113,7 +113,7 @@ svc_restart() {
 }
 svc_daemon_reload() {
     case "$INIT_SYSTEM" in
-        systemd) svc_daemon_reload ;;
+        systemd) systemctl daemon-reload ;;
         *) : ;;   # no-op
     esac
 }
@@ -563,6 +563,26 @@ SYSD
 
 # ─── WordPress hardened nginx config ─────────────────────────────────
 write_wordpress_nginx() {
+  local php_sock="$1"
+
+  # ── Ensure shared security-headers snippet exists ─────────────────
+  # The hardened vhost includes this snippet; if it is missing, nginx
+  # config test fails and the site goes offline.
+  mkdir -p /etc/nginx/snippets
+  if [[ ! -f /etc/nginx/snippets/vajra-security-headers.conf ]]; then
+    cat > /etc/nginx/snippets/vajra-security-headers.conf <<'SECHDR'
+# Vajra hardened — security headers (included by hardened vhosts)
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+add_header X-Content-Type-Options    "nosniff" always;
+add_header X-Frame-Options           "SAMEORIGIN" always;
+add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy        "geolocation=(), microphone=(), camera=()" always;
+add_header Content-Security-Policy   "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';" always;
+SECHDR
+    chmod 644 /etc/nginx/snippets/vajra-security-headers.conf
+    echo "   → created: /etc/nginx/snippets/vajra-security-headers.conf"
+  fi
+
   local php_sock="$1"
   local cache_dir="/var/cache/nginx/wp-${DOMAIN//./_}"
   mkdir -p "$cache_dir"
