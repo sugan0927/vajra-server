@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# Vajra universal installer  (rev 8 — multi-mode: WP / PHP / HTML)
+# Vajra universal installer  (rev 9 — cross-distro nginx + certbot fixes)
 #
 # Supported:
 #   • Debian 11/12/13        • Ubuntu 20.04/22.04/24.04/26.04
@@ -8,33 +8,26 @@
 #   • CentOS Stream 9/10     • Arch / Manjaro
 #   • (RHEL 8 family: io_uring is NOT available — installer refuses)
 #
-# Site modes:
-#   vajra-site add <domain> <email>              → WordPress (default)
-#   vajra-site add <domain> <email> --php        → PHP-only site
-#   vajra-site add <domain> <email> --html       → Static HTML site
-#   vajra-site update php <domain> [version]     → Switch PHP version
-#
-# Usage:
-#   curl -fsSL …/install.sh | bash
-#   bash install.sh example.com you@example.com
-#   bash install.sh example.com you@example.com --html
-#
-# Env:
-#   VAJRA_REPO           GitHub repo (default: sugan0927/vajra-server)
-#   VAJRA_VERSION        tag or "latest"
-#   VAJRA_SKIP_BINARY    "1" to keep /usr/local/bin/vajra
-#   MARIADB_VERSION      mariadb-11.4 (default)
-#   SITE_MODE            wordpress|php|html (default: wordpress)
+# Rev 9 fixes:
+#   • fix: move disabled vhosts OUT of nginx include glob (Debian glob bug)
+#   • fix: welcome vhost renamed to _vajra-welcome.conf (never conflict)
+#   • fix: skip our own *vajra* files during default_server cleanup
+#   • fix: cleanup leftover *.disabled-by-vajra files on every run
+#   • feat: --skip-ssl flag for vajra-site add
+#   • feat: auto-skip SSL for reserved TLDs (.local/.test/.invalid)
+#   • feat: reject ACME-reserved emails (example.com/org/net)
+#   • fix: graceful HTTP-only fallback when certbot fails
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 FIRST_DOMAIN="${1:-}"
 FIRST_EMAIL="${2:-}"
 SITE_MODE="${SITE_MODE:-wordpress}"
-# Allow `bash install.sh domain email --html`
-if [[ "${3:-}" == "--php"  ]]; then SITE_MODE="php";  fi
-if [[ "${3:-}" == "--html" ]]; then SITE_MODE="html"; fi
-if [[ "${3:-}" == "--wordpress" || "${3:-}" == "--wp" ]]; then SITE_MODE="wordpress"; fi
+FIRST_EXTRA_ARGS=()
+if [[ "${3:-}" == "--php"  ]]; then SITE_MODE="php";  FIRST_EXTRA_ARGS=(--php);  fi
+if [[ "${3:-}" == "--html" ]]; then SITE_MODE="html"; FIRST_EXTRA_ARGS=(--html); fi
+if [[ "${3:-}" == "--skip-ssl" ]]; then FIRST_EXTRA_ARGS=(--skip-ssl); fi
+if [[ "${4:-}" == "--skip-ssl" ]]; then FIRST_EXTRA_ARGS+=(--skip-ssl); fi
 
 VAJRA_REPO="${VAJRA_REPO:-sugan0927/vajra-server}"
 VAJRA_VERSION="${VAJRA_VERSION:-latest}"
@@ -45,13 +38,11 @@ log()  { printf "\n\033[1;32m▶ %s\033[0m\n" "$*"; }
 warn() { printf "\033[1;33m⚠  %s\033[0m\n" "$*"; }
 die()  { printf "\033[1;31m❌ %s\033[0m\n" "$*" >&2; exit 1; }
 
-# ─── DB CLI detection (MariaDB 11+ renamed mysql → mariadb) ─────────────
 db_cli() {
   if command -v mariadb >/dev/null 2>&1; then echo "mariadb"; else echo "mysql"; fi
 }
 db_exec() { "$(db_cli)" "$@"; }
 
-# ─── io_uring strict pre-flight ─────────────────────────────────────────
 io_uring_syscall_probe() {
   if ! command -v gcc >/dev/null 2>&1; then
     case "${DISTRO_FAMILY:-}" in
@@ -136,7 +127,6 @@ SYSCTL
   esac
 }
 
-# ─── Distro detection ───────────────────────────────────────────────────
 DISTRO_ID=""; DISTRO_LIKE=""; DISTRO_VER=""; DISTRO_NAME=""; DISTRO_FAMILY=""
 detect_distro() {
   [[ -f /etc/os-release ]] || die "/etc/os-release missing"
@@ -192,7 +182,6 @@ _align_www_user_with_fpm() {
   fi
 }
 
-# ─── MariaDB helpers ────────────────────────────────────────────────────
 install_mariadb_server() {
   pkg_install mariadb-server 2>/dev/null && return 0
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
@@ -202,16 +191,6 @@ install_mariadb_server() {
     DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server 2>/dev/null && return 0
   fi
   return 1
-}
-
-mariadb_socket_path() {
-  local sock=""
-  command -v mariadb >/dev/null 2>&1 && sock=$(mariadb -sN -e "SELECT @@socket;" 2>/dev/null || true)
-  if [[ -z "$sock" ]] && command -v mysql >/dev/null 2>&1; then
-    sock=$(mysql -sN -e "SELECT @@socket;" 2>/dev/null || true)
-  fi
-  [[ -z "$sock" ]] && sock="/var/lib/mysql/mysql.sock"
-  echo "$sock"
 }
 
 mariadb_ensure_running() {
@@ -237,7 +216,6 @@ php_can_connect_mariadb() {
   ' -- "$host" "$user" "$pass" "$db" 2>/dev/null
 }
 
-# ─── Nginx path layout ──────────────────────────────────────────────────
 NGINX_SITES_AVAIL=""; NGINX_SITES_ENABLED=""
 nginx_paths() {
   case "$DISTRO_FAMILY" in
@@ -251,7 +229,6 @@ nginx_paths() {
   mkdir -p "$NGINX_SITES_AVAIL" "$NGINX_SITES_ENABLED"
 }
 
-# ─── Package manager ────────────────────────────────────────────────────
 pkg_update() {
   case "$DISTRO_FAMILY" in
     debian) DEBIAN_FRONTEND=noninteractive apt-get update -y ;;
@@ -305,7 +282,6 @@ setup_mariadb_repo() {
   return 0
 }
 
-# ─── Firewall ───────────────────────────────────────────────────────────
 open_ports() {
   local opened=0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -338,7 +314,6 @@ open_ports() {
   echo "   ⚠ cloud firewall (Vultr/Hetzner/DO/AWS) must allow 80, 443"
 }
 
-# ─── SELinux base (RHEL family, enforcing) ──────────────────────────────
 selinux_fix() {
   command -v getenforce >/dev/null 2>&1 || return 0
   [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]] || return 0
@@ -351,7 +326,6 @@ selinux_fix() {
   echo "   → SELinux base booleans set"
 }
 
-# ─── PHP ────────────────────────────────────────────────────────────────
 PHP_VER=""; PHP_SOCK=""; PHP_FPM_SVC=""
 setup_php() {
   case "$DISTRO_FAMILY" in
@@ -411,7 +385,6 @@ setup_php() {
   echo "   → PHP $PHP_VER (socket: $PHP_SOCK)"
 }
 
-# ─── Vajra binary ───────────────────────────────────────────────────────
 install_vajra_binary() {
   if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then
     [[ -x /usr/local/bin/vajra ]] || die "/usr/local/bin/vajra missing"
@@ -500,21 +473,43 @@ CARGOCFG
   echo "   → built: $(/usr/local/bin/vajra --help 2>&1 | head -1)"
 }
 
-# ─── Nginx default_server conflict resolver ─────────────────────────────
 fix_nginx_default_server() {
   local fixed=0
+  local disabled_dir="/etc/nginx/vajra-disabled"
+  mkdir -p "$disabled_dir"
+
   for f in /etc/nginx/sites-enabled/default \
            /etc/nginx/sites-enabled/000-default.conf \
            /etc/nginx/conf.d/default.conf \
            /etc/nginx/conf.d/welcome.conf; do
-    if [[ -L "$f" || -f "$f" ]]; then
-      mv -f "$f" "${f}.disabled-by-vajra" 2>/dev/null && { echo "   → disabled: $f"; fixed=1; }
+    [[ -L "$f" || -f "$f" ]] || continue
+    local base; base="$(basename "$f")"
+    [[ "$base" == *vajra* ]] && continue
+    if [[ -L "$f" ]]; then
+      local target; target="$(readlink -f "$f" 2>/dev/null || true)"
+      [[ "$target" == *vajra* ]] && continue
     fi
+    mv -f "$f" "${disabled_dir}/${base}.vajra-disabled" 2>/dev/null && {
+      echo "   → disabled: $f  (moved to ${disabled_dir}/)"
+      fixed=1
+    }
   done
+
+  local leftover
+  for leftover in /etc/nginx/sites-enabled/*.disabled-by-vajra \
+                  /etc/nginx/conf.d/*.disabled-by-vajra; do
+    [[ -e "$leftover" ]] || continue
+    local base; base="$(basename "$leftover")"
+    mv -f "$leftover" "${disabled_dir}/${base}" 2>/dev/null && {
+      echo "   → cleaned leftover: $leftover"
+      fixed=1
+    }
+  done
+
   if [[ -f /etc/nginx/nginx.conf ]] && grep -q 'default_server' /etc/nginx/nginx.conf 2>/dev/null; then
     cp -f /etc/nginx/nginx.conf /etc/nginx/nginx.conf.vajra-bak 2>/dev/null || true
     if command -v python3 >/dev/null 2>&1; then
-      python3 /etc/nginx/nginx.conf <<'PYEOF' >/dev/null 2>&1 || true
+      python3 - /etc/nginx/nginx.conf <<'PYEOF' >/dev/null 2>&1 || true
 import re, sys
 p = sys.argv[1]
 with open(p) as f: src = f.read()
@@ -545,15 +540,14 @@ PYEOF
       echo "   → commented out default server block in /etc/nginx/nginx.conf"
     else
       sed -i -E 's/(listen\s+(\[::\]:)?80)\s+default_server;/\1;/' /etc/nginx/nginx.conf
-      echo "   → neutralised default_server keyword in /etc/nginx/nginx.conf"
     fi
     fixed=1
   fi
+
   [[ "$fixed" == "1" ]] && echo "   ✅ nginx default server conflicts resolved"
   return 0
 }
 
-# ─── Default welcome page ───────────────────────────────────────────────
 install_welcome_page() {
   mkdir -p /var/www/vajra-welcome
   cat > /var/www/vajra-welcome/index.html <<'WELCOME_HTML'
@@ -595,18 +589,14 @@ install_welcome_page() {
     <span class="badge">Vajra Server</span>
     <h1>✅ Your server is ready</h1>
     <p class="sub">No site is configured for this hostname yet.</p>
-
     <div class="row"><span class="k">Stack</span><span class="v">Vajra · Nginx · PHP-FPM · MariaDB</span></div>
     <div class="row"><span class="k">Reverse proxy</span><span class="v">Nginx (TLS) → Vajra (io_uring)</span></div>
     <div class="row"><span class="k">Status</span><span class="v ok">● operational</span></div>
-
     <div class="cmd">vajra-site add example.com you@example.com            # WordPress
 vajra-site add example.com you@example.com --php     # PHP site
 vajra-site add example.com you@example.com --html    # static HTML</div>
-
     <div class="foot">
-      Edit <code>/var/www/vajra-welcome/index.html</code> to customise this page.<br>
-      Reachable only when no vhost matches the requested Host header.
+      Edit <code>/var/www/vajra-welcome/index.html</code> to customise this page.
     </div>
   </div>
 </body>
@@ -615,7 +605,6 @@ WELCOME_HTML
   chmod 644 /var/www/vajra-welcome/index.html
 }
 
-# ─── Service verification ───────────────────────────────────────────────
 ensure_service() {
   local svc="$1"
   [[ -z "$svc" ]] && return 0
@@ -671,10 +660,6 @@ verify_wp_stack() {
   fi
   return 0
 }
-
-# ═══════════════════════════════════════════════════════════════════════
-# MAIN FLOW
-# ═══════════════════════════════════════════════════════════════════════
 
 log "0/8 — Pre-flight"
 detect_distro
@@ -795,19 +780,21 @@ WantedBy=multi-user.target
 UNIT
 
 log "6/8 — Nginx base + welcome page"
+rm -f /etc/nginx/sites-enabled/default \
+      /etc/nginx/sites-enabled/000-default.conf 2>/dev/null || true
+find /etc/nginx/sites-enabled /etc/nginx/conf.d \
+     -maxdepth 1 -name '*.disabled-by-vajra' -delete 2>/dev/null || true
+
 fix_nginx_default_server
-rm -f "$NGINX_SITES_ENABLED/default" 2>/dev/null || true
 install_welcome_page
 
-# ── Default vhost: serves the welcome page on unrecognised Host headers ─
-cat > "${NGINX_SITES_AVAIL}/000-default.conf" <<'NGINXBASE'
+cat > "${NGINX_SITES_AVAIL}/_vajra-welcome.conf" <<'NGINXBASE'
 # Vajra — default server (catch-all for unrecognised Host headers)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
 
-    # ACME challenge fallback for any host
     location /.well-known/acme-challenge/ { root /var/www/certbot; }
 
     root /var/www/vajra-welcome;
@@ -816,7 +803,8 @@ server {
 }
 NGINXBASE
 [[ "$DISTRO_FAMILY" == "debian" ]] && \
-  ln -sf "${NGINX_SITES_AVAIL}/000-default.conf" "${NGINX_SITES_ENABLED}/000-default.conf"
+  ln -sf "${NGINX_SITES_AVAIL}/_vajra-welcome.conf" \
+         "${NGINX_SITES_ENABLED}/_vajra-welcome.conf"
 
 if nginx -t 2>/dev/null; then
   systemctl enable --now nginx
@@ -825,6 +813,7 @@ if nginx -t 2>/dev/null; then
 else
   warn "nginx config test failed — attempting auto-heal"
   nginx -t 2>&1 | sed 's/^/      /'
+  rm -f /etc/nginx/sites-enabled/*.disabled-by-vajra 2>/dev/null || true
   fix_nginx_default_server
   if nginx -t 2>/dev/null; then
     systemctl enable --now nginx
@@ -839,7 +828,7 @@ log "7/8 — Installing vajra-site CLI"
 cat > /usr/local/bin/vajra-site <<'VAJRA_SITE_TEMPLATE'
 #!/usr/bin/env bash
 # vajra-site — manage Vajra sites (WordPress / PHP / static HTML)
-# Rev 8 — added --php, --html modes + `update php` command.
+# Rev 9 — --skip-ssl, reserved-domain detection, graceful certbot fallback
 set -euo pipefail
 
 DISTRO_FAMILY="__FAMILY__"
@@ -863,7 +852,6 @@ die()  { err "$*"; exit 1; }
 
 [[ $EUID -ne 0 ]] && die "Run as root"
 
-# ─── helpers ─────────────────────────────────────────────────────────────
 db_cli() {
   if command -v mariadb >/dev/null 2>&1; then echo "mariadb"; else echo "mysql"; fi
 }
@@ -892,7 +880,6 @@ php_can_connect_mariadb() {
   ' -- "$host" "$user" "$pass" "$db" 2>/dev/null
 }
 
-# Detect installed PHP versions (both Debian SURY and RHEL Remi layouts).
 php_versions_installed() {
   local vers=()
   if [[ -d /etc/php ]]; then
@@ -930,21 +917,25 @@ cat <<U
 vajra-site — manage Vajra sites
 
 USAGE:
-  vajra-site add <domain> <email>                     # WordPress (default)
-  vajra-site add <domain> <email> --php               # PHP-only site
-  vajra-site add <domain> <email> --html              # Static HTML site
-  vajra-site add <domain> <email> --wordpress [opts]
-
-  WordPress options:
-    --title "Site Title"
-    --admin-user NAME
-    --admin-pass PASS
-
+  vajra-site add <domain> <email> [--php|--html|--wordpress] [--skip-ssl] [opts]
   vajra-site list
   vajra-site info <domain>
-  vajra-site update php <domain> [version]            # Switch PHP version
+  vajra-site update php <domain> [version]
   vajra-site remove <domain> [--keep-files] [--keep-db]
   vajra-site help
+
+SITE MODES (default: --wordpress):
+  --wordpress / --wp    Full WordPress install
+  --php                 PHP-only site
+  --html                Static HTML site
+
+WORDPRESS OPTIONS:
+  --title "Site Title"
+  --admin-user NAME
+  --admin-pass PASS
+
+SSL OPTIONS:
+  --skip-ssl            Skip Let's Encrypt (HTTP-only)
 U
 }
 
@@ -956,6 +947,20 @@ read_env()     { sed -n "s/^${2}=//p" "$1" | head -1; }
 next_port() {
   local used; used="$(grep -h '^PORT=' "${SITES_DIR}"/*.env 2>/dev/null | cut -d= -f2 | sort -n | tail -1 || true)"
   echo $(( ${used:-$((FIRST_PORT-1))} + 1 ))
+}
+
+is_reserved_domain() {
+  case "$1" in
+    *.local|*.localhost|*.test|*.invalid|*.example|localhost) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_reserved_email() {
+  case "$1" in
+    *@example.com|*@example.org|*@example.net|*@localhost|*@test|*@invalid) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 ensure_stack() {
@@ -998,15 +1003,10 @@ selinux_fix_site() {
   [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]] || return 0
 
   semanage fcontext -a -t httpd_sys_content_t "${site_root}(/.*)?" 2>/dev/null || true
-
   case "$mode" in
     wordpress)
-      semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}/wp-admin(/.*)?" 2>/dev/null || true
-      semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}/wp-includes(/.*)?" 2>/dev/null || true
       semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}/wp-content(/.*)?" 2>/dev/null || true
       semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}/[^/]+\.php" 2>/dev/null || true
-      semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}/license\.txt" 2>/dev/null || true
-      semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}/readme\.html" 2>/dev/null || true
       ;;
     php)
       semanage fcontext -a -t httpd_sys_rw_content_t "${site_root}(/.*)?" 2>/dev/null || true
@@ -1087,7 +1087,6 @@ FSPY
   fi
 }
 
-# ─── vajra TOML generators ───────────────────────────────────────────────
 write_toml_wordpress() {
   local domain="$1" port="$2" site_root="$3" php_sock="$4"
   cat > "${SITES_DIR}/${domain}.toml" <<TOML
@@ -1169,40 +1168,21 @@ listen = "127.0.0.1:$((port + 1000))"
 TOML
 }
 
-# ─── default content ─────────────────────────────────────────────────────
 write_php_welcome() {
   local domain="$1" site_root="$2"
   [[ -f "$site_root/index.php" ]] && return 0
   cat > "$site_root/index.php" <<PHP
 <?php
-// Welcome page for ${domain} — replace this with your app.
 header('Content-Type: text/html; charset=utf-8');
 ?>
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${domain} — PHP site is live</title>
-<style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
-       max-width:720px;margin:60px auto;padding:0 24px;color:#222;line-height:1.55}
-  h1{color:#0a7d36;margin-bottom:.2em}
-  code{background:#f4f4f4;padding:2px 6px;border-radius:4px;font-size:.9em}
-  .info{background:#eef7f0;border-left:4px solid #0a7d36;padding:14px 18px;border-radius:6px}
-</style>
-</head>
-<body>
-  <h1>✅ PHP is working on ${domain}</h1>
-  <div class="info">
-    <p><strong>PHP version:</strong> <code><?php echo PHP_VERSION; ?></code></p>
-    <p><strong>Server:</strong> <code><?php echo \$_SERVER['SERVER_SOFTWARE'] ?? 'vajra'; ?></code></p>
-    <p><strong>Document root:</strong> <code><?php echo __DIR__; ?></code></p>
-  </div>
-  <p>Edit <code>index.php</code> in <code>/var/www/sites/${domain}/</code> to build your app.</p>
-  <p><?php echo date('Y-m-d H:i:s T'); ?></p>
-</body>
-</html>
+<html lang="en"><head><meta charset="utf-8">
+<title>${domain} — PHP site is live</title></head>
+<body style="font-family:system-ui;max-width:720px;margin:60px auto;padding:0 24px">
+  <h1 style="color:#0a7d36">✅ PHP is working on ${domain}</h1>
+  <p><strong>PHP:</strong> <?php echo PHP_VERSION; ?></p>
+  <p>Edit <code>index.php</code> in <code>/var/www/sites/${domain}/</code>.</p>
+</body></html>
 PHP
   chown "${WWW_USER}:${WWW_USER}" "$site_root/index.php"
   chmod 644 "$site_root/index.php"
@@ -1213,35 +1193,24 @@ write_html_welcome() {
   [[ -f "$site_root/index.html" ]] && return 0
   cat > "$site_root/index.html" <<HTML
 <!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${domain} — site is live</title>
-<style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
-       max-width:720px;margin:60px auto;padding:0 24px;color:#222;line-height:1.55}
-  h1{color:#0a7d36;margin-bottom:.2em}
-  code{background:#f4f4f4;padding:2px 6px;border-radius:4px;font-size:.9em}
-</style>
-</head>
-<body>
-  <h1>✅ ${domain} is live</h1>
-  <p>This is a static HTML site served by <strong>Vajra</strong> + <strong>Nginx</strong>.</p>
-  <p>Edit files in <code>/var/www/sites/${domain}/</code> and refresh to see changes.</p>
-</body>
-</html>
+<html lang="en"><head><meta charset="utf-8">
+<title>${domain} — site is live</title></head>
+<body style="font-family:system-ui;max-width:720px;margin:60px auto;padding:0 24px">
+  <h1 style="color:#0a7d36">✅ ${domain} is live</h1>
+  <p>Static HTML site served by <strong>Vajra</strong> + <strong>Nginx</strong>.</p>
+  <p>Edit files in <code>/var/www/sites/${domain}/</code>.</p>
+</body></html>
 HTML
   chown "${WWW_USER}:${WWW_USER}" "$site_root/index.html"
   chmod 644 "$site_root/index.html"
 }
 
-# ─── cmd_add ─────────────────────────────────────────────────────────────
 cmd_add() {
-  [[ $# -ge 2 ]] || { err "Usage: vajra-site add <domain> <email> [--php|--html|--wordpress] [opts]"; exit 1; }
+  [[ $# -ge 2 ]] || { err "Usage: vajra-site add <domain> <email> [--php|--html|--wordpress] [--skip-ssl] [opts]"; exit 1; }
   local DOMAIN="$1" EMAIL="$2"; shift 2
   local TITLE="WordPress" ADMIN_USER="wpadmin" ADMIN_PASS=""
   local MODE="wordpress"
+  local SKIP_SSL=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --title)       TITLE="$2"; shift 2;;
@@ -1250,6 +1219,7 @@ cmd_add() {
       --php)         MODE="php"; shift;;
       --html)        MODE="html"; shift;;
       --wordpress|--wp) MODE="wordpress"; shift;;
+      --skip-ssl|--no-ssl) SKIP_SSL=1; shift;;
       *) die "Unknown option: $1";;
     esac
   done
@@ -1257,6 +1227,18 @@ cmd_add() {
   valid_domain "$DOMAIN" || die "Invalid domain: $DOMAIN"
   valid_email  "$EMAIL"  || die "Invalid email: $EMAIL"
   [[ -f "${SITES_DIR}/${DOMAIN}.env" ]] && die "Site '$DOMAIN' already exists"
+
+  if is_reserved_domain "$DOMAIN"; then
+    warn "Domain '$DOMAIN' uses a reserved TLD — Let's Encrypt cannot issue certificates"
+    warn "Auto-enabling --skip-ssl (site will be HTTP-only)"
+    SKIP_SSL=1
+  fi
+  if is_reserved_email "$EMAIL"; then
+    warn "Email '$EMAIL' uses a reserved domain — Let's Encrypt will reject it"
+    if [[ "$SKIP_SSL" == "0" ]]; then
+      die "Provide a real email, or pass --skip-ssl"
+    fi
+  fi
 
   ensure_stack "$MODE"
 
@@ -1268,6 +1250,7 @@ cmd_add() {
   echo "   → domain: $DOMAIN (+ $WWW_ALIAS)"
   echo "   → mode:   $MODE"
   echo "   → port:   $PORT"
+  echo "   → ssl:    $([[ "$SKIP_SSL" == "1" ]] && echo "disabled" || echo "enabled")"
 
   log "2/8 — Site files"
   mkdir -p "$SITE_ROOT" "${CERTBOT_ROOT}/${DOMAIN}/.well-known/acme-challenge"
@@ -1378,6 +1361,7 @@ DB_PASS=${DB_PASS}
 ADMIN_USER=${ADMIN_USER}
 ADMIN_PASS=${ADMIN_PASS}
 SITE_ROOT=${SITE_ROOT}
+SSL_ENABLED=$([[ "$SKIP_SSL" == "1" ]] && echo "no" || echo "yes")
 CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
   chmod 600 "${SITES_DIR}/${DOMAIN}.env"
@@ -1399,13 +1383,24 @@ ENV
 }"
   nginx -t && systemctl reload nginx
 
-  log "7/8 — Let's Encrypt certificate"
-  certbot certonly --webroot -w "${CERTBOT_ROOT}/${DOMAIN}" \
-      -d "${DOMAIN}" -d "${WWW_ALIAS}" \
-      --agree-tos --email "$EMAIL" --non-interactive --keep-until-expiring
+  local SSL_OK=0
+  if [[ "$SKIP_SSL" == "1" ]]; then
+    log "7/8 — Skipping Let's Encrypt (--skip-ssl / reserved domain)"
+  else
+    log "7/8 — Let's Encrypt certificate"
+    if certbot certonly --webroot -w "${CERTBOT_ROOT}/${DOMAIN}" \
+        -d "${DOMAIN}" -d "${WWW_ALIAS}" \
+        --agree-tos --email "$EMAIL" --non-interactive --keep-until-expiring; then
+      SSL_OK=1
+    else
+      warn "certbot failed — falling back to HTTP-only"
+      warn "  check: certbot certificates; dig +short ${DOMAIN}"
+    fi
+  fi
 
-  log "8/8 — Nginx HTTPS + reload"
-  nginx_write_site "$DOMAIN" "server {
+  if [[ "$SSL_OK" == "1" ]]; then
+    log "8/8 — Nginx HTTPS + reload"
+    nginx_write_site "$DOMAIN" "server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN} ${WWW_ALIAS};
@@ -1434,13 +1429,38 @@ server {
         proxy_buffering off;
     }
 }"
+  else
+    log "8/8 — Nginx HTTP-only (no TLS)"
+    nginx_write_site "$DOMAIN" "server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN} ${WWW_ALIAS};
+    client_max_body_size 64m;
+    location /.well-known/acme-challenge/ { root ${CERTBOT_ROOT}/${DOMAIN}; }
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_set_header Connection        \"\";
+        proxy_read_timeout 120s;
+        proxy_buffering off;
+    }
+}"
+  fi
   nginx -t && systemctl reload nginx
 
   echo
   echo "════════════════════════════════════════════════════════════════"
-  echo "✅ Site ready:  https://${DOMAIN}/   [${MODE}]"
+  if [[ "$SSL_OK" == "1" ]]; then
+    echo "✅ Site ready:  https://${DOMAIN}/   [${MODE}]"
+  else
+    echo "✅ Site ready:  http://${DOMAIN}/   [${MODE}, HTTP-only]"
+  fi
   if [[ "$MODE" == "wordpress" ]]; then
-    echo "   Admin:       https://${DOMAIN}/wp-admin/"
+    echo "   Admin:       http${SSL_OK:+s}://${DOMAIN}/wp-admin/"
     echo "   Admin user:  ${ADMIN_USER}"
     echo "   Admin pass:  ${ADMIN_PASS}"
     echo "   DB name:     ${DB_NAME}"
@@ -1452,7 +1472,6 @@ server {
   echo "════════════════════════════════════════════════════════════════"
 }
 
-# ─── cmd_update ──────────────────────────────────────────────────────────
 cmd_update() {
   [[ $# -ge 2 ]] || die "Usage: vajra-site update php <domain> [version]"
   local what="$1"; shift
@@ -1504,23 +1523,6 @@ cmd_update_php() {
 
   if ! grep -qx "$NEW_VER" <<< "$versions"; then
     err "PHP ${NEW_VER} not installed on this host"
-    echo ""
-    echo "To install it, run one of:"
-    case "$DISTRO_FAMILY" in
-      debian)
-        echo "  apt-get install -y php${NEW_VER} php${NEW_VER}-fpm php${NEW_VER}-mysql \\"
-        echo "                     php${NEW_VER}-curl php${NEW_VER}-xml php${NEW_VER}-mbstring \\"
-        echo "                     php${NEW_VER}-zip php${NEW_VER}-gd php${NEW_VER}-intl \\"
-        echo "                     php${NEW_VER}-bcmath"
-        ;;
-      rhel)
-        echo "  dnf install -y php${NEW_VER//./}-php-fpm php${NEW_VER//./}-php-cli \\"
-        echo "                 php${NEW_VER//./}-php-mysqlnd php${NEW_VER//./}-php-gd"
-        ;;
-      arch)
-        echo "  pacman -S php php-fpm   # Arch uses rolling version"
-        ;;
-    esac
     exit 1
   fi
 
@@ -1539,8 +1541,7 @@ cmd_update_php() {
   fi
 
   if [[ ! -S "$NEW_SOCK" ]]; then
-    err "Socket $NEW_SOCK not present — PHP-FPM service $NEW_SVC may not be running"
-    err "Check: systemctl status $NEW_SVC"
+    err "Socket $NEW_SOCK not present — service $NEW_SVC may not be running"
     exit 1
   fi
 
@@ -1551,7 +1552,6 @@ cmd_update_php() {
 
   sed -i "s|^PHP_VER=.*|PHP_VER=${NEW_VER}|" "$f"
   sed -i "s|^PHP_SOCK=.*|PHP_SOCK=${NEW_SOCK}|" "$f"
-
   sed -i -E "s|^upstream *= *\"unix:[^\"]*\"|upstream         = \"unix:${NEW_SOCK}\"|" \
     "${SITES_DIR}/${D}.toml"
 
@@ -1568,25 +1568,24 @@ cmd_update_php() {
     systemctl restart "vajra-site@${D}.service" || true
     exit 1
   fi
-
   echo ""
   echo "✅ PHP switched: ${CURRENT_VER} → ${NEW_VER} on ${D}"
-  echo "   Test: https://${D}/"
 }
 
-# ─── cmd_list / cmd_info / cmd_remove ────────────────────────────────────
 cmd_list() {
   local envs; envs=( "${SITES_DIR}"/*.env )
-  if [[ ! -e "${envs[0]}" ]]; then info "No sites yet. Add one: vajra-site add example.com you@example.com"; return; fi
-  printf '\n%-30s %-12s %-6s %-22s %-6s %s\n' "DOMAIN" "MODE" "PORT" "DB" "SVC" "CREATED"
+  if [[ ! -e "${envs[0]}" ]]; then info "No sites yet."; return; fi
+  printf '\n%-30s %-12s %-6s %-22s %-6s %-4s %s\n' "DOMAIN" "MODE" "PORT" "DB" "SVC" "SSL" "CREATED"
   for f in "${envs[@]}"; do
-    local d p db svc c m
+    local d p db svc c m ssl
     d="$(read_env "$f" DOMAIN)"; p="$(read_env "$f" PORT)"
     db="$(read_env "$f" DB_NAME)"; c="$(read_env "$f" CREATED_AT)"
     m="$(read_env "$f" MODE)"; m="${m:-wordpress}"
+    ssl="$(read_env "$f" SSL_ENABLED)"; ssl="${ssl:-yes}"
     [[ -z "$db" ]] && db="-"
-    systemctl is-active --quiet "vajra-site@${d}.service" && svc="✅" || svc="❌"
-    printf '%-30s %-12s %-6s %-22s %-6s %s\n' "$d" "$m" "$p" "$db" "$svc" "$c"
+    [[ "$ssl" == "yes" ]] && ssl="yes" || ssl="no"
+    systemctl is-active --quiet "vajra-site@${d}.service" && svc="OK" || svc="FAIL"
+    printf '%-30s %-12s %-6s %-22s %-6s %-4s %s\n' "$d" "$m" "$p" "$db" "$svc" "$ssl" "$c"
   done
   echo
 }
@@ -1600,6 +1599,7 @@ cmd_info() {
   echo "WWW alias:    $(read_env "$f" WWW_ALIAS)"
   echo "Vajra port:   $(read_env "$f" PORT)"
   echo "Site root:    $(read_env "$f" SITE_ROOT)"
+  echo "SSL:          $(read_env "$f" SSL_ENABLED)"
   if [[ "$MODE" != "html" ]]; then
     echo "PHP version:  $(read_env "$f" PHP_VER)"
     echo "PHP socket:   $(read_env "$f" PHP_SOCK)"
@@ -1612,9 +1612,6 @@ cmd_info() {
     echo "Admin pass:   $(read_env "$f" ADMIN_PASS)"
   fi
   echo "Service:      vajra-site@${D}.service → $(systemctl is-active "vajra-site@${D}.service" || true)"
-  if [[ "$MODE" == "wordpress" ]]; then
-    echo "MariaDB:      $(db_exec -sN -e 'SELECT VERSION();' 2>/dev/null || echo 'unknown')"
-  fi
 }
 
 cmd_remove() {
@@ -1692,10 +1689,11 @@ echo "   MariaDB: $(db_exec -sN -e 'SELECT VERSION();' 2>/dev/null || echo 'unkn
 echo "   Welcome: http://$(hostname -I 2>/dev/null | awk '{print $1}')/  (default vhost)"
 echo ""
 echo "   Manage sites with:"
-echo "     vajra-site add <domain> <email>                 # WordPress"
-echo "     vajra-site add <domain> <email> --php           # PHP only"
-echo "     vajra-site add <domain> <email> --html          # static HTML"
-echo "     vajra-site update php <domain> [version]        # switch PHP"
+echo "     vajra-site add <domain> <email>                     # WordPress"
+echo "     vajra-site add <domain> <email> --php               # PHP only"
+echo "     vajra-site add <domain> <email> --html              # static HTML"
+echo "     vajra-site add <domain> <email> --html --skip-ssl   # HTTP-only"
+echo "     vajra-site update php <domain> [version]            # switch PHP"
 echo "     vajra-site list"
 echo "     vajra-site info <domain>"
 echo "     vajra-site remove <domain>"
@@ -1704,8 +1702,59 @@ echo
 if [[ -n "$FIRST_DOMAIN" && -n "$FIRST_EMAIL" ]]; then
   log "Creating first site: $FIRST_DOMAIN (mode: $SITE_MODE)"
   case "$SITE_MODE" in
-    php)  /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" --php ;;
-    html) /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" --html ;;
-    *)    /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" ;;
+    php)  /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" --php "${FIRST_EXTRA_ARGS[@]}" ;;
+    html) /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" --html "${FIRST_EXTRA_ARGS[@]}" ;;
+    *)    /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" "${FIRST_EXTRA_ARGS[@]}" ;;
   esac
 fi
+
+# ─────────────────────────────────────────────────────────────────────
+# Install vajra-harden (security hardening tool)
+# ─────────────────────────────────────────────────────────────────────
+log "Installing vajra-harden (security hardening)"
+
+# Required directories for hardening (idempotent)
+mkdir -p /etc/vajra/hardening/fintech-ca
+chmod 700 /etc/vajra/hardening/fintech-ca
+mkdir -p /etc/nginx/conf.d
+mkdir -p /etc/nginx/vajra-disabled
+mkdir -p /etc/nginx/snippets
+
+# Install vajra-harden from the repo directory
+HARDEN_SRC=""
+for cand in \
+    "$(dirname "$0")/vajra-harden" \
+    "$(dirname "$0")/bin/vajra-harden" \
+    "./vajra-harden" \
+    "/root/vajra-server/vajra-harden"; do
+  if [[ -f "$cand" ]]; then HARDEN_SRC="$cand"; break; fi
+done
+
+if [[ -z "$HARDEN_SRC" ]]; then
+    warn "vajra-harden source not found — skipping (hardening unavailable)"
+else
+    install -m 0755 "$HARDEN_SRC" /usr/local/bin/vajra-harden
+    echo "   → /usr/local/bin/vajra-harden  ✅"
+
+    # Syntax check
+    if bash -n /usr/local/bin/vajra-harden 2>/dev/null; then
+        echo "   → syntax OK"
+    else
+        err "vajra-harden syntax check failed — removing broken binary"
+        rm -f /usr/local/bin/vajra-harden
+    fi
+fi
+
+# Shared security-headers snippet (included by nginx locations)
+cat > /etc/nginx/snippets/vajra-security-headers.conf <<'SNIP'
+# Vajra hardened — security headers
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+add_header X-Content-Type-Options    "nosniff" always;
+add_header X-Frame-Options           "SAMEORIGIN" always;
+add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy        "geolocation=(), microphone=(), camera=()" always;
+add_header Content-Security-Policy   "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';" always;
+SNIP
+echo "   → /etc/nginx/snippets/vajra-security-headers.conf  ✅"
+
+# ─────────────────────────────────────────────────────────────────────
