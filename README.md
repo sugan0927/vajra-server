@@ -10,9 +10,12 @@ START COPY
 single command, then create isolated sites with vajra-site add.
 
     curl -fsSL https://raw.githubusercontent.com/sugan0927/vajra-server/main/install.sh | bash
-    vajra-site add blog.example.com you@example.com
-
+    
 Requirements: Linux kernel 5.1+ (io_uring), systemd, x86_64.
+
+Create Wordpress site Using This Command
+
+     vajra-site add blog.example.com you@example.com
 
 ## Supported distributions
 
