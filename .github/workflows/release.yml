@@ -27,9 +27,9 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-
       - name: Install musl toolchain
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -56,14 +56,19 @@ jobs:
           cp docs/wp-cli.md docs/backup.md docs/check.md docs/setup.md "${DIR}/"
           cp CHANGELOG.md README.md SECURITY.md "${DIR}/"
           tar -czf "${DIR}.tar.gz" "${DIR}"
-          sha256sum "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+          # ── Compatibility alias ──
+          # Older install.sh versions expect the "-musl" suffix. Publish
+          # both names so any version of install.sh works.
+          cp "${DIR}.tar.gz" "vajra-${VERSION}-x86_64-linux-musl.tar.gz"
+          # Aggregate checksums for every tarball in this release
+          sha256sum vajra-*.tar.gz > checksums.txt
 
       - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             vajra-phase7.1/vajra/vajra-*.tar.gz
-            vajra-phase7.1/vajra/vajra-*.tar.gz.sha256
+            vajra-phase7.1/vajra/checksums.txt
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
