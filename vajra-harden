@@ -280,9 +280,12 @@ if [[ "$ROLLBACK" == "1" ]]; then
   exit 0
 fi
 
-[[ -z "$PROFILE" ]] && die "Provide --profile=wordpress or --profile=fintech"
-[[ "$PROFILE" == "wordpress" || "$PROFILE" == "fintech" ]] \
-  || die "Invalid profile: $PROFILE (use wordpress or fintech)"
+# Skip profile validation when --status or --rollback was requested.
+if [[ "$STATUS" != "1" && "$ROLLBACK" != "1" ]]; then
+  [[ -z "$PROFILE" ]] && die "Provide --profile=wordpress or --profile=fintech"
+  [[ "$PROFILE" == "wordpress" || "$PROFILE" == "fintech" ]] \
+    || die "Invalid profile: $PROFILE (use wordpress or fintech)"
+fi
 
 if [[ "$PROFILE" == "fintech" && "$MODE" == "html" ]]; then
   die "Fintech profile requires PHP or WordPress mode"
