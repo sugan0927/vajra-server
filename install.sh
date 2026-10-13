@@ -831,13 +831,13 @@ cat > /usr/local/bin/vajra-site <<'VAJRA_SITE_TEMPLATE'
 # Rev 9 — --skip-ssl, reserved-domain detection, graceful certbot fallback
 set -euo pipefail
 
-DISTRO_FAMILY="__FAMILY__"
-NGINX_SITES_AVAIL="__NGINX_AVAIL__"
-NGINX_SITES_ENABLED="__NGINX_ENABLED__"
-WWW_USER="__WWW_USER__"
-PHP_SOCK="__PHP_SOCK__"
-PHP_VER="__PHP_VER__"
-PHP_FPM_SVC="__PHP_FPM_SVC__"
+DISTRO_FAMILY="debian"
+NGINX_SITES_AVAIL="/etc/nginx/sites-available"
+NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
+WWW_USER="www-data"
+PHP_SOCK="/run/php/php8.5-fpm.sock"
+PHP_VER="8.5"
+PHP_FPM_SVC="php8.5-fpm"
 
 SITES_DIR=/etc/vajra/sites
 WWW_ROOT=/var/www/sites
@@ -1211,6 +1211,8 @@ cmd_add() {
   local TITLE="WordPress" ADMIN_USER="wpadmin" ADMIN_PASS=""
   local MODE="wordpress"
   local SKIP_SSL=0
+  local HARDENED=0
+  local FINTECH=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --title)       TITLE="$2"; shift 2;;
@@ -1220,6 +1222,8 @@ cmd_add() {
       --html)        MODE="html"; shift;;
       --wordpress|--wp) MODE="wordpress"; shift;;
       --skip-ssl|--no-ssl) SKIP_SSL=1; shift;;
+      --hardened)     HARDENED=1; shift;;
+      --fintech)      HARDENED=1; FINTECH=1; shift;;
       *) die "Unknown option: $1";;
     esac
   done
@@ -1451,6 +1455,19 @@ server {
 }"
   fi
   nginx -t && systemctl reload nginx
+
+  # ── Hardening (optional) ───────────────────────────────────────────
+  if [[ "${HARDENED:-0}" == "1" ]]; then
+    local PROFILE="wordpress"
+    [[ "${FINTECH:-0}" == "1" ]] && PROFILE="fintech"
+    log "Applying hardening profile: $PROFILE"
+    if [[ -x /usr/local/bin/vajra-harden ]]; then
+      /usr/local/bin/vajra-harden "$DOMAIN" --profile="$PROFILE" || \
+        warn "Hardening failed — site remains functional but unhardened"
+    else
+      warn "vajra-harden not installed — skipping hardening"
+    fi
+  fi
 
   echo
   echo "════════════════════════════════════════════════════════════════"
