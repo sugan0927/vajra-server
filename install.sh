@@ -1758,3 +1758,6 @@ SNIP
 echo "   → /etc/nginx/snippets/vajra-security-headers.conf  ✅"
 
 # ─────────────────────────────────────────────────────────────────────
+
+
+# ===== END OF VAJRA INSTALL =====
