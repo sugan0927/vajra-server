@@ -20,6 +20,198 @@
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ═════════════════════════════════════════════════════════════════════════
+# VAJRA_MULTIDISTRO_INSTALL — distro detection + package/service adapters
+# ═════════════════════════════════════════════════════════════════════════
+VAJRA_DISTRO_ID=""
+VAJRA_DISTRO_FAMILY="debian"
+VAJRA_DISTRO_VER=""
+
+vajra_detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        VAJRA_DISTRO_ID="${ID:-unknown}"
+        VAJRA_DISTRO_VER="${VERSION_ID:-}"
+    elif [[ -f /etc/redhat-release ]]; then
+        VAJRA_DISTRO_ID="rhel"
+    elif [[ -f /etc/alpine-release ]]; then
+        VAJRA_DISTRO_ID="alpine"
+    fi
+
+    case "$VAJRA_DISTRO_ID" in
+        ubuntu|debian|linuxmint|pop|raspbian|kali|devuan)
+            VAJRA_DISTRO_FAMILY="debian" ;;
+        rhel|centos|rocky|almalinux|ol|fedora|amzn)
+            VAJRA_DISTRO_FAMILY="rhel" ;;
+        alpine)     VAJRA_DISTRO_FAMILY="alpine" ;;
+        arch|manjaro|endeavouros) VAJRA_DISTRO_FAMILY="arch" ;;
+        opensuse*|sles|suse)      VAJRA_DISTRO_FAMILY="suse" ;;
+        *)          VAJRA_DISTRO_FAMILY="debian" ;;
+    esac
+}
+
+vajra_detect_distro
+
+# ── Package manager ──────────────────────────────────────────────────
+case "$VAJRA_DISTRO_FAMILY" in
+    debian)
+        PKG_UPDATE="$PKG_UPDATE -qq"
+        PKG_INSTALL="$PKG_INSTALL -qq"
+        PKG_INSTALL_LOCAL="dpkg -i"
+        PKG_QUERY="dpkg -s"
+        PKG_ADD_REPO_DEB="add-apt-repository -y"
+        DEFAULT_PHP_VER="8.5"
+        PHP_REPO_URL="https://packages.sury.org/php"
+        ;;
+    rhel)
+        PKG_UPDATE="dnf -y makecache"
+        PKG_INSTALL="dnf install -y"
+        PKG_INSTALL_LOCAL="rpm -Uvh --replacepkgs"
+        PKG_QUERY="rpm -q"
+        PKG_ADD_REPO_DEB=""
+        DEFAULT_PHP_VER="8.3"
+        PHP_REPO_URL="https://rpms.remirepo.net/enterprise/remi-release-\${VAJRA_DISTRO_VER%%.*}.rpm"
+        ;;
+    alpine)
+        PKG_UPDATE="apk update"
+        PKG_INSTALL="apk add"
+        PKG_INSTALL_LOCAL="apk add --allow-untrusted"
+        PKG_QUERY="apk info -e"
+        PKG_ADD_REPO_DEB=""
+        DEFAULT_PHP_VER="83"
+        PHP_REPO_URL=""
+        ;;
+    arch)
+        PKG_UPDATE="pacman -Sy"
+        PKG_INSTALL="pacman -S --noconfirm"
+        PKG_INSTALL_LOCAL="pacman -U --noconfirm"
+        PKG_QUERY="pacman -Q"
+        PKG_ADD_REPO_DEB=""
+        DEFAULT_PHP_VER="8.3"
+        PHP_REPO_URL=""
+        ;;
+    suse)
+        PKG_UPDATE="zypper -n refresh"
+        PKG_INSTALL="zypper -n install"
+        PKG_INSTALL_LOCAL="rpm -Uvh --replacepkgs"
+        PKG_QUERY="rpm -q"
+        PKG_ADD_REPO_DEB=""
+        DEFAULT_PHP_VER="8.3"
+        PHP_REPO_URL=""
+        ;;
+esac
+
+# ── Web user / group ─────────────────────────────────────────────────
+if id www-data >/dev/null 2>&1; then
+    WEB_USER="www-data"; WEB_GROUP="www-data"
+elif id nginx >/dev/null 2>&1; then
+    WEB_USER="nginx"; WEB_GROUP="nginx"
+elif id apache >/dev/null 2>&1; then
+    WEB_USER="apache"; WEB_GROUP="apache"
+elif id http >/dev/null 2>&1; then
+    WEB_USER="http"; WEB_GROUP="http"
+else
+    WEB_USER="www-data"; WEB_GROUP="www-data"
+fi
+
+# ── nologin shell ────────────────────────────────────────────────────
+NOLOGIN_SHELL=""
+for s in /usr/sbin/nologin /sbin/nologin /bin/false; do
+    [[ -x "$s" ]] && { NOLOGIN_SHELL="$s"; break; }
+done
+[[ -z "$NOLOGIN_SHELL" ]] && NOLOGIN_SHELL="/bin/false"
+
+# ── nginx layout ─────────────────────────────────────────────────────
+if [[ -d /etc/nginx/sites-available ]]; then
+    NGINX_SITES_AVAIL=/etc/nginx/sites-available
+    NGINX_SITES_ENABLED=/etc/nginx/sites-enabled
+else
+    NGINX_SITES_AVAIL=/etc/nginx/conf.d
+    NGINX_SITES_ENABLED=/etc/nginx/conf.d
+fi
+
+# ── PHP-FPM layout ───────────────────────────────────────────────────
+if [[ -d /etc/php ]]; then
+    PHP_FPM_LAYOUT="debian"
+elif [[ -d /etc/php-fpm.d ]]; then
+    PHP_FPM_LAYOUT="rhel"
+elif compgen -G '/etc/php*/php-fpm.d' >/dev/null 2>&1; then
+    PHP_FPM_LAYOUT="alpine"
+else
+    PHP_FPM_LAYOUT="unknown"
+fi
+
+# ── Init system ──────────────────────────────────────────────────────
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    INIT_SYSTEM="systemd"
+elif command -v rc-service >/dev/null 2>&1; then
+    INIT_SYSTEM="openrc"
+else
+    INIT_SYSTEM="sysv"
+fi
+
+svc_reload() {
+    case "$INIT_SYSTEM" in
+        systemd) systemctl reload "$1" 2>/dev/null || systemctl restart "$1" 2>/dev/null || true ;;
+        openrc)  rc-service "$1" reload 2>/dev/null || rc-service "$1" restart 2>/dev/null || true ;;
+        sysv)    service "$1" reload 2>/dev/null || service "$1" restart 2>/dev/null || true ;;
+    esac
+}
+svc_restart() {
+    case "$INIT_SYSTEM" in
+        systemd) systemctl restart "$1" ;;
+        openrc)  rc-service "$1" restart ;;
+        sysv)    service "$1" restart ;;
+    esac
+}
+svc_start() {
+    case "$INIT_SYSTEM" in
+        systemd) systemctl start "$1" ;;
+        openrc)  rc-service "$1" start ;;
+        sysv)    service "$1" start ;;
+    esac
+}
+svc_enable_now() {
+    case "$INIT_SYSTEM" in
+        systemd) svc_enable_now "$1" "$1" ;;
+        openrc)  rc-update add "${1%.service}" default 2>/dev/null; rc-service "${1%.service}" start ;;
+        sysv)    service "$1" start ;;
+    esac
+}
+svc_daemon_reload() {
+    case "$INIT_SYSTEM" in
+        systemd) svc_daemon_reload ;;
+        *) : ;;
+    esac
+}
+
+# ── PHP repo setup ───────────────────────────────────────────────────
+setup_php_repo() {
+    case "$VAJRA_DISTRO_FAMILY" in
+        debian)
+            if ! grep -qr "sury.org" /etc/apt/sources.list.d/ 2>/dev/null; then
+                $PKG_INSTALL apt-transport-https lsb-release ca-certificates curl gnupg >/dev/null 2>&1 || true
+                curl -fsSL https://packages.sury.org/php/apt.gpg \
+                    | gpg --dearmor -o /usr/share/keyrings/sury-php.gpg 2>/dev/null || true
+                echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc 2>/dev/null || echo bookworm) main" \
+                    > /etc/apt/sources.list.d/sury-php.list
+                $PKG_UPDATE >/dev/null 2>&1 || true
+            fi
+            ;;
+        rhel)
+            if ! rpm -q remi-release >/dev/null 2>&1; then
+                $PKG_INSTALL "https://rpms.remirepo.net/enterprise/remi-release-${VAJRA_DISTRO_VER%%.*}.rpm" >/dev/null 2>&1 || true
+            fi
+            ;;
+        alpine|arch|suse)
+            : # nothing extra — distro PHP is recent enough
+            ;;
+    esac
+}
+
+# ═════════════════════════════════════════════════════════════════════════
+
 FIRST_DOMAIN="${1:-}"
 FIRST_EMAIL="${2:-}"
 SITE_MODE="${SITE_MODE:-wordpress}"
@@ -46,7 +238,7 @@ db_exec() { "$(db_cli)" "$@"; }
 io_uring_syscall_probe() {
   if ! command -v gcc >/dev/null 2>&1; then
     case "${DISTRO_FAMILY:-}" in
-      debian) DEBIAN_FRONTEND=noninteractive apt-get install -y gcc >/dev/null 2>&1 || true ;;
+      debian) $PKG_INSTALL gcc >/dev/null 2>&1 || true ;;
       rhel)   dnf install -y gcc >/dev/null 2>&1 || true ;;
       arch)   pacman -S --noconfirm --needed gcc >/dev/null 2>&1 || true ;;
     esac
@@ -188,20 +380,20 @@ install_mariadb_server() {
     dnf install -y MariaDB-server MariaDB-client 2>/dev/null && return 0
   fi
   if [[ "$DISTRO_FAMILY" == "debian" ]]; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y mariadb-server 2>/dev/null && return 0
+    $PKG_INSTALL mariadb-server 2>/dev/null && return 0
   fi
   return 1
 }
 
 mariadb_ensure_running() {
-  systemctl enable mariadb >/dev/null 2>&1 || true
-  systemctl start  mariadb >/dev/null 2>&1 || true
+  svc_enable_now "$1" >/dev/null 2>&1 || true
+  svc_start "$1" >/dev/null 2>&1 || true
   sleep 2
   systemctl is-active --quiet mariadb && return 0
   if command -v mariadb-install-db >/dev/null 2>&1 && [[ ! -d /var/lib/mysql/mysql ]]; then
     mariadb-install-db --user=mysql >/dev/null 2>&1 || true
   fi
-  systemctl start mariadb >/dev/null 2>&1 || true
+  svc_start "$1" >/dev/null 2>&1 || true
   sleep 3
   systemctl is-active --quiet mariadb
 }
@@ -231,14 +423,14 @@ nginx_paths() {
 
 pkg_update() {
   case "$DISTRO_FAMILY" in
-    debian) DEBIAN_FRONTEND=noninteractive apt-get update -y ;;
+    debian) DEBIAN_FRONTEND=noninteractive $PKG_UPDATE -y ;;
     rhel)   dnf -y makecache >/dev/null 2>&1 || dnf -y check-update >/dev/null 2>&1 || true ;;
     arch)   pacman -Sy --noconfirm ;;
   esac
 }
 pkg_install() {
   case "$DISTRO_FAMILY" in
-    debian) DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+    debian) $PKG_INSTALL "$@" ;;
     rhel)   dnf install -y "$@" ;;
     arch)   pacman -S --noconfirm --needed "$@" ;;
   esac
@@ -612,7 +804,7 @@ ensure_service() {
     printf "   ✅ %-22s active\n" "$svc"; return 0
   fi
   printf "   ⚠  %-22s not running — starting\n" "$svc"
-  systemctl enable --now "$svc" >/dev/null 2>&1 || true
+  svc_enable_now "$1" "$svc" >/dev/null 2>&1 || true
   sleep 2
   if systemctl is-active --quiet "$svc"; then
     printf "   ✅ %-22s started\n" "$svc"; return 0
@@ -807,8 +999,8 @@ NGINXBASE
          "${NGINX_SITES_ENABLED}/_vajra-welcome.conf"
 
 if nginx -t 2>/dev/null; then
-  systemctl enable --now nginx
-  systemctl restart nginx
+  svc_enable_now "$1"
+  svc_restart "$1"
   echo "   ✅ nginx base up (welcome page active)"
 else
   warn "nginx config test failed — attempting auto-heal"
@@ -816,8 +1008,8 @@ else
   rm -f /etc/nginx/sites-enabled/*.disabled-by-vajra 2>/dev/null || true
   fix_nginx_default_server
   if nginx -t 2>/dev/null; then
-    systemctl enable --now nginx
-    systemctl restart nginx
+    svc_enable_now "$1"
+    svc_restart "$1"
     echo "   ✅ nginx base up (after auto-heal)"
   else
     die "nginx config still invalid — check /etc/nginx/nginx.conf"
@@ -858,14 +1050,14 @@ db_cli() {
 db_exec() { "$(db_cli)" "$@"; }
 
 mariadb_ensure_running() {
-  systemctl enable mariadb >/dev/null 2>&1 || true
-  systemctl start  mariadb >/dev/null 2>&1 || true
+  svc_enable_now "$1" >/dev/null 2>&1 || true
+  svc_start "$1" >/dev/null 2>&1 || true
   sleep 2
   systemctl is-active --quiet mariadb && return 0
   if command -v mariadb-install-db >/dev/null 2>&1 && [[ ! -d /var/lib/mysql/mysql ]]; then
     mariadb-install-db --user=mysql >/dev/null 2>&1 || true
   fi
-  systemctl start mariadb >/dev/null 2>&1 || true
+  svc_start "$1" >/dev/null 2>&1 || true
   sleep 3
   systemctl is-active --quiet mariadb
 }
@@ -977,7 +1169,7 @@ ensure_stack() {
       if [[ "$svc" == "mariadb" ]]; then
         mariadb_ensure_running || true
       else
-        systemctl enable --now "$svc" >/dev/null 2>&1 || true
+        svc_enable_now "$1" "$svc" >/dev/null 2>&1 || true
         sleep 2
       fi
       if ! systemctl is-active --quiet "$svc"; then
@@ -1318,7 +1510,7 @@ WPCFGPY
 
     if ! php_can_connect_mariadb "127.0.0.1" "$DB_USER" "$DB_PASS" "$DB_NAME"; then
       warn "PHP → MariaDB failed — attempting heal"
-      systemctl restart mariadb 2>/dev/null || true
+      svc_restart "$1" 2>/dev/null || true
       sleep 3
       for _h in localhost 127.0.0.1 ::1; do
         db_exec -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${_h}';" 2>/dev/null || true
@@ -1370,8 +1562,8 @@ CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
   chmod 600 "${SITES_DIR}/${DOMAIN}.env"
 
-  systemctl daemon-reload
-  systemctl enable --now "vajra-site@${DOMAIN}.service"
+  svc_daemon_reload
+  svc_enable_now "$1" "vajra-site@${DOMAIN}.service"
   sleep 1
   systemctl is-active --quiet "vajra-site@${DOMAIN}.service" \
     || { journalctl -u "vajra-site@${DOMAIN}.service" -n 30 --no-pager; die "Vajra failed"; }
@@ -1385,7 +1577,7 @@ ENV
     location /.well-known/acme-challenge/ { root ${CERTBOT_ROOT}/${DOMAIN}; }
     location / { return 301 https://\$host\$request_uri; }
 }"
-  nginx -t && systemctl reload nginx
+  nginx -t && svc_reload "$1"
 
   local SSL_OK=0
   if [[ "$SKIP_SSL" == "1" ]]; then
@@ -1454,7 +1646,7 @@ server {
     }
 }"
   fi
-  nginx -t && systemctl reload nginx
+  nginx -t && svc_reload "$1"
 
   # ── Hardening (optional) ───────────────────────────────────────────
   if [[ "${HARDENED:-0}" == "1" ]]; then
@@ -1553,7 +1745,7 @@ cmd_update_php() {
 
   if ! systemctl is-active --quiet "$NEW_SVC"; then
     warn "$NEW_SVC not running — starting"
-    systemctl enable --now "$NEW_SVC" >/dev/null 2>&1 || true
+    svc_enable_now "$1" "$NEW_SVC" >/dev/null 2>&1 || true
     sleep 2
   fi
 
@@ -1654,9 +1846,9 @@ cmd_remove() {
   [[ "$ans" =~ ^[Yy]$ ]] || { info "Aborted"; return; }
 
   systemctl disable --now "vajra-site@${D}.service" 2>/dev/null || true
-  systemctl daemon-reload
+  svc_daemon_reload
   nginx_remove_site "$D"
-  nginx -t && systemctl reload nginx
+  nginx -t && svc_reload "$1"
   certbot delete --cert-name "$D" --non-interactive 2>/dev/null || true
   rm -f "${SITES_DIR}/${D}.toml"
   rm -f "/etc/cron.d/vajra-wp-cron-${D//./_}"
