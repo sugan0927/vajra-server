@@ -20,7 +20,7 @@ Requirements: Linux kernel 5.1+ (io_uring), systemd, x86_64.
 |---|---|---|
 | **Debian** | 11, 12, 13 | Primary target |
 | **Ubuntu** | 20.04, 22.04, 24.04 | Same layout as Debian |
-| **RHEL / Rocky / Alma** | 8, 9 | PHP via Remi repo |
+| **RHEL / Rocky / Alma** | 9 | PHP via Remi repo |
 | **Fedora** | 38+ | PHP via Remi repo |
 | **Arch / Manjaro** | rolling | PHP from main repo |
 
