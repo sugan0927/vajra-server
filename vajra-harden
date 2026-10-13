@@ -226,59 +226,7 @@ case "$DISTRO_FAMILY" in
           NGINX_SITES_ENABLED=/etc/nginx/conf.d ;;
 esac
 
-# ─── Status action ───────────────────────────────────────────────────
-if [[ "$STATUS" == "1" ]]; then
-  echo "Site:     $DOMAIN"
-  echo "Mode:     $MODE"
-  echo "Profile:  $(read_env "$ENV_FILE" HARDENING_PROFILE)"
-  echo "Hardened: $(read_env "$ENV_FILE" HARDENED_AT)"
-  echo ""
-  echo "systemd drop-in:"
-  dropin="/etc/systemd/system/vajra-site@${DOMAIN}.service.d/10-hardening.conf"
-  if [[ -f "$dropin" ]]; then
-    echo "  ✅ present ($dropin)"
-  elif [[ -f /etc/systemd/system/vajra-site@.service.d/10-hardening.conf ]]; then
-    echo "  ⚠  legacy template drop-in (move to per-instance)"
-  else
-    echo "  ❌ not present"
-  fi
-  echo ""
-  echo "PHP-FPM pool:"
-  for p in /etc/php/${PHP_VER}/fpm/pool.d/${DOMAIN//./_}.conf /etc/php-fpm.d/${DOMAIN//./_}.conf; do
-    [[ -f "$p" ]] && echo "  ✅ $p"
-  done
-  echo ""
-  echo "Nginx config:"
-  local_cfg="${NGINX_SITES_ENABLED}/${DOMAIN}.conf"
-  if grep -q "VAJRA HARDENED" "$local_cfg" 2>/dev/null; then
-    echo "  ✅ $local_cfg (hardened)"
-  else
-    echo "  ⚠  $local_cfg (basic)"
-  fi
-  exit 0
-fi
 
-# ─── Rollback action ─────────────────────────────────────────────────
-if [[ "$ROLLBACK" == "1" ]]; then
-  log "Rolling back hardening for $DOMAIN"
-  # Restore nginx config from vajra-disabled/
-  restore_configs
-  # Remove systemd drop-in (per-instance)
-  rm -rf /etc/systemd/system/vajra-site@${DOMAIN}.service.d
-  # Also clean any legacy template-level drop-in from older runs
-  rm -f /etc/systemd/system/vajra-site@.service.d/10-hardening.conf 2>/dev/null || true
-  rmdir /etc/systemd/system/vajra-site@.service.d 2>/dev/null || true
-  # Remove PHP-FPM pool
-  rm -f /etc/php/${PHP_VER}/fpm/pool.d/${DOMAIN//./_}.conf 2>/dev/null || true
-  rm -f /etc/php-fpm.d/${DOMAIN//./_}.conf 2>/dev/null || true
-  # Update env
-  sed -i "/^HARDENING_PROFILE=/d;/^HARDENED_AT=/d" "$ENV_FILE"
-  # Reload
-  svc_daemon_reload
-  svc_restart "vajra-site@${DOMAIN}.service"; svc_restart nginx
-  echo "   ✅ Rollback complete"
-  exit 0
-fi
 
 # Skip profile validation when --status or --rollback was requested.
 if [[ "$STATUS" != "1" && "$ROLLBACK" != "1" ]]; then
@@ -950,4 +898,56 @@ main() {
   echo "════════════════════════════════════════════════════════════════"
 }
 
+# ─── Status action ───────────────────────────────────────────────────
+if [[ "$STATUS" == "1" ]]; then
+  echo "Site:     $DOMAIN"
+  echo "Mode:     $MODE"
+  echo "Profile:  $(read_env "$ENV_FILE" HARDENING_PROFILE)"
+  echo "Hardened: $(read_env "$ENV_FILE" HARDENED_AT)"
+  echo ""
+  echo "systemd drop-in:"
+  dropin="/etc/systemd/system/vajra-site@${DOMAIN}.service.d/10-hardening.conf"
+  if [[ -f "$dropin" ]]; then
+    echo "  ✅ present ($dropin)"
+  elif [[ -f /etc/systemd/system/vajra-site@.service.d/10-hardening.conf ]]; then
+    echo "  ⚠  legacy template drop-in (move to per-instance)"
+  else
+    echo "  ❌ not present"
+  fi
+  echo ""
+  echo "PHP-FPM pool:"
+  for p in /etc/php/${PHP_VER}/fpm/pool.d/${DOMAIN//./_}.conf /etc/php-fpm.d/${DOMAIN//./_}.conf; do
+    [[ -f "$p" ]] && echo "  ✅ $p"
+  done
+  echo ""
+  echo "Nginx config:"
+  local_cfg="${NGINX_SITES_ENABLED}/${DOMAIN}.conf"
+  if grep -q "VAJRA HARDENED" "$local_cfg" 2>/dev/null; then
+    echo "  ✅ $local_cfg (hardened)"
+  else
+    echo "  ⚠  $local_cfg (basic)"
+  fi
+  exit 0
+fi
+# ─── Rollback action ─────────────────────────────────────────────────
+if [[ "$ROLLBACK" == "1" ]]; then
+  log "Rolling back hardening for $DOMAIN"
+  # Restore nginx config from vajra-disabled/
+  restore_configs
+  # Remove systemd drop-in (per-instance)
+  rm -rf /etc/systemd/system/vajra-site@${DOMAIN}.service.d
+  # Also clean any legacy template-level drop-in from older runs
+  rm -f /etc/systemd/system/vajra-site@.service.d/10-hardening.conf 2>/dev/null || true
+  rmdir /etc/systemd/system/vajra-site@.service.d 2>/dev/null || true
+  # Remove PHP-FPM pool
+  rm -f /etc/php/${PHP_VER}/fpm/pool.d/${DOMAIN//./_}.conf 2>/dev/null || true
+  rm -f /etc/php-fpm.d/${DOMAIN//./_}.conf 2>/dev/null || true
+  # Update env
+  sed -i "/^HARDENING_PROFILE=/d;/^HARDENED_AT=/d" "$ENV_FILE"
+  # Reload
+  svc_daemon_reload
+  svc_restart "vajra-site@${DOMAIN}.service"; svc_restart nginx
+  echo "   ✅ Rollback complete"
+  exit 0
+fi
 main
