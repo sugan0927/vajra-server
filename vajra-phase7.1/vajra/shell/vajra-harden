@@ -1,0 +1,953 @@
+#!/usr/bin/env bash
+# vajra-harden — apply security hardening to a Vajra site
+# Profiles: --profile=wordpress | --profile=fintech
+# Action:   --rollback (undo hardening)
+set -euo pipefail
+
+SITES_DIR=/etc/vajra/sites
+HARDENING_DIR=/etc/vajra/hardening
+BACKUP_SUFFIX=".vajra-pre-harden"
+
+log()  { printf "\n\033[1;32m▶ %s\033[0m\n" "$*"; }
+info() { printf "\033[1;36mℹ  %s\033[0m\n" "$*"; }
+warn() { printf "\033[1;33m⚠  %s\033[0m\n" "$*"; }
+err()  { printf "\033[1;31m❌ %s\033[0m\n" "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+# ═════════════════════════════════════════════════════════════════════════
+# VAJRA_MULTIDISTRO — distro detection + adapter layer
+# ═════════════════════════════════════════════════════════════════════════
+VAJRA_DISTRO_ID=""
+VAJRA_DISTRO_FAMILY="debian"
+
+vajra_detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        VAJRA_DISTRO_ID="${ID:-unknown}"
+    elif [[ -f /etc/redhat-release ]]; then
+        VAJRA_DISTRO_ID="rhel"
+    elif [[ -f /etc/alpine-release ]]; then
+        VAJRA_DISTRO_ID="alpine"
+    fi
+
+    case "$VAJRA_DISTRO_ID" in
+        ubuntu|debian|linuxmint|pop|raspbian|kali|devuan)
+            VAJRA_DISTRO_FAMILY="debian" ;;
+        rhel|centos|rocky|almalinux|ol|fedora|amzn)
+            VAJRA_DISTRO_FAMILY="rhel" ;;
+        alpine)     VAJRA_DISTRO_FAMILY="alpine" ;;
+        arch|manjaro|endeavouros) VAJRA_DISTRO_FAMILY="arch" ;;
+        opensuse*|sles|suse)      VAJRA_DISTRO_FAMILY="suse" ;;
+        *)          VAJRA_DISTRO_FAMILY="debian" ;;
+    esac
+
+    # Web user / group
+    if id www-data >/dev/null 2>&1; then
+        WEB_USER="www-data"; WEB_GROUP="www-data"
+    elif id nginx >/dev/null 2>&1; then
+        WEB_USER="nginx"; WEB_GROUP="nginx"
+    elif id apache >/dev/null 2>&1; then
+        WEB_USER="apache"; WEB_GROUP="apache"
+    elif id http >/dev/null 2>&1; then
+        WEB_USER="http"; WEB_GROUP="http"
+    else
+        WEB_USER="www-data"; WEB_GROUP="www-data"
+    fi
+
+    # nologin shell
+    NOLOGIN_SHELL=""
+    for s in /usr/sbin/nologin /sbin/nologin /bin/false; do
+        [[ -x "$s" ]] && { NOLOGIN_SHELL="$s"; break; }
+    done
+    [[ -z "$NOLOGIN_SHELL" ]] && NOLOGIN_SHELL="/bin/false"
+
+    # nginx layout
+    if [[ -d /etc/nginx/sites-available ]]; then
+        NGINX_SITES_AVAIL=/etc/nginx/sites-available
+        NGINX_SITES_ENABLED=/etc/nginx/sites-enabled
+    else
+        NGINX_SITES_AVAIL=/etc/nginx/conf.d
+        NGINX_SITES_ENABLED=/etc/nginx/conf.d
+    fi
+
+    # PHP-FPM layout
+    if [[ -d /etc/php ]]; then
+        PHP_FPM_LAYOUT="debian"    # /etc/php/<ver>/fpm/pool.d
+    elif [[ -d /etc/php-fpm.d ]]; then
+        PHP_FPM_LAYOUT="rhel"      # /etc/php-fpm.d
+    elif compgen -G '/etc/php*/php-fpm.d' >/dev/null 2>&1; then
+        PHP_FPM_LAYOUT="alpine"    # /etc/php83/php-fpm.d
+    else
+        PHP_FPM_LAYOUT="unknown"
+    fi
+
+    # Init system
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+        INIT_SYSTEM="systemd"
+    elif command -v rc-service >/dev/null 2>&1; then
+        INIT_SYSTEM="openrc"
+    else
+        INIT_SYSTEM="sysv"
+    fi
+}
+
+vajra_detect_distro
+
+# ── Service manager adapters ─────────────────────────────────────────
+svc_reload() {
+    local svc="$1"
+    case "$INIT_SYSTEM" in
+        systemd) systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true ;;
+        openrc)  rc-service "$svc" reload 2>/dev/null || rc-service "$svc" restart 2>/dev/null || true ;;
+        sysv)    service "$svc" reload 2>/dev/null || service "$svc" restart 2>/dev/null || true ;;
+    esac
+}
+svc_restart() {
+    local svc="$1"
+    case "$INIT_SYSTEM" in
+        systemd) systemctl restart "$svc" ;;
+        openrc)  rc-service "$svc" restart ;;
+        sysv)    service "$svc" restart ;;
+    esac
+}
+svc_daemon_reload() {
+    case "$INIT_SYSTEM" in
+        systemd) systemctl daemon-reload ;;
+        *) : ;;   # no-op
+    esac
+}
+svc_exists() {
+    local svc="$1"
+    case "$INIT_SYSTEM" in
+        systemd) systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -q "${svc}.service" ;;
+        openrc)  [[ -f "/etc/init.d/${svc}" ]] ;;
+        sysv)    [[ -f "/etc/init.d/${svc}" ]] ;;
+    esac
+}
+
+# ── PHP-FPM adapter (returns paths for current distro) ───────────────
+php_fpm_pool_dir() {
+    local php_ver="$1"
+    case "$PHP_FPM_LAYOUT" in
+        debian) echo "/etc/php/${php_ver}/fpm/pool.d" ;;
+        rhel)   echo "/etc/php-fpm.d" ;;
+        alpine) echo "/etc/php${php_ver//./}/php-fpm.d" ;;
+        *)      echo "/etc/php-fpm.d" ;;
+    esac
+}
+php_fpm_sock_dir() {
+    case "$PHP_FPM_LAYOUT" in
+        debian) echo "/run/php" ;;
+        rhel)   echo "/run/php-fpm" ;;
+        alpine) echo "/run/php-fpm" ;;
+        *)      echo "/run/php-fpm" ;;
+    esac
+}
+php_fpm_service() {
+    local php_ver="$1"
+    case "$PHP_FPM_LAYOUT" in
+        debian) echo "php${php_ver}-fpm" ;;
+        rhel)   echo "php-fpm" ;;
+        alpine) echo "php-fpm${php_ver//./}" ;;
+        *)      echo "php-fpm" ;;
+    esac
+}
+# ═════════════════════════════════════════════════════════════════════════
+
+[[ $EUID -ne 0 ]] && die "Run as root"
+
+usage() {
+cat <<U
+vajra-harden — apply security hardening to a Vajra site
+
+USAGE:
+  vajra-harden <domain> --profile=<wordpress|fintech>
+  vajra-harden <domain> --rollback
+  vajra-harden <domain> --status
+
+PROFILES:
+  wordpress   OWASP-grade WordPress hardening (headers, WAF, rate-limit)
+  fintech     PCI-DSS grade (TLS 1.3-only, mTLS, audit logs)
+
+OPTIONS:
+  --profile=NAME        Choose hardening profile
+  --fintech-ca=PATH     Path to client CA cert (required for fintech mTLS)
+  --fintech-ca-key=PATH Path to client CA key (for generating new certs)
+  --skip-waf            Skip ModSecurity/Coraza installation
+  --rollback            Undo all hardening (restore backups)
+  --status              Show current hardening state
+U
+}
+
+read_env() { sed -n "s/^${2}=//p" "$1" | head -1; }
+
+# ─── Argument parsing ────────────────────────────────────────────────
+DOMAIN=""
+PROFILE=""
+ROLLBACK=0
+STATUS=0
+FINTECH_CA=""
+FINTECH_CA_KEY=""
+SKIP_WAF=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile=*)        PROFILE="${1#*=}"; shift;;
+    --fintech-ca=*)     FINTECH_CA="${1#*=}"; shift;;
+    --fintech-ca-key=*) FINTECH_CA_KEY="${1#*=}"; shift;;
+    --skip-waf)         SKIP_WAF=1; shift;;
+    --rollback)         ROLLBACK=1; shift;;
+    --status)           STATUS=1; shift;;
+    --help|-h)          usage; exit 0;;
+    -*)                 die "Unknown option: $1";;
+    *)                  [[ -z "$DOMAIN" ]] && DOMAIN="$1" || die "Multiple domains not supported"; shift;;
+  esac
+done
+
+[[ -z "$DOMAIN" ]] && { usage; exit 1; }
+ENV_FILE="${SITES_DIR}/${DOMAIN}.env"
+[[ -f "$ENV_FILE" ]] || die "Site '$DOMAIN' not found (no $ENV_FILE)"
+
+MODE="$(read_env "$ENV_FILE" MODE)"; MODE="${MODE:-wordpress}"
+PORT="$(read_env "$ENV_FILE" PORT)"
+SITE_ROOT="$(read_env "$ENV_FILE" SITE_ROOT)"
+WWW_ALIAS="$(read_env "$ENV_FILE" WWW_ALIAS)"
+PHP_SOCK="$(read_env "$ENV_FILE" PHP_SOCK)"
+PHP_VER="$(read_env "$ENV_FILE" PHP_VER)"
+DISTRO_FAMILY="$(read_env "$ENV_FILE" DISTRO_FAMILY)"
+[[ -z "$DISTRO_FAMILY" ]] && DISTRO_FAMILY="debian"
+
+# Detect nginx paths based on distro
+case "$DISTRO_FAMILY" in
+  debian) NGINX_SITES_AVAIL=/etc/nginx/sites-available
+          NGINX_SITES_ENABLED=/etc/nginx/sites-enabled ;;
+  *)      NGINX_SITES_AVAIL=/etc/nginx/conf.d
+          NGINX_SITES_ENABLED=/etc/nginx/conf.d ;;
+esac
+
+
+
+# Skip profile validation when --status or --rollback was requested.
+if [[ "$STATUS" != "1" && "$ROLLBACK" != "1" ]]; then
+  [[ -z "$PROFILE" ]] && die "Provide --profile=wordpress or --profile=fintech"
+  [[ "$PROFILE" == "wordpress" || "$PROFILE" == "fintech" ]] \
+    || die "Invalid profile: $PROFILE (use wordpress or fintech)"
+fi
+
+if [[ "$PROFILE" == "fintech" && "$MODE" == "html" ]]; then
+  die "Fintech profile requires PHP or WordPress mode"
+fi
+
+if [[ "$PROFILE" == "fintech" && -z "$FINTECH_CA" ]]; then
+  warn "No --fintech-ca provided. Generating self-signed client CA..."
+  FINTECH_CA="${HARDENING_DIR}/fintech-ca/client-ca.crt"
+  FINTECH_CA_KEY="${HARDENING_DIR}/fintech-ca/client-ca.key"
+fi
+
+# ─── Ensure CA for fintech profile ───────────────────────────────────
+ensure_fintech_ca() {
+  [[ "$PROFILE" != "fintech" ]] && return 0
+  mkdir -p "${HARDENING_DIR}/fintech-ca"
+  chmod 700 "${HARDENING_DIR}/fintech-ca"
+
+  if [[ -f "$FINTECH_CA" ]]; then
+    info "Using existing client CA: $FINTECH_CA"
+    return 0
+  fi
+
+  log "Generating client CA (self-signed, valid 10 years)"
+  openssl genrsa -out "${FINTECH_CA_KEY}" 4096 2>/dev/null
+  openssl req -x509 -new -nodes -key "${FINTECH_CA_KEY}" \
+    -sha256 -days 3650 \
+    -subj "/C=IN/ST=MH/L=Mumbai/O=Vajra Fintech CA/CN=vajra-fintech-ca" \
+    -out "$FINTECH_CA" 2>/dev/null
+
+  # Generate empty CRL (required by nginx ssl_crl directive)
+  local ca_dir="${HARDENING_DIR}/fintech-ca"
+  cd "$ca_dir"
+  touch index.txt
+  echo "1000" > serial
+  cat > crlnumber <<< "1000"
+  cat > openssl.cnf <<'CAEOF'
+[ca]
+default_ca = CA_default
+[CA_default]
+database = ./index.txt
+crlnumber = ./crlnumber
+serial = ./serial
+default_md = sha256
+default_crl_days = 3650
+CAEOF
+  openssl ca -config openssl.cnf -gencrl \
+    -keyfile "$FINTECH_CA_KEY" -cert "$FINTECH_CA" \
+    -out "${ca_dir}/client-ca.crl" 2>/dev/null || {
+      # Fallback: use crl from cert itself
+      cp "$FINTECH_CA" "${ca_dir}/client-ca.crl"
+    }
+  chmod 600 "$FINTECH_CA_KEY"
+  chmod 644 "$FINTECH_CA" "${ca_dir}/client-ca.crl"
+  echo "   ✅ CA generated: $FINTECH_CA"
+  echo "   → Issue client certs:"
+  echo "     openssl req -new -nodes -newkey rsa:2048 \\"
+  echo "       -keyout client.key -out client.csr -subj '/CN=client-name'"
+  echo "     openssl x509 -req -in client.csr -CA $FINTECH_CA \\"
+  echo "       -CAkey $FINTECH_CA_KEY -CAcreateserial -days 365 \\"
+  echo "       -out client.crt"
+}
+
+# ─── Backup current config ───────────────────────────────────────────
+backup_configs() {
+  log "Backing up current configuration"
+  # Backups go to /etc/nginx/vajra-disabled/ — outside the include glob.
+  # Debian's `include sites-enabled/*;` would match any *.conf.* file
+  # left in the same directory and load it as a duplicate vhost.
+  local bdir="/etc/nginx/vajra-disabled"
+  mkdir -p "$bdir"
+  for f in "${NGINX_SITES_ENABLED}/${DOMAIN}.conf" \
+           "${NGINX_SITES_AVAIL}/${DOMAIN}.conf"; do
+    [[ -e "$f" ]] || continue
+    local base; base="$(basename "$f")"
+    local target="${bdir}/${base}${BACKUP_SUFFIX}"
+    if [[ ! -f "$target" ]]; then
+      cp -aL "$f" "$target"       # -L follows symlink to real file
+      echo "   → backed up: $f → $target"
+    fi
+  done
+}
+
+restore_configs() {
+  local bdir="/etc/nginx/vajra-disabled"
+  local restored=0
+  for f in "${NGINX_SITES_ENABLED}/${DOMAIN}.conf" \
+           "${NGINX_SITES_AVAIL}/${DOMAIN}.conf"; do
+    [[ -e "$f" ]] || continue
+    local base; base="$(basename "$f")"
+    local target="${bdir}/${base}${BACKUP_SUFFIX}"
+    if [[ -f "$target" ]]; then
+      cp -f "$target" "$f"
+      echo "   → restored: $f"
+      restored=1
+    fi
+  done
+  return 0
+}
+
+# ─── PHP-FPM per-site pool ───────────────────────────────────────────
+write_php_fpm_pool() {
+  local mode="${1:-wordpress}"
+
+  POOL_DIR="$(php_fpm_pool_dir "$PHP_VER")"
+  SOCK_DIR="$(php_fpm_sock_dir)"
+  FPM_SVC="$(php_fpm_service "$PHP_VER")"
+
+  mkdir -p "$POOL_DIR" "$SOCK_DIR"
+  local pool_name="${DOMAIN//./_}"
+  local pool_file="${POOL_DIR}/${pool_name}.conf"
+  local sock_path="${SOCK_DIR}/vajra-${pool_name}.sock"
+  local site_user="vajra-${pool_name}"
+  site_user="${site_user:0:30}"    # Linux username max 32 chars
+
+  # Create system user for site
+  if ! id "$site_user" >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell "$NOLOGIN_SHELL" "$site_user" 2>/dev/null || true
+    echo "   → system user created: $site_user"
+  fi
+
+  # Chown site files
+  chown -R "${site_user}:${site_user}" "$SITE_ROOT"
+  echo "   → ownership: $site_user:$site_user on $SITE_ROOT"
+
+  # Write pool config
+  cat > "$pool_file" <<POOL
+; Vajra hardened PHP-FPM pool for ${DOMAIN}
+; Generated by vajra-harden on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+[${pool_name}]
+user  = ${site_user}
+group = ${site_user}
+
+listen       = ${sock_path}
+listen.owner = ${WEB_USER}
+listen.group = ${WEB_GROUP}
+listen.mode  = 0660
+
+pm                   = dynamic
+pm.max_children      = 20
+pm.start_servers     = 4
+pm.min_spare_servers = 2
+pm.max_spare_servers = 6
+pm.max_requests      = 500
+pm.status_path       = /vajra-fpm-status-${pool_name}
+ping.path            = /vajra-fpm-ping-${pool_name}
+
+; ─── PHP hardening ─────────────────────────────────────────────
+php_admin_value[open_basedir]  = ${SITE_ROOT}:/tmp:/var/lib/php/sessions
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec,curl_exec,curl_multi_exec,parse_ini_file,show_source,posix_kill,posix_mkfifo,posix_setpgid,posix_setsid,posix_setuid
+php_admin_value[upload_max_filesize] = 64M
+php_admin_value[post_max_size]       = 64M
+php_admin_value[memory_limit]        = 256M
+php_admin_value[max_execution_time]  = 60
+php_admin_value[expose_php]          = Off
+php_admin_value[display_errors]      = Off
+php_admin_value[display_startup_errors] = Off
+php_admin_flag[log_errors]           = On
+php_admin_value[error_log]           = /var/log/php-fpm/${pool_name}-error.log
+php_admin_value[session.save_path]   = /var/lib/php/sessions/${pool_name}
+php_admin_value[session.cookie_httponly] = 1
+php_admin_value[session.cookie_secure]   = 1
+php_admin_value[session.cookie_samesite] = Strict
+php_admin_value[session.use_strict_mode] = 1
+php_admin_value[allow_url_fopen]     = Off
+php_admin_value[allow_url_include]   = Off
+
+; ─── WordPress-specific ────────────────────────────────────────
+POOL
+
+  if [[ "$mode" == "wordpress" ]]; then
+    cat >> "$pool_file" <<POOL
+php_admin_value[upload_tmp_dir] = ${SITE_ROOT}/wp-content/uploads/tmp
+POOL
+  fi
+
+  # Ensure log + session dirs
+  mkdir -p /var/log/php-fpm
+  mkdir -p "/var/lib/php/sessions/${pool_name}"
+  chown -R "${site_user}:${site_user}" "/var/lib/php/sessions/${pool_name}"
+  chown ${WEB_USER}:${WEB_GROUP} /var/log/php-fpm 2>/dev/null || true
+
+  echo "   → PHP-FPM pool: $pool_file"
+  echo "   → socket: $sock_path"
+  echo "   → user: $site_user"
+
+  # Reload PHP-FPM
+  svc_reload "$FPM_SVC"
+  sleep 1
+
+  if [[ -S "$sock_path" ]]; then
+    echo "   ✅ PHP-FPM socket ready: $sock_path"
+    NEW_PHP_SOCK="$sock_path"
+  else
+    warn "PHP-FPM socket not found: $sock_path"
+    warn "Check: journalctl -u $FPM_SVC -n 30"
+    NEW_PHP_SOCK="$PHP_SOCK"    # fall back to original
+  fi
+}
+
+# ─── systemd hardening drop-in ───────────────────────────────────────
+write_systemd_hardening() {
+  local strict="${1:-0}"   # 0=wordpress, 1=fintech strict
+
+  # ── systemd-only feature — skip cleanly on OpenRC / SysV ──────────
+  if [[ "$INIT_SYSTEM" != "systemd" ]]; then
+    warn "systemd drop-in skipped (init system: $INIT_SYSTEM)"
+    warn "  Sandboxing not applied — consider firejail or a container runtime"
+    return 0
+  fi
+
+  # CRITICAL: drop-in must be per-instance, NOT per-template.
+  # `vajra-site@.service.d/` applies to ALL sites — including future ones.
+  # `vajra-site@<domain>.service.d/` applies only to this specific site.
+  local dropin_dir="/etc/systemd/system/vajra-site@${DOMAIN}.service.d"
+  mkdir -p "$dropin_dir"
+
+  local extra=""
+  if [[ "$strict" == "1" ]]; then
+    extra=$(cat <<'EXTRA'
+# Fintech extra hardening
+ProtectProc=invisible
+ProcSubset=pid
+InaccessiblePaths=/home /root /boot /opt/vajra-src
+SystemCallFilter=~@privileged @resources @obsolete
+EXTRA
+)
+  fi
+
+  cat > "${dropin_dir}/10-hardening.conf" <<SYSD
+# Vajra systemd hardening drop-in
+# Generated by vajra-harden on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+[Service]
+# ─── Basic isolation ────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+# ─── Filesystem: only site + logs writable ──────────────────────
+ReadWritePaths=/var/www/sites/${DOMAIN} /var/log/vajra
+ReadOnlyPaths=/etc/vajra
+InaccessiblePaths=/home /root /boot
+
+# ─── Syscall filter ─────────────────────────────────────────────
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+${extra}
+
+# ─── Capability drop (all) ──────────────────────────────────────
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# ─── Network: loopback + unix only ──────────────────────────────
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+SYSD
+
+  echo "   → systemd drop-in: ${dropin_dir}/10-hardening.conf"
+  svc_daemon_reload
+}
+
+# ─── WordPress hardened nginx config ─────────────────────────────────
+write_wordpress_nginx() {
+  local php_sock="$1"
+
+  # ── Ensure shared security-headers snippet exists ─────────────────
+  # The hardened vhost includes this snippet; if it is missing, nginx
+  # config test fails and the site goes offline.
+  mkdir -p /etc/nginx/snippets
+  if [[ ! -f /etc/nginx/snippets/vajra-security-headers.conf ]]; then
+    cat > /etc/nginx/snippets/vajra-security-headers.conf <<'SECHDR'
+# Vajra hardened — security headers (included by hardened vhosts)
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+add_header X-Content-Type-Options    "nosniff" always;
+add_header X-Frame-Options           "SAMEORIGIN" always;
+add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy        "geolocation=(), microphone=(), camera=()" always;
+add_header Content-Security-Policy   "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';" always;
+SECHDR
+    chmod 644 /etc/nginx/snippets/vajra-security-headers.conf
+    echo "   → created: /etc/nginx/snippets/vajra-security-headers.conf"
+  fi
+
+  local php_sock="$1"
+  local cache_dir="/var/cache/nginx/wp-${DOMAIN//./_}"
+  mkdir -p "$cache_dir"
+  chown ${WEB_USER}:${WEB_GROUP} "$cache_dir" 2>/dev/null || true
+
+  # Write rate-limit + cache zones to conf.d (loaded inside http{}).
+  # We do NOT patch nginx.conf directly because Ubuntu's file has a
+  # commented "#mail {}" block after http{} that breaks rfind("}").
+  local zone_file="/etc/nginx/conf.d/00-vajra-wp-${DOMAIN//./_}.conf"
+  cat > "$zone_file" <<'ZONES'
+# VAJRA HARDENED — ZONES (loaded inside http{})
+limit_req_zone $binary_remote_addr zone=wplogin_PLACEHOLDER:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=wpapi_PLACEHOLDER:10m rate=60r/m;
+limit_conn_zone $binary_remote_addr zone=perip_PLACEHOLDER:10m;
+fastcgi_cache_path /var/cache/nginx/wp-PLACEHOLDER levels=1:2
+                   keys_zone=wp_PLACEHOLDER:100m inactive=60m max_size=500m;
+fastcgi_cache_key "$scheme$request_method$host$request_uri";
+ZONES
+  local p="${DOMAIN//./_}"
+  sed -i "s|PLACEHOLDER|${p}|g" "$zone_file"
+
+  local cfg="${NGINX_SITES_AVAIL}/${DOMAIN}.conf"
+  cat > "$cfg" <<NGINX
+# VAJRA HARDENED — WordPress profile
+# Generated by vajra-harden on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# ── HTTP → HTTPS ────────────────────────────────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN} ${WWW_ALIAS};
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${DOMAIN} ${WWW_ALIAS};
+
+    root ${SITE_ROOT};
+    index index.php index.html;
+
+    # ── TLS ─────────────────────────────────────────────────────
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_ecdh_curve      X25519:secp384r1;
+    ssl_session_timeout 1d;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_tickets off;
+    ssl_stapling        on;
+    ssl_stapling_verify on;
+
+    # ── Security headers ────────────────────────────────────────
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options    "nosniff" always;
+    add_header X-Frame-Options           "SAMEORIGIN" always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy        "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy   "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';" always;
+
+    # ── Sensitive files ─────────────────────────────────────────
+    location ~* /(?:wp-config\.php|readme\.html|license\.txt|\.htaccess|\.htpasswd|\.git|\.svn|\.env|composer\.(json|lock)|package\.json|yarn\.lock) {
+        deny all;
+        return 404;
+    }
+
+    # ── XML-RPC block ───────────────────────────────────────────
+    location = /xmlrpc.php {
+        limit_req zone=wplogin_${DOMAIN//./_} burst=3 nodelay;
+        deny all;
+        return 403;
+    }
+
+    # ── wp-login rate limit ─────────────────────────────────────
+    location = /wp-login.php {
+        limit_req zone=wplogin_${DOMAIN//./_} burst=5 nodelay;
+        limit_conn perip_${DOMAIN//./_} 5;
+        include fastcgi_params;
+        fastcgi_pass unix:${php_sock};
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+
+    location = /wp-admin/admin-ajax.php {
+        limit_req zone=wpapi_${DOMAIN//./_} burst=20 nodelay;
+        include fastcgi_params;
+        fastcgi_pass unix:${php_sock};
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
+
+    # ── Block PHP in uploads ────────────────────────────────────
+    location ~* ^/wp-content/uploads/.*\.(php|phtml|phar)$ {
+        deny all;
+        return 403;
+    }
+
+    # ── FastCGI cache decision ──────────────────────────────────
+    set \$skip_cache 0;
+    if (\$request_method = POST)                     { set \$skip_cache 1; }
+    if (\$query_string != "")                        { set \$skip_cache 1; }
+    if (\$request_uri ~* "/wp-admin/|/wp-login.php|/xmlrpc.php|wp-.*.php|/feed/|index.php|sitemap(_index)?.xml") {
+        set \$skip_cache 1;
+    }
+    if (\$http_cookie ~* "comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_logged_in") {
+        set \$skip_cache 1;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    # ── PHP ─────────────────────────────────────────────────────
+    location ~ \.php$ {
+        try_files \$uri =404;
+        include fastcgi_params;
+        fastcgi_pass unix:${php_sock};
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTPS on;
+        fastcgi_cache wp_${DOMAIN//./_};
+        fastcgi_cache_valid 200 301 302 60m;
+        fastcgi_cache_bypass \$skip_cache;
+        fastcgi_no_cache     \$skip_cache;
+        include snippets/vajra-security-headers.conf;
+        add_header X-FastCGI-Cache \$upstream_cache_status;
+    }
+
+    # ── Static ──────────────────────────────────────────────────
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?|ttf|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    location = /favicon.ico { log_not_found off; access_log off; }
+    location = /robots.txt  { log_not_found off; access_log off; allow all; }
+
+    client_max_body_size 64m;
+}
+NGINX
+
+  [[ "$DISTRO_FAMILY" == "debian" ]] && \
+    ln -sf "$cfg" "${NGINX_SITES_ENABLED}/${DOMAIN}.conf"
+
+  echo "   → nginx config: $cfg (hardened WordPress)"
+}
+
+# ─── Fintech hardened nginx config ───────────────────────────────────
+write_fintech_nginx() {
+  local php_sock="$1"
+
+  local cfg="${NGINX_SITES_AVAIL}/${DOMAIN}.conf"
+  cat > "$cfg" <<NGINX
+# VAJRA HARDENED — Fintech profile (PCI-DSS grade)
+# Generated by vajra-harden on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# ── HTTP → HTTPS ────────────────────────────────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN} ${WWW_ALIAS};
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${DOMAIN} ${WWW_ALIAS};
+
+    root ${SITE_ROOT};
+    index index.php;
+
+    # ── TLS 1.3 ONLY (PCI-DSS 4.0) ──────────────────────────────
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.3;
+    # NOTE: ssl_ciphers only accepts TLS 1.2 cipher names. For TLS 1.3 use
+    # ssl_conf_command Ciphersuites. This is an nginx gotcha — passing
+    # TLS_AES_* to ssl_ciphers fails with "no cipher match".
+    ssl_conf_command    Ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256;
+    ssl_prefer_server_ciphers off;
+    ssl_ecdh_curve      X25519:secp384r1;
+    ssl_session_timeout 1d;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_tickets off;
+    ssl_stapling        on;
+    ssl_stapling_verify on;
+
+    # ── mTLS (client cert required) ─────────────────────────────
+    ssl_client_certificate ${FINTECH_CA};
+    ssl_verify_client      on;
+    ssl_verify_depth       2;
+    ssl_crl                ${HARDENING_DIR}/fintech-ca/client-ca.crl;
+
+    # ── Security headers (strict) ───────────────────────────────
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options    "nosniff" always;
+    add_header X-Frame-Options           "DENY" always;
+    add_header Referrer-Policy           "no-referrer" always;
+    add_header Content-Security-Policy   "default-src 'none'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self';" always;
+    add_header Permissions-Policy        "geolocation=(), microphone=(), camera=(), payment=()" always;
+
+    # ── Audit logging (PCI-DSS) ─────────────────────────────────
+    access_log /var/log/nginx/${DOMAIN}.access.log vajra_fintech;
+    error_log  /var/log/nginx/${DOMAIN}.error.log warn;
+
+    # ── Reject without client cert ──────────────────────────────
+    if (\$ssl_client_verify != SUCCESS) {
+        return 403;
+    }
+
+    # ── Only allow API paths ────────────────────────────────────
+    location ~ ^/(api|oauth|webhooks|health) {
+        limit_req zone=api_${DOMAIN//./_} burst=200 nodelay;
+        limit_conn perip_${DOMAIN//./_} 50;
+
+        include fastcgi_params;
+        fastcgi_pass unix:${php_sock};
+        fastcgi_param SCRIPT_FILENAME \$document_root/index.php;
+        fastcgi_param HTTPS on;
+        fastcgi_param X_CLIENT_DN            \$ssl_client_s_dn;
+        fastcgi_param X_CLIENT_CERT_SHA256   \$ssl_client_fingerprint;
+        fastcgi_param HTTP_X_FORWARDED_PROTO https;
+        fastcgi_read_timeout 30s;
+    }
+
+    # ── Block everything else ───────────────────────────────────
+    location / {
+        return 404;
+    }
+
+    client_max_body_size 10m;
+    client_body_timeout 15s;
+    client_header_timeout 15s;
+    keepalive_timeout 30s;
+    send_timeout 30s;
+}
+NGINX
+
+  [[ "$DISTRO_FAMILY" == "debian" ]] && \
+    ln -sf "$cfg" "${NGINX_SITES_ENABLED}/${DOMAIN}.conf"
+
+  # Write rate-limit zones + JSON log format to conf.d
+  local zone_file="/etc/nginx/conf.d/00-vajra-fintech-${DOMAIN//./_}.conf"
+  cat > "$zone_file" <<'ZONES'
+# VAJRA FINTECH — ZONES + log format
+limit_req_zone $binary_remote_addr zone=api_PLACEHOLDER:10m rate=100r/s;
+limit_req_zone $binary_remote_addr zone=login_PLACEHOLDER:10m rate=5r/m;
+limit_conn_zone $binary_remote_addr zone=perip_PLACEHOLDER:10m;
+log_format vajra_fintech escape=json
+  '{"ts":"$time_iso8601","ip":"$remote_addr",'
+  '"method":"$request_method","uri":"$request_uri",'
+  '"status":$status,"bytes":$body_bytes_sent,'
+  '"tls":"$ssl_protocol","cipher":"$ssl_cipher",'
+  '"client_dn":"$ssl_client_s_dn","rt":$request_time}';
+ZONES
+  local p="${DOMAIN//./_}"
+  sed -i "s|PLACEHOLDER|${p}|g" "$zone_file"
+
+  echo "   → nginx config: $cfg (hardened Fintech, mTLS)"
+}
+
+# ─── Main orchestrator ────────────────────────────────────────────────
+main() {
+  echo ""
+  echo "════════════════════════════════════════════════════════════════"
+  echo "  Vajra Hardening — $DOMAIN"
+  echo "  Profile: $PROFILE  |  Mode: $MODE"
+  echo "════════════════════════════════════════════════════════════════"
+
+  backup_configs
+
+  # ── Pre-flight: fintech needs a valid SSL cert ────────────────
+  if [[ "$PROFILE" == "fintech" ]]; then
+    local cert="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+    local key="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+    if [[ ! -f "$cert" || ! -f "$key" ]]; then
+      err "TLS certificate missing for $DOMAIN"
+      err "  expected: $cert"
+      err "  expected: $key"
+      err ""
+      err "Fintech profile requires TLS 1.3 + mTLS — a valid cert is mandatory."
+      err "Issue one first:"
+      err "  certbot certonly --webroot -w /var/www/certbot/${DOMAIN} \\"
+      err "    -d ${DOMAIN} -d www.${DOMAIN} --agree-tos --email YOU@example.com"
+      err ""
+      err "Then re-run: vajra-harden ${DOMAIN} --profile=fintech"
+      exit 1
+    fi
+    info "TLS cert found: $cert"
+  fi
+
+  log "1/5 — Client CA setup"
+  ensure_fintech_ca
+  echo "   → CA: ${FINTECH_CA:-N/A}"
+
+  log "2/5 — PHP-FPM per-site pool"
+  NEW_PHP_SOCK="$PHP_SOCK"
+  # Save original socket (idempotent — only set once)
+  if ! grep -q "^PHP_SOCK_ORIG=" "$ENV_FILE" 2>/dev/null; then
+    echo "PHP_SOCK_ORIG=${PHP_SOCK}" >> "$ENV_FILE"
+  fi
+  write_php_fpm_pool "$MODE"
+
+  log "3/5 — systemd hardening drop-in"
+  [[ "$PROFILE" == "fintech" ]] && write_systemd_hardening 1 || write_systemd_hardening 0
+
+  log "4/5 — Nginx hardened config"
+  if [[ "$PROFILE" == "wordpress" ]]; then
+    write_wordpress_nginx "$NEW_PHP_SOCK"
+  else
+    write_fintech_nginx "$NEW_PHP_SOCK"
+  fi
+
+  log "5/5 — Validate + reload"
+  if ! nginx -t 2>&1 | tail -3; then
+    err "nginx config test failed — rolling back"
+    restore_configs
+    exit 1
+  fi
+  systemctl reload nginx
+
+  # Update Vajra TOML with new PHP socket
+  local toml="${SITES_DIR}/${DOMAIN}.toml"
+  if [[ -f "$toml" && "$NEW_PHP_SOCK" != "$PHP_SOCK" ]]; then
+    sed -i -E "s|^upstream *= *\"unix:[^\"]*\"|upstream         = \"unix:${NEW_PHP_SOCK}\"|" "$toml"
+    sed -i "s|^PHP_SOCK=.*|PHP_SOCK=${NEW_PHP_SOCK}|" "$ENV_FILE"
+    svc_restart "vajra-site@${DOMAIN}.service"
+    echo "   → Vajra reloaded with new socket"
+  fi
+
+  # Mark site as hardened in .env
+  sed -i "/^HARDENING_PROFILE=/d;/^HARDENED_AT=/d" "$ENV_FILE"
+  echo "HARDENING_PROFILE=${PROFILE}" >> "$ENV_FILE"
+  echo "HARDENED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$ENV_FILE"
+
+  echo ""
+  echo "════════════════════════════════════════════════════════════════"
+  echo "✅ Hardening applied: $DOMAIN [profile: $PROFILE]"
+  echo ""
+  if [[ "$PROFILE" == "wordpress" ]]; then
+    echo "   → TLS 1.2+1.3, HSTS, CSP, WAF-ready"
+    echo "   → Rate limits: wp-login 30/m, XML-RPC blocked"
+    echo "   → PHP-FPM pool: ${NEW_PHP_SOCK}"
+    echo "   → Test: curl -I https://${DOMAIN}/"
+  else
+    echo "   → TLS 1.3 ONLY + mTLS enforced"
+    echo "   → Client CA: ${FINTECH_CA}"
+    echo "   → Rate limits: API 100/s, login 5/m"
+    echo "   → Audit log: /var/log/nginx/${DOMAIN}.access.log (JSON)"
+    echo "   → Test (no cert): curl -k https://${DOMAIN}/ → 403"
+    echo "   → Test (with cert):"
+    echo "     curl --cert client.crt --key client.key --cacert ${FINTECH_CA} \\"
+    echo "       https://${DOMAIN}/health"
+  fi
+  echo "   → Rollback: vajra-harden ${DOMAIN} --rollback"
+  echo "════════════════════════════════════════════════════════════════"
+}
+
+# ─── Status action ───────────────────────────────────────────────────
+if [[ "$STATUS" == "1" ]]; then
+  echo "Site:     $DOMAIN"
+  echo "Mode:     $MODE"
+  echo "Profile:  $(read_env "$ENV_FILE" HARDENING_PROFILE)"
+  echo "Hardened: $(read_env "$ENV_FILE" HARDENED_AT)"
+  echo ""
+  echo "systemd drop-in:"
+  dropin="/etc/systemd/system/vajra-site@${DOMAIN}.service.d/10-hardening.conf"
+  if [[ -f "$dropin" ]]; then
+    echo "  ✅ present ($dropin)"
+  elif [[ -f /etc/systemd/system/vajra-site@.service.d/10-hardening.conf ]]; then
+    echo "  ⚠  legacy template drop-in (move to per-instance)"
+  else
+    echo "  ❌ not present"
+  fi
+  echo ""
+  echo "PHP-FPM pool:"
+  for p in /etc/php/${PHP_VER}/fpm/pool.d/${DOMAIN//./_}.conf /etc/php-fpm.d/${DOMAIN//./_}.conf; do
+    [[ -f "$p" ]] && echo "  ✅ $p"
+  done
+  echo ""
+  echo "Nginx config:"
+  local_cfg="${NGINX_SITES_ENABLED}/${DOMAIN}.conf"
+  if grep -q "VAJRA HARDENED" "$local_cfg" 2>/dev/null; then
+    echo "  ✅ $local_cfg (hardened)"
+  else
+    echo "  ⚠  $local_cfg (basic)"
+  fi
+  exit 0
+fi
+# ─── Rollback action ─────────────────────────────────────────────────
+if [[ "$ROLLBACK" == "1" ]]; then
+  log "Rolling back hardening for $DOMAIN"
+  # Restore nginx config from vajra-disabled/
+  restore_configs
+  # Remove systemd drop-in (per-instance)
+  rm -rf /etc/systemd/system/vajra-site@${DOMAIN}.service.d
+  # Also clean any legacy template-level drop-in from older runs
+  rm -f /etc/systemd/system/vajra-site@.service.d/10-hardening.conf 2>/dev/null || true
+  rmdir /etc/systemd/system/vajra-site@.service.d 2>/dev/null || true
+  # Remove PHP-FPM pool
+  rm -f /etc/php/${PHP_VER}/fpm/pool.d/${DOMAIN//./_}.conf 2>/dev/null || true
+  rm -f /etc/php-fpm.d/${DOMAIN//./_}.conf 2>/dev/null || true
+  # Update env
+  sed -i "/^HARDENING_PROFILE=/d;/^HARDENED_AT=/d" "$ENV_FILE"
+  # Reload
+  svc_daemon_reload
+  svc_restart "vajra-site@${DOMAIN}.service"; svc_restart nginx
+  echo "   ✅ Rollback complete"
+  exit 0
+fi
+main

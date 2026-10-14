@@ -18,6 +18,7 @@
 //! * [`admin`]        - control-plane manager + admin HTTP endpoint
 //! * [`arena`], [`config`], [`date`], [`sys`] - supporting pieces
 
+pub mod cli;
 pub mod access;
 pub mod admin;
 pub mod arena;

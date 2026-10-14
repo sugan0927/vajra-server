@@ -100,6 +100,15 @@ fn die(msg: String) -> ! {
 }
 
 fn main() {
+    // ── Integrated CLI dispatcher ────────────────────────────────
+    // Handles `vajra init`, `vajra site ...`, `vajra harden ...`,
+    // `vajra rollback ...`, `vajra status ...`, `vajra list`.
+    // Returns None for everything else (server mode, `wp`, `setup`),
+    // so the existing code below runs unchanged.
+    if let Some(code) = vajra::cli::try_dispatch() {
+        std::process::exit(code);
+    }
+
     // ── `vajra wp` subcommand ────────────────────────────────────
     // Fast path: if the first arg is `wp`, hand everything after it to
     // wp-cli and exit. Nothing else in main runs (no config load, no
