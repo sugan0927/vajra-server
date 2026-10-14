@@ -140,11 +140,32 @@ fn explicit_path_wins_over_env() {
 
 #[test]
 fn missing_wp_returns_127() {
-    let tmp = tmpdir("missing"); // empty dir, no `wp` inside
-    let args = ["core".into(), "version".into()];
-    let code = with_path_prefix(&tmp, || vajra::wp::run(&args));
-    assert_eq!(code, 127);
-    let _ = std::fs::remove_dir_all(&tmp);
+    // This test must be environment-agnostic: on many CI/dev hosts
+    // wp-cli is installed at /usr/local/bin/wp, which would make
+    // `vajra wp ...` return 0 instead of 127. We override PATH with
+    // a directory that exists but is guaranteed to be empty, so the
+    // `wp` shell lookup fails no matter what the host has.
+    let empty = std::env::temp_dir().join(format!(
+        "vajra-empty-path-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vajra"))
+        .args(["wp", "core", "version"])
+        .env("PATH", &empty)
+        .output()
+        .expect("failed to run vajra");
+
+    let _ = std::fs::remove_dir_all(&empty);
+
+    assert_eq!(
+        out.status.code(),
+        Some(127),
+        "expected exit 127 when wp is not on PATH; got {:?}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
