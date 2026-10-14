@@ -873,8 +873,16 @@ impl Worker {
         let files = d.static_files.as_ref().map(FileCache::new);
         let sites = SiteTable::build(&d.sites)
             .map_err(|e| format!("sites reload: {e}"))?;
+        // Phase 1b: rebuild the SNI resolver on every TLS reload so new
+        // per-site certs (added via vajra site add in single mode) are
+        // picked up. Sites without per-site certs fall back to the
+        // top-level [tls] cert.
         let new_tls = match (&d.tls, self.listeners.iter().any(|l| l.tls)) {
-            (Some(p), true) => Some(tls::build_server_config(&p.cert, &p.key)?),
+            (Some(p), true) => Some(tls::build_server_config_with_sni(
+                &d.sites,
+                &p.cert,
+                &p.key,
+            )?),
             _ => None,
         };
         let new_quic = self.q_build_server_config(d)?;

@@ -12,11 +12,16 @@
 
 use rustls::crypto::ring as provider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+
+use crate::config::SiteSettings;
 
 /// ALPN protocols offered, in preference order.
 pub const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
@@ -69,6 +74,94 @@ pub fn build_server_config(cert: &Path, key: &Path) -> Result<Arc<ServerConfig>,
 
     cfg.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
     // Stateless session tickets (per-worker keys, see module docs).
+    cfg.ticketer = provider::Ticketer::new().map_err(|e| format!("tls ticketer: {e}"))?;
+    Ok(Arc::new(cfg))
+}
+
+/// Load a PEM cert chain + private key into a [`CertifiedKey`] that
+/// rustls can hand out during SNI resolution.
+fn load_certified_key(cert: &Path, key: &Path) -> Result<Arc<CertifiedKey>, String> {
+    let (certs, key) = load_pems(cert, key)?;
+    let signing_key = provider::default_provider()
+        .key_provider
+        .load_private_key(key)
+        .map_err(|e| format!("tls: signing key {}: {e}", cert.display()))?;
+    Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
+}
+
+/// SNI-based certificate resolver.
+///
+/// Maps each site's `host` (and its `aliases`, lowercased) to that
+/// site's [`CertifiedKey`]. Falls back to `default` when the
+/// ClientHello carries no SNI or names an unknown host, so existing
+/// single-cert deployments keep working when no site sets per-site
+/// TLS fields.
+#[derive(Debug)]
+pub struct SniResolver {
+    by_host: HashMap<String, Arc<CertifiedKey>>,
+    default: Arc<CertifiedKey>,
+}
+
+impl SniResolver {
+    pub fn new(sites: &[SiteSettings], default: Arc<CertifiedKey>) -> Self {
+        let mut by_host: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
+        for site in sites {
+            let (Some(cert_path), Some(key_path)) = (&site.tls_cert, &site.tls_key) else {
+                continue;
+            };
+            let ck = match load_certified_key(cert_path, key_path) {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!(
+                        "vajra: SNI: site {}: skipping cert {}: {e}",
+                        site.host,
+                        cert_path.display()
+                    );
+                    continue;
+                }
+            };
+            by_host.insert(site.host.to_lowercase(), ck.clone());
+            for alias in &site.aliases {
+                by_host.insert(alias.to_lowercase(), ck.clone());
+            }
+        }
+        Self { by_host, default }
+    }
+}
+
+impl ResolvesServerCert for SniResolver {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        if let Some(name) = hello.server_name() {
+            if let Some(ck) = self.by_host.get(&name.to_lowercase()) {
+                return Some(ck.clone());
+            }
+        }
+        Some(self.default.clone())
+    }
+}
+
+/// Build a `ServerConfig` that dispatches by SNI over `sites`, using
+/// `(default_cert, default_key)` for any ClientHello that does not
+/// match a configured per-site cert.
+///
+/// The default pair is usually the top-level `[tls]` cert from
+/// `globals.toml`; sites without `tls_cert`/`tls_key` simply don't
+/// contribute an entry and rely on the fallback.
+pub fn build_server_config_with_sni(
+    sites: &[SiteSettings],
+    default_cert: &Path,
+    default_key: &Path,
+) -> Result<Arc<ServerConfig>, String> {
+    let default = load_certified_key(default_cert, default_key)?;
+    let resolver = Arc::new(SniResolver::new(sites, default));
+
+    let mut cfg = ServerConfig::builder_with_provider(Arc::new(provider::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("tls: {e}"))?
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+
+    cfg.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
     cfg.ticketer = provider::Ticketer::new().map_err(|e| format!("tls ticketer: {e}"))?;
     Ok(Arc::new(cfg))
 }

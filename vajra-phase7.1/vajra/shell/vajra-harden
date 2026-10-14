@@ -457,7 +457,7 @@ write_systemd_hardening() {
 # Fintech extra hardening
 ProtectProc=invisible
 ProcSubset=pid
-InaccessiblePaths=/home /root /boot /opt/vajra-src
+InaccessiblePaths=/home /root /boot
 SystemCallFilter=~@privileged @resources @obsolete
 EXTRA
 )

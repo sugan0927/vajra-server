@@ -328,7 +328,7 @@ fn main() {
                         fd: sock.as_raw_fd(),
                         tls: true,
                     });
-                    match tls::build_server_config(&t.cert, &t.key) {
+                    match tls::build_server_config_with_sni(&dynamic.sites, &t.cert, &t.key) {
                         Ok(c) => tls_cfg = Some(c),
                         Err(e) => {
                             let _ = ready.send(Err(format!("worker {core}: {e}")));
