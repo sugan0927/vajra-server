@@ -112,6 +112,19 @@ impl SiteTable {
     pub fn hosts(&self) -> impl Iterator<Item = &str> {
         self.sites.iter().map(|s| s.host.as_str())
     }
+
+    /// Mutable iteration (used by the worker to tick per-site caches).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SiteEntry> {
+        self.sites.iter_mut()
+    }
+
+    /// Tick `FileCache::set_now` on every site. Called once per event-loop
+    /// batch by the worker.
+    pub fn set_now(&mut self, now: u64) {
+        for s in &mut self.sites {
+            s.files.set_now(now);
+        }
+    }
 }
 
 /// Lowercase, strip the `:port` suffix, strip a trailing dot (FQDN form).

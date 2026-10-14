@@ -290,6 +290,7 @@ impl Default for CacheSettings {
 #[derive(Debug, Clone, Default)]
 pub struct Dynamic {
     pub static_files: Option<StaticSettings>,
+    pub sites: Vec<SiteSettings>,
     pub proxies: Vec<ProxySettings>,
     /// `None` leaves the current TLS configuration untouched.
     pub tls: Option<TlsPaths>,
@@ -366,7 +367,9 @@ impl Default for Settings {
 #[serde(deny_unknown_fields)]
 struct Raw {
     /// Phase 1a: multi-site (Host-header) routing table.
-    #[serde(default)]
+    /// TOML section is `[[site]]` (singular); the Rust field is
+    /// `sites` (plural) because it holds a list.
+    #[serde(default, rename = "site")]
     sites: Vec<RawSite>,
     #[serde(default)]
     health: Option<HealthConfig>,

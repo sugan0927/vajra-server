@@ -62,6 +62,7 @@ use crate::config::{Dynamic, StaticSettings, UpAddr};
 use crate::control::{Cmd, Inbox, Snapshot};
 use crate::date::{DateCache, DATE_LEN};
 use crate::fastcgi;
+use crate::site::SiteTable;
 use crate::h2::{FileRead, H2Conn, FILE_CHUNK};
 use crate::http::{self, Action, Ctx};
 use crate::observe::{Http, Observer};
@@ -528,6 +529,7 @@ pub struct Worker {
     live: usize,
     pool: SlabPool,
     files: Option<FileCache>,
+    sites: SiteTable,
     proxies: Rc<ProxyState>,
     cache: Cache,
     cache_max_object: usize,
@@ -616,6 +618,9 @@ impl Worker {
         let proxies = ProxyState::new(&dynamic.proxies, dynamic.cache.max_object_bytes, &mut obs.m);
         let log = open_log(dynamic.access_log.as_deref()).map_err(io::Error::other)?;
         obs.log_enabled = log.is_some();
+        let sites = SiteTable::build(&dynamic.sites)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput,
+                                        format!("sites: {e}")))?;
         let (log_fd, log_owns) = log.unwrap_or((-1, false));
 
         Ok(Self {
@@ -626,6 +631,7 @@ impl Worker {
             live: 0,
             pool: SlabPool::new(cfg.read_buf_size, cfg.max_conns)?,
             files: dynamic.static_files.as_ref().map(FileCache::new),
+            sites,
             proxies: Rc::new(proxies),
             cache: Cache::new(&dynamic.cache),
             cache_max_object: dynamic.cache.max_object_bytes,
@@ -702,6 +708,7 @@ impl Worker {
             if let Some(f) = self.files.as_mut() {
                 f.set_now(self.now);
             }
+            self.sites.set_now(self.now);
 
             let mut batch = std::mem::take(&mut self.batch);
             batch.clear();
@@ -864,6 +871,8 @@ impl Worker {
             return Err("worker is shutting down".into());
         }
         let files = d.static_files.as_ref().map(FileCache::new);
+        let sites = SiteTable::build(&d.sites)
+            .map_err(|e| format!("sites reload: {e}"))?;
         let new_tls = match (&d.tls, self.listeners.iter().any(|l| l.tls)) {
             (Some(p), true) => Some(tls::build_server_config(&p.cert, &p.key)?),
             _ => None,
@@ -873,6 +882,7 @@ impl Worker {
         let state = ProxyState::new(&d.proxies, d.cache.max_object_bytes, &mut self.obs.m);
 
         self.files = files;
+        self.sites = sites;
         self.proxies = Rc::new(state); // the old state lives on in in-flight jobs
         if let Some(t) = new_tls {
             self.tls_cfg = Some(t);
@@ -1351,11 +1361,19 @@ impl Worker {
                 .iter()
                 .find(|(n, _)| n == b"if-none-match")
                 .map(|(_, v)| v.as_slice());
+            // Phase 1a: multi-site Host-header routing. If the request's
+            // Host matches a [[site]] block, use that site's FileCache;
+            // otherwise fall back to the legacy single-[static] cache.
+            let host = std::str::from_utf8(&req.authority).unwrap_or("");
+            let files_ref: Option<&mut FileCache> = match self.sites.lookup_mut(host) {
+                Some(entry) => Some(&mut entry.files),
+                None => self.files.as_mut(),
+            };
             let reply = router::route(
                 &req.method,
                 path,
                 inm,
-                self.files.as_mut(),
+                files_ref,
                 &self.proxies.table,
             );
 
