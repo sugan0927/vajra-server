@@ -91,6 +91,21 @@ def render_site_block(meta: dict, source: Path) -> str:
             raise ValueError(f"{source}: mode = {mode} requires php_sock")
         lines.append(f'php_sock = "{toml_escape(php_sock)}"')
 
+    # Phase 1b.3: per-site TLS. Both must be present together.
+    # Absolute paths are kept verbatim; relative paths are resolved
+    # by the Rust side against the app.toml directory (same rule as
+    # the top-level [tls] cert/key).
+    tls_cert = meta.get("tls_cert", "").strip()
+    tls_key  = meta.get("tls_key",  "").strip()
+    if tls_cert and tls_key:
+        lines.append(f'tls_cert = "{toml_escape(tls_cert)}"')
+        lines.append(f'tls_key  = "{toml_escape(tls_key)}"')
+    elif tls_cert or tls_key:
+        raise ValueError(
+            f"{source}: tls_cert and tls_key must be set together "
+            f"(cert={bool(tls_cert)}, key={bool(tls_key)})"
+        )
+
     # Two newlines so consecutive [[site]] blocks are visually
     # separated in the generated TOML (cosmetic; TOML accepts
     # either, but humans read it).
