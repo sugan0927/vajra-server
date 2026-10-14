@@ -941,6 +941,7 @@ impl Settings {
     pub fn dynamic(&self) -> Dynamic {
         Dynamic {
             static_files: self.static_files.clone(),
+            sites: self.sites.clone(),
             proxies: self.proxies.clone(),
             tls: self.tls.as_ref().map(|t| TlsPaths {
                 cert: t.cert.clone(),
