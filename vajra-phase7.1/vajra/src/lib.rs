@@ -43,6 +43,7 @@ pub mod rate_limit;
 pub mod req_id;
 pub mod router;
 pub mod setup;
+pub mod site;
 pub mod static_files;
 pub mod sys;
 pub mod tls;

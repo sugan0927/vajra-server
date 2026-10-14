@@ -122,6 +122,9 @@ pub struct Settings {
     pub grace_secs: u64,
     pub worker: WorkerConfig,
     pub static_files: Option<StaticSettings>,
+    /// Phase 1a: multi-site Host-header routing. Empty = legacy single
+    /// `[static]` mode.
+    pub sites: Vec<SiteSettings>,
     pub tls: Option<TlsSettings>,
     pub quic: Option<QuicSettings>,
     pub proxies: Vec<ProxySettings>,
@@ -137,6 +140,17 @@ pub struct Settings {
 
     /// Day 23: auto-backup policy. Executor is `vajra backup run`.
     pub backup: BackupConfig,
+}
+
+/// One entry of the `[[site]]` table. Phase 1a uses only `host`,
+/// `aliases`, `root`, and `index`; later phases add `mode`, `php_sock`,
+/// and per-site TLS fields.
+#[derive(Debug, Clone)]
+pub struct SiteSettings {
+    pub host: String,
+    pub aliases: Vec<String>,
+    pub root: PathBuf,
+    pub index: String,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +342,7 @@ impl Default for Settings {
             grace_secs: 5,
             worker: WorkerConfig::default(),
             static_files: None,
+            sites: Vec::new(),
             tls: None,
             quic: None,
             proxies: Vec::new(),
@@ -350,6 +365,9 @@ impl Default for Settings {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    /// Phase 1a: multi-site (Host-header) routing table.
+    #[serde(default)]
+    sites: Vec<RawSite>,
     #[serde(default)]
     health: Option<HealthConfig>,
     #[serde(default)]
@@ -419,6 +437,17 @@ impl Default for RawLimits {
             max_proxy_response_bytes: d.max_proxy_response_bytes,
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSite {
+    host: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    root: String,
+    #[serde(default = "default_index")]
+    index: String,
 }
 
 #[derive(Deserialize)]
@@ -633,6 +662,19 @@ impl Settings {
                 s.max_cached_files,
             )?),
         };
+
+        // Phase 1a: multi-site table. Roots resolved relative to the
+        // config file's parent directory.
+        let sites: Vec<SiteSettings> = raw
+            .sites
+            .into_iter()
+            .map(|s| SiteSettings {
+                host: s.host,
+                aliases: s.aliases,
+                root: resolve(base_dir, &s.root),
+                index: s.index,
+            })
+            .collect();
 
         let tls = match raw.tls {
             None => None,
@@ -877,6 +919,7 @@ impl Settings {
                 max_proxy_response_bytes: l.max_proxy_response_bytes,
             },
             static_files,
+            sites,
             tls,
             quic,
             proxies,
