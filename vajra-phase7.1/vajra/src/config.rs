@@ -142,6 +142,21 @@ pub struct Settings {
     pub backup: BackupConfig,
 }
 
+/// How a site is served. Phase 1b runtime support lands later; these
+/// values are parsed and validated now so that config written today
+/// keeps working after the upgrade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteMode {
+    /// Static files only (default).
+    #[default]
+    Static,
+    /// FastCGI to a PHP-FPM socket, plain PHP semantics.
+    Php,
+    /// FastCGI with WordPress conventions (front controller, deny rules).
+    WordPress,
+}
+
 /// One entry of the `[[site]]` table. Phase 1a uses only `host`,
 /// `aliases`, `root`, and `index`; later phases add `mode`, `php_sock`,
 /// and per-site TLS fields.
@@ -151,6 +166,11 @@ pub struct SiteSettings {
     pub aliases: Vec<String>,
     pub root: PathBuf,
     pub index: String,
+    /// Phase 1b: parsed and stored; runtime support lands later.
+    pub mode: SiteMode,
+    /// Phase 1b: FastCGI upstream for `mode != Static`, e.g.
+    /// `"unix:/run/php/php8.5-fpm.sock"` or `"127.0.0.1:9000"`.
+    pub php_sock: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -451,6 +471,10 @@ struct RawSite {
     root: String,
     #[serde(default = "default_index")]
     index: String,
+    #[serde(default)]
+    mode: SiteMode,
+    #[serde(default)]
+    php_sock: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -676,8 +700,22 @@ impl Settings {
                 aliases: s.aliases,
                 root: resolve(base_dir, &s.root),
                 index: s.index,
+                mode: s.mode,
+                php_sock: s.php_sock,
             })
             .collect();
+
+        // Phase 1b schema: a non-static mode requires an upstream.
+        // Runtime support is not yet wired — but we accept the config
+        // now so it survives the eventual upgrade.
+        for (i, s) in sites.iter().enumerate() {
+            if s.mode != SiteMode::Static && s.php_sock.is_none() {
+                return Err(format!(
+                    "site[{i}] ({}): mode = {:?} requires php_sock",
+                    s.host, s.mode
+                ));
+            }
+        }
 
         let tls = match raw.tls {
             None => None,
