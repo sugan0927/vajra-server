@@ -132,14 +132,25 @@ impl SiteTable {
 pub fn normalize_host(raw: &str) -> String {
     let h = raw.trim();
 
+    // A bare host can be:
+    //   hostname             (0 colons)
+    //   hostname:port        (1 colon, port numeric)
+    //   IPv4 address:port    (1 colon, port numeric)
+    //   bare IPv6            (>= 2 colons, no brackets)
+    //   [IPv6]               (bracketed)
+    //   [IPv6]:port          (bracketed, port after `]`)
+    let colon_count = h.bytes().filter(|&b| b == b':').count();
+
     let h = if let Some(rest) = h.strip_prefix('[') {
-        // IPv6 literal: take everything up to `]`
+        // Bracketed IPv6: take everything up to `]`, ignore any :port after it.
         match rest.find(']') {
             Some(end) => &rest[..end],
             None => h,
         }
+    } else if colon_count >= 2 {
+        // Bare IPv6 — do not treat any `:` as a port separator.
+        h
     } else if let Some(colon) = h.rfind(':') {
-        // Only strip if everything after ':' is numeric (looks like a port).
         let before = &h[..colon];
         let after = &h[colon + 1..];
         if !after.is_empty() && after.bytes().all(|b| b.is_ascii_digit()) {

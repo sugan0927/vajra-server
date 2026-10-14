@@ -58,6 +58,7 @@ fn drive(
     req: &[u8],
 ) -> Vec<u8> {
     let mut ctx = Ctx {
+        sites: None,  // FIX: Phase 1a
         files: None,
         proxies: table,
         cache,
