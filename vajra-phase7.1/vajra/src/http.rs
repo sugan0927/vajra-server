@@ -32,6 +32,9 @@ pub const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// Per-call context borrowed from the worker.
 pub struct Ctx<'a> {
     pub files: Option<&'a mut FileCache>,
+    /// Phase 1a: multi-site table. When set, the per-request FileCache
+    /// is selected by the request's Host header.
+    pub sites: Option<&'a mut crate::site::SiteTable>,
     pub proxies: &'a ProxyTable,
     pub cache: &'a mut Cache,
     pub obs: &'a mut Observer,
@@ -354,11 +357,24 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 }
 
                 let head_only = method == "HEAD";
+                // Phase 1a: per-site FileCache selection by Host header.
+                let selected_files: Option<&mut FileCache> = match ctx.sites.as_deref_mut() {
+                    Some(st) => {
+                        let h = host
+                            .and_then(|b| std::str::from_utf8(b).ok())
+                            .unwrap_or("");
+                        match st.lookup_mut(h) {
+                            Some(entry) => Some(&mut entry.files),
+                            None => ctx.files.as_deref_mut(),
+                        }
+                    }
+                    None => ctx.files.as_deref_mut(),
+                };
                 let reply = router::route(
                     method,
                     path,
                     if_none_match,
-                    ctx.files.as_deref_mut(),
+                    selected_files,
                     ctx.proxies,
                 );
 
@@ -1068,6 +1084,7 @@ mod tests {
     fn run_in(input: &str, t: &ProxyTable, e: &mut Env) -> (Outcome, String) {
         let mut out = Vec::new();
         let mut ctx = Ctx {
+            sites: None,  // FIX4: added by Phase 1a patch
             files: None,
             proxies: t,
             cache: &mut e.cache,

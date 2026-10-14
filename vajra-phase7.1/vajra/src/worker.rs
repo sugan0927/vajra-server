@@ -1262,6 +1262,7 @@ impl Worker {
 
         let mut ctx = Ctx {
             files: self.files.as_mut(),
+            sites: Some(&mut self.sites),
             proxies: &self.proxies.table,
             cache: &mut self.cache,
             obs: &mut self.obs,
