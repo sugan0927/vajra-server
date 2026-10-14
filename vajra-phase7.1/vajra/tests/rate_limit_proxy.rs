@@ -79,7 +79,15 @@ fn drive(
 }
 
 fn is_429(out: &[u8]) -> bool {
-    out.windows(3).any(|w| w == b"429")
+    // Only inspect the HTTP status line (up to the first CRLF).
+    // A plain `windows(3).any(|w| w == b"429")` also matches
+    // `Content-Length: 429`, `Age: 429`, timestamps like `08:04:29`,
+    // and any body that happens to contain those bytes, producing
+    // rare but real false positives (see flaky
+    // `untrusted_peer_ignores_xff` before 2026-10-14).
+    let end = out.windows(2).position(|w| w == b"\r\n").unwrap_or(out.len());
+    let line = &out[..end];
+    line.ends_with(b" 429") || line.ends_with(b" 429 Too Many Requests")
 }
 
 fn only_key(rl: &RateLimiter) -> IpAddr {
