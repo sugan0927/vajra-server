@@ -148,6 +148,107 @@ regenerate_app_config() {
 
 # The single-process tail of cmd_add. Shared files/db/PHP-pool setup
 # already ran; this just publishes the site to the runtime config.
+# Phase 1b.4: obtain a Let's Encrypt certificate for a site.
+#
+# Uses the shared webroot /var/www/certbot — which is exactly what
+# vajra's built-in ACME handler (src/router.rs::acme_reply) serves.
+# The nginx-era convention of per-domain webroots
+# (/var/www/certbot/<domain>/) is deliberately dropped here: it
+# required a per-domain nginx directive just to bridge certbot's write
+# path to vajra's read path, and that bridge is the very thing we are
+# removing.  One shared webroot, no symlinks, no per-vhost overrides.
+#
+# ACME contact email sources (first non-empty wins):
+#   1. $VAJRA_CERTBOT_EMAIL
+#   2. /etc/vajra/certbot.email   (single line, trimmed)
+# Neither present → skip issuance and continue without TLS.  The site
+# itself is still added; DNS/network hiccups must never leave the
+# operator with a half-configured site.
+#
+# Never fails the caller.  A site without TLS is a working site.
+certbot_obtain_cert() {
+  local domain="$1" meta="$2"
+
+  # Already has TLS in its .meta?  Nothing to do.
+  if grep -q '^tls_cert' "$meta" 2>/dev/null; then
+    return 0
+  fi
+
+  # Cert already on disk from an earlier run?  Just record it.
+  local le="/etc/letsencrypt/live/$domain"
+  if [[ -f "$le/fullchain.pem" && -f "$le/privkey.pem" ]]; then
+    {
+      printf 'tls_cert = %s\n' "$le/fullchain.pem"
+      printf 'tls_key  = %s\n' "$le/privkey.pem"
+    } >> "$meta"
+    info "TLS: reusing existing cert for $domain"
+    return 0
+  fi
+
+  local cb; cb="$(command -v certbot || true)"
+  if [[ -z "$cb" ]]; then
+    warn "TLS: certbot not installed; skipping certificate for $domain"
+    return 0
+  fi
+
+  local email="${VAJRA_CERTBOT_EMAIL:-}"
+  if [[ -z "$email" && -f /etc/vajra/certbot.email ]]; then
+    email="$(head -n1 /etc/vajra/certbot.email | tr -d '[:space:]')"
+  fi
+  if [[ -z "$email" ]]; then
+    warn "TLS: no ACME contact email — set \$VAJRA_CERTBOT_EMAIL or"
+    warn "     write one line to /etc/vajra/certbot.email, then"
+    warn "     rerun.  Skipping cert for $domain."
+    return 0
+  fi
+
+  # Always include $domain.  Add www.$domain only if it resolves
+  # publicly — otherwise LE refuses the whole order and we lose the
+  # bare-domain cert too.
+  local -a domargs=(-d "$domain")
+  if getent hosts "www.$domain" >/dev/null 2>&1; then
+    domargs+=(-d "www.$domain")
+  fi
+
+  # Escape hatches for testing / staging.
+  local -a extra=()
+  [[ -n "${VAJRA_CERTBOT_SERVER:-}" ]] && \
+    extra+=(--server "$VAJRA_CERTBOT_SERVER")
+  [[ "${VAJRA_CERTBOT_DRY_RUN:-0}" == "1" ]] && extra+=(--dry-run)
+
+  info "TLS: requesting cert for $domain"
+  if ! "$cb" certonly \
+        --webroot -w /var/www/certbot \
+        "${domargs[@]}" \
+        --email "$email" --agree-tos --non-interactive \
+        --keep-until-expiring \
+        "${extra[@]}"; then
+    warn "TLS: certbot failed for $domain; continuing without TLS"
+    warn "     (site is still added — rerun 'vajra site add' once DNS"
+    warn "      and network look right, or run certbot manually)"
+    return 0
+  fi
+
+  # --dry-run leaves no real files; skip the .meta update so a later
+  # real run still sees a cert-less site and tries again.
+  if [[ "${VAJRA_CERTBOT_DRY_RUN:-0}" == "1" ]]; then
+    info "TLS: dry-run — .meta left untouched"
+    return 0
+  fi
+
+  if [[ ! -f "$le/fullchain.pem" || ! -f "$le/privkey.pem" ]]; then
+    warn "TLS: certbot reported success but $le is missing files"
+    return 0
+  fi
+
+  {
+    printf 'tls_cert = %s\n' "$le/fullchain.pem"
+    printf 'tls_key  = %s\n' "$le/privkey.pem"
+  } >> "$meta"
+  info "TLS: obtained cert for $domain"
+  return 0
+}
+
 cmd_add_finish_single() {
   local domain="$1" mode="$2" root="$3" aliases="$4" php_sock="$5"
 
@@ -157,6 +258,12 @@ cmd_add_finish_single() {
 
   write_site_meta "$domain" "$meta_mode" "$root" "$aliases" "$php_sock" \
     || die "Failed to write site meta"
+
+  # Phase 1b.4: attempt certificate issuance before the config regen.
+  # On success this appends tls_cert/tls_key to the .meta, so the
+  # immediately-following vajra-config-gen already sees them and the
+  # next reload picks up the new cert.
+  certbot_obtain_cert "$domain" "$(site_meta_path "$domain")"
 
   if ! regenerate_app_config; then
     # Roll back the meta we just wrote so the site doesn't half-appear.
