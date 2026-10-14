@@ -893,6 +893,46 @@ cmd_update_php() {
   sed -i "s|^PHP_VER=.*|PHP_VER=${NEW_VER}|" "$f"
   sed -i "s|^PHP_SOCK=.*|PHP_SOCK=${NEW_SOCK}|" "$f"
 
+  # ─── Path A: single-process mode ───────────────────────────────────
+  # When /etc/vajra/mode is "single", the PHP socket lives in the
+  # site's meta file, not a per-domain .toml. Update the meta and let
+  # vajra-config-gen + vajra.service pick up the change.
+  if [[ "$(vajra_runtime_mode)" == "single" ]]; then
+    local meta meta_bak
+    meta="$(site_meta_path "$D")"
+    if [[ ! -f "$meta" ]]; then
+      err "Site meta missing: $meta"
+      err "(was this site created in legacy mode? — cannot update PHP)"
+      sed -i "s|^PHP_VER=.*|PHP_VER=${CURRENT_VER}|" "$f"
+      sed -i "s|^PHP_SOCK=.*|PHP_SOCK=${CURRENT_SOCK}|" "$f"
+      exit 1
+    fi
+    meta_bak="${meta}.bak.$$"
+    cp -a "$meta" "$meta_bak"
+
+    if grep -q '^php_sock' "$meta"; then
+      sed -i "s|^php_sock *=.*|php_sock = ${NEW_SOCK}|" "$meta"
+    else
+      printf 'php_sock = %s\n' "$NEW_SOCK" >> "$meta"
+    fi
+
+    if ! regenerate_app_config; then
+      err "Config reload failed — rolling back"
+      mv -f "$meta_bak" "$meta"
+      sed -i "s|^PHP_VER=.*|PHP_VER=${CURRENT_VER}|" "$f"
+      sed -i "s|^PHP_SOCK=.*|PHP_SOCK=${CURRENT_SOCK}|" "$f"
+      regenerate_app_config >/dev/null 2>&1 || true
+      exit 1
+    fi
+    rm -f "$meta_bak"
+
+    echo ""
+    echo "✅ PHP switched: ${CURRENT_VER} → ${NEW_VER} on ${D}  (single-process)"
+    echo "   Test: https://${D}/"
+    return 0
+  fi
+
+  # ─── Legacy per-domain flow ────────────────────────────────────────
   sed -i -E "s|^upstream *= *\"unix:[^\"]*\"|upstream         = \"unix:${NEW_SOCK}\"|" \
     "${SITES_DIR}/${D}.toml"
 
@@ -980,6 +1020,44 @@ cmd_remove() {
   read -r -p "Continue? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { info "Aborted"; return; }
 
+  # ─── Path A: single-process mode ───────────────────────────────────
+  # When /etc/vajra/mode is "single", removing a site means deleting
+  # its meta file and regenerating /etc/vajra/app.toml. There is no
+  # per-domain systemd unit or nginx vhost to tear down.
+  if [[ "$(vajra_runtime_mode)" == "single" ]]; then
+    local meta meta_bak
+    meta="$(site_meta_path "$D")"
+    if [[ -f "$meta" ]]; then
+      meta_bak="${meta}.bak.$$"
+      cp -a "$meta" "$meta_bak"
+      rm -f "$meta"
+      if ! regenerate_app_config; then
+        err "Config regeneration failed — restoring meta"
+        mv -f "$meta_bak" "$meta"
+        regenerate_app_config >/dev/null 2>&1 || true
+        die "Site '$D' was NOT removed"
+      fi
+      rm -f "$meta_bak"
+    else
+      warn "No meta file for '$D' (already removed?)"
+    fi
+
+    # Common cleanup that applies in both modes.
+    rm -f "/etc/cron.d/vajra-wp-cron-${D//./_}"
+    if [[ "$KEEP_DB" == 0 && "$MODE" == "wordpress" && -n "$DB_NAME" ]]; then
+      db_exec -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`;"
+      for _h in localhost 127.0.0.1 ::1; do
+        db_exec -e "DROP USER IF EXISTS '${DB_USER}'@'${_h}';" 2>/dev/null || true
+      done
+      db_exec -e "FLUSH PRIVILEGES;"
+    fi
+    [[ "$KEEP_FILES" == 0 ]] && rm -rf "$SITE_ROOT" "${CERTBOT_ROOT}/${D}"
+    rm -f "$f"
+    echo "✅ Site '$D' removed  (single-process mode)"
+    return 0
+  fi
+
+  # ─── Legacy per-domain flow ────────────────────────────────────────
   systemctl disable --now "vajra-site@${D}.service" 2>/dev/null || true
   systemctl daemon-reload
   nginx_remove_site "$D"
