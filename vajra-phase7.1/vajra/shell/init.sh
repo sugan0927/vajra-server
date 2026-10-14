@@ -698,15 +698,21 @@ vajra_init_main() {
   local a
   for a in "$@"; do
     case "$a" in
-      --mode=*) VAJRA_MODE="${a#--mode=}";;
-      *) _args+=("$a");;
+      --mode=*)  VAJRA_MODE="${a#--mode=}";;
+      --dry-run) ;;   # already consumed by the shim
+      *)         _args+=("$a");;
     esac
   done
   case "$VAJRA_MODE" in
     legacy|single) ;;
     *) die "Unknown --mode: $VAJRA_MODE (want legacy or single)";;
   esac
-  set -- "${_args[@]:-}"
+  # Rebind positionals — guard against empty array under `set -u`.
+  if (( ${#_args[@]} > 0 )); then
+    set -- "${_args[@]}"
+  else
+    set --
+  fi
   FIRST_DOMAIN="${1:-}"
   FIRST_EMAIL="${2:-}"
 
@@ -989,6 +995,6 @@ NGINXBASE
   fi
 }
 
-if [[ "\${BASH_SOURCE[0]}" == "\${0}" ]]; then
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   vajra_init_main "$@"
 fi
