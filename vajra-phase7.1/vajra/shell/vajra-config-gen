@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+# vajra-config-gen — regenerate /etc/vajra/app.toml from:
+#   /etc/vajra/globals.toml       (static top-level sections)
+#   /etc/vajra/sites/*.meta       (per-site key=value files)
+#
+# Called after every `vajra site add|remove|update` so the running
+# Vajra process (via SIGHUP) picks up the change.
+#
+# Invocation:
+#   vajra-config-gen                     → regenerate app.toml
+#   vajra-config-gen --dry-run           → print to stdout, no write
+#   vajra-config-gen --globals FILE      → override globals path
+#   vajra-config-gen --sites DIR         → override sites dir
+#   vajra-config-gen --output FILE       → override output path
+#
+# Exit 0 = success, 1 = validation error, 2 = usage error.
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+DEFAULT_GLOBALS = Path("/etc/vajra/globals.toml")
+DEFAULT_SITES   = Path("/etc/vajra/sites")
+DEFAULT_OUTPUT  = Path("/etc/vajra/app.toml")
+
+# Host header sanity: lowercase a-z, digits, dashes, dots.
+HOST_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*[a-z0-9]$")
+
+# Parse a simple `key = "value"` / `key = value` meta file.
+# Deliberately *not* TOML — meta files are flat and easier to audit.
+def parse_meta(path: Path) -> dict:
+    out = {}
+    with path.open() as f:
+        for lineno, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"{path}:{lineno}: missing '='")
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            # Strip optional surrounding quotes
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            if k in out:
+                raise ValueError(f"{path}:{lineno}: duplicate key '{k}'")
+            out[k] = v
+    return out
+
+def toml_escape(s: str) -> str:
+    """Escape a string for a TOML basic-string value."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+def render_site_block(meta: dict, source: Path) -> str:
+    host = meta.get("host", "").strip()
+    if not host:
+        raise ValueError(f"{source}: missing 'host'")
+    if not HOST_RE.match(host):
+        raise ValueError(f"{source}: invalid host {host!r}")
+    root = meta.get("root", "").strip()
+    if not root or not root.startswith("/"):
+        raise ValueError(f"{source}: 'root' must be absolute, got {root!r}")
+
+    lines = ["[[site]]"]
+    lines.append(f'host    = "{toml_escape(host)}"')
+
+    aliases = meta.get("aliases", "").strip()
+    if aliases:
+        # comma- or space-separated
+        alist = [a.strip() for a in re.split(r"[,\s]+", aliases) if a.strip()]
+        if alist:
+            q = ", ".join(f'"{toml_escape(a)}"' for a in alist)
+            lines.append(f"aliases = [{q}]")
+
+    lines.append(f'root    = "{toml_escape(root)}"')
+
+    index = meta.get("index", "").strip()
+    if index:
+        lines.append(f'index   = "{toml_escape(index)}"')
+
+    mode = meta.get("mode", "static").strip().lower()
+    if mode not in ("static", "php", "wordpress"):
+        raise ValueError(f"{source}: invalid mode {mode!r}")
+    if mode != "static":
+        lines.append(f'mode    = "{mode}"')
+        php_sock = meta.get("php_sock", "").strip()
+        if not php_sock:
+            raise ValueError(f"{source}: mode = {mode} requires php_sock")
+        lines.append(f'php_sock = "{toml_escape(php_sock)}"')
+
+    # Two newlines so consecutive [[site]] blocks are visually
+    # separated in the generated TOML (cosmetic; TOML accepts
+    # either, but humans read it).
+    return "\n".join(lines) + "\n\n"
+
+def load_globals(path: Path) -> str:
+    if not path.is_file():
+        raise ValueError(f"globals file not found: {path}")
+    return path.read_text().rstrip() + "\n"
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--globals", default=str(DEFAULT_GLOBALS))
+    ap.add_argument("--sites",   default=str(DEFAULT_SITES))
+    ap.add_argument("--output",  default=str(DEFAULT_OUTPUT))
+    ap.add_argument("-h", "--help", action="help")
+    try:
+        args = ap.parse_args()
+    except SystemExit:
+        return 2
+
+    globals_path = Path(args.globals)
+    sites_dir    = Path(args.sites)
+    output_path  = Path(args.output)
+
+    try:
+        head = load_globals(globals_path)
+    except ValueError as e:
+        print(f"vajra-config-gen: {e}", file=sys.stderr)
+        return 1
+
+    # Collect all *.meta files, sorted by domain for stable output.
+    metas = []
+    if sites_dir.is_dir():
+        for p in sorted(sites_dir.glob("*.meta")):
+            try:
+                meta = parse_meta(p)
+            except ValueError as e:
+                print(f"vajra-config-gen: {e}", file=sys.stderr)
+                return 1
+            # Sanity: filename should match host
+            stem = p.stem
+            if meta.get("host", "").strip() != stem:
+                print(f"vajra-config-gen: {p}: 'host' must equal filename stem '{stem}'",
+                      file=sys.stderr)
+                return 1
+            metas.append((stem, meta, p))
+
+    # Emit
+    parts = [head]
+    parts.append("\n# ─── Sites (auto-generated by vajra-config-gen) ────\n\n")
+    for stem, meta, p in metas:
+        try:
+            parts.append(render_site_block(meta, p))
+        except ValueError as e:
+            print(f"vajra-config-gen: {e}", file=sys.stderr)
+            return 1
+
+    body = "".join(parts)
+
+    if args.dry_run:
+        sys.stdout.write(body)
+        return 0
+
+    # Atomic write: temp + rename
+    tmp = output_path.with_suffix(output_path.suffix + ".tmp")
+    try:
+        tmp.write_text(body)
+        os.replace(tmp, output_path)
+    except OSError as e:
+        print(f"vajra-config-gen: cannot write {output_path}: {e}", file=sys.stderr)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return 1
+
+    print(f"vajra-config-gen: wrote {output_path} ({len(metas)} site(s))")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
