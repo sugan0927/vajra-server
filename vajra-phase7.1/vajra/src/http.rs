@@ -612,6 +612,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
 pub fn reply_meta(reply: &Reply, head_only: bool) -> (u16, u64) {
     match reply {
         Reply::Mem { status, body, .. } => (*status, if head_only { 0 } else { body.len() as u64 }),
+        Reply::Acme(body) => (200, if head_only { 0 } else { body.len() as u64 }),
         Reply::File { file, not_modified } => {
             if *not_modified {
                 (304, 0)
@@ -731,6 +732,24 @@ fn write_reply(
                 );
                 (!head_only && file.size > 0).then(|| Rc::clone(file))
             }
+        }
+        Reply::Acme(body) => {
+            // ACME HTTP-01 tokens are small, non-user content, and served
+            // as text/plain. No compression, no extra headers: what the
+            // filesystem has is exactly what the ACME server must see.
+            write_head(
+                out,
+                200,
+                b"",
+                router::TEXT,
+                body.len() as u64,
+                keep_alive,
+                date,
+            );
+            if !head_only {
+                out.extend_from_slice(body);
+            }
+            None
         }
         Reply::BadRequest => {
             write_error(out, 400, date);
@@ -988,6 +1007,15 @@ pub fn h2_response(reply: &Reply, head_only: bool, date: &[u8; DATE_LEN]) -> H2R
                 }
             }
         }
+        Reply::Acme(body) => H2Response {
+            status: 200,
+            headers: h2_base(date, router::TEXT, body.len() as u64),
+            body: if head_only {
+                H2Body::Empty
+            } else {
+                H2Body::Mem(body.clone())
+            },
+        },
         Reply::BadRequest | Reply::Proxy(_) | Reply::Php(..) => h2_error(400, date),
     }
 }

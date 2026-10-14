@@ -14,6 +14,10 @@ pub const BODY_ROOT: &[u8] = b"Vajra: hello from io_uring\n";
 pub const BODY_HEALTH: &[u8] = b"ok\n";
 pub const BODY_404: &[u8] = b"not found\n";
 pub const BODY_405: &[u8] = b"method not allowed\n";
+/// URL prefix served by the built-in ACME HTTP-01 challenge handler.
+pub const ACME_PREFIX: &str = "/.well-known/acme-challenge/";
+/// Filesystem directory that `certbot --webroot` populates with tokens.
+pub const ACME_ROOT: &str = "/var/www/certbot/.well-known/acme-challenge";
 
 pub enum Reply {
     /// A small fixed response.
@@ -32,6 +36,10 @@ pub enum Reply {
     Proxy(usize),
     /// Run a PHP script through the FastCGI route `.0`.
     Php(usize, Box<Target>),
+    /// ACME HTTP-01 challenge response: raw token bytes served as
+    /// `text/plain` with a 200 status. Owned because token files are
+    /// read from disk at request time.
+    Acme(Vec<u8>),
     /// Malformed or malicious request target.
     BadRequest,
 }
@@ -66,6 +74,13 @@ pub fn route(
 ) -> Reply {
     let is_read = method == "GET" || method == "HEAD";
 
+    // ACME HTTP-01 gets top priority — must be servable before any
+    // site is fully configured, and must not be shadowed by a
+    // catch-all PHP front controller or a proxy prefix.
+    if let Some(token) = path.strip_prefix(ACME_PREFIX) {
+        return acme_reply(method, token);
+    }
+
     if path == "/health" && is_read {
         return mem(200, BODY_HEALTH);
     }
@@ -98,6 +113,42 @@ pub fn route(
         },
         None if path == "/" => mem(200, BODY_ROOT),
         None => mem(404, BODY_404),
+    }
+}
+
+/// Serve a single ACME HTTP-01 challenge token from [`ACME_ROOT`].
+///
+/// Per RFC 8555 §8.3 the token is base64url (A–Z, a–z, 0–9, `-`, `_`).
+/// Restricting the charset rules out `..`, `/`, and URL-escaped
+/// surprises without needing a separate path-traversal check.
+///
+/// Non-read methods get a 405 so renewal clients see a clear "wrong
+/// verb" instead of a misleading 404.
+fn acme_reply(method: &str, token: &str) -> Reply {
+    const MAX_TOKEN_BYTES: usize = 4096;
+    const MAX_TOKEN_LEN: usize = 128;
+
+    if method != "GET" && method != "HEAD" {
+        return Reply::Mem {
+            status: 405,
+            ctype: TEXT,
+            body: BODY_405,
+            allow: true,
+        };
+    }
+    if token.is_empty()
+        || token.len() > MAX_TOKEN_LEN
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return mem(404, BODY_404);
+    }
+
+    let path = std::path::Path::new(ACME_ROOT).join(token);
+    match std::fs::read(&path) {
+        Ok(bytes) if bytes.len() <= MAX_TOKEN_BYTES => Reply::Acme(bytes),
+        _ => mem(404, BODY_404),
     }
 }
 
@@ -273,6 +324,35 @@ mod tests {
         assert!(matches!(r("GET", "/%2e%2e/x"), Reply::BadRequest));
         // The PHP route is never matched by prefix.
         assert_eq!(t.find("/anything"), None);
+    }
+
+    #[test]
+    fn acme_token_charset_and_missing_file() {
+        let t = ProxyTable::empty();
+
+        // Slash and dot are not in the base64url alphabet → 404 without
+        // ever touching the filesystem. This is what keeps the handler
+        // safe from `..` and `/etc/passwd` style attacks.
+        assert!(matches!(
+            route("GET", "/.well-known/acme-challenge/../etc/passwd", None, None, &t),
+            Reply::Mem { status: 404, .. }
+        ));
+        assert!(matches!(
+            route("GET", "/.well-known/acme-challenge/a/b", None, None, &t),
+            Reply::Mem { status: 404, .. }
+        ));
+
+        // Non-read methods → 405 with `Allow: GET, HEAD` behavior.
+        assert!(matches!(
+            route("POST", "/.well-known/acme-challenge/tok", None, None, &t),
+            Reply::Mem { status: 405, allow: true, .. }
+        ));
+
+        // Well-formed token that just isn't on disk → 404, not panic.
+        assert!(matches!(
+            route("GET", "/.well-known/acme-challenge/abc123_-XYZ", None, None, &t),
+            Reply::Mem { status: 404, .. }
+        ));
     }
 
     #[test]
