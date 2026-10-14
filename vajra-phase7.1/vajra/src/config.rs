@@ -171,6 +171,13 @@ pub struct SiteSettings {
     /// Phase 1b: FastCGI upstream for `mode != Static`, e.g.
     /// `"unix:/run/php/php8.5-fpm.sock"` or `"127.0.0.1:9000"`.
     pub php_sock: Option<String>,
+    /// Phase 1b: per-site TLS certificate chain (PEM). When set,
+    /// `tls_key` must also be set. SNI in the worker picks the right
+    /// cert for the incoming ClientHello. When `None`, the global
+    /// `[tls]` cert from `TlsSettings` is used instead.
+    pub tls_cert: Option<PathBuf>,
+    /// Phase 1b: per-site private key (PEM) matching `tls_cert`.
+    pub tls_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -475,6 +482,14 @@ struct RawSite {
     mode: SiteMode,
     #[serde(default)]
     php_sock: Option<String>,
+    /// Phase 1b: per-site TLS certificate (PEM chain). Path may be
+    /// relative to the config file's directory.
+    #[serde(default)]
+    tls_cert: Option<String>,
+    /// Phase 1b: per-site TLS private key (PEM). Must be set whenever
+    /// `tls_cert` is set.
+    #[serde(default)]
+    tls_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -692,18 +707,53 @@ impl Settings {
 
         // Phase 1a: multi-site table. Roots resolved relative to the
         // config file's parent directory.
-        let sites: Vec<SiteSettings> = raw
-            .sites
-            .into_iter()
-            .map(|s| SiteSettings {
+        // Phase 1b: each site may carry its own TLS cert/key pair for
+        // SNI-based dispatch. Both must be set together, and both must
+        // be readable at load time — a missing file is a config error,
+        // not a runtime surprise.
+        let mut sites: Vec<SiteSettings> = Vec::with_capacity(raw.sites.len());
+        for s in raw.sites.into_iter() {
+            let (tls_cert, tls_key) = match (s.tls_cert.as_deref(), s.tls_key.as_deref()) {
+                (Some(c), Some(k)) => {
+                    let cert = resolve(base_dir, c);
+                    let key = resolve(base_dir, k);
+                    if !cert.is_file() {
+                        return Err(format!(
+                            "site {}: tls_cert {} is not a file",
+                            s.host,
+                            cert.display()
+                        ));
+                    }
+                    if !key.is_file() {
+                        return Err(format!(
+                            "site {}: tls_key {} is not a file",
+                            s.host,
+                            key.display()
+                        ));
+                    }
+                    (Some(cert), Some(key))
+                }
+                (None, None) => (None, None),
+                _ => {
+                    return Err(format!(
+                        "site {}: tls_cert and tls_key must be set together (cert={}, key={})",
+                        s.host,
+                        s.tls_cert.is_some(),
+                        s.tls_key.is_some()
+                    ));
+                }
+            };
+            sites.push(SiteSettings {
                 host: s.host,
                 aliases: s.aliases,
                 root: resolve(base_dir, &s.root),
                 index: s.index,
                 mode: s.mode,
                 php_sock: s.php_sock,
-            })
-            .collect();
+                tls_cert,
+                tls_key,
+            });
+        }
 
         // Phase 1b schema: a non-static mode requires an upstream.
         // Runtime support is not yet wired — but we accept the config
