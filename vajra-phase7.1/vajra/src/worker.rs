@@ -62,7 +62,8 @@ use crate::config::{Dynamic, StaticSettings, UpAddr};
 use crate::control::{Cmd, Inbox, Snapshot};
 use crate::date::{DateCache, DATE_LEN};
 use crate::fastcgi;
-use crate::site::SiteTable;
+use crate::php::PhpConfig;
+use crate::site::{SiteEntry, SiteTable};
 use crate::h2::{FileRead, H2Conn, FILE_CHUNK};
 use crate::http::{self, Action, Ctx};
 use crate::observe::{Http, Observer};
@@ -615,12 +616,16 @@ impl Worker {
 
         let mut obs = Observer::new();
         obs.format = dynamic.log_format;
-        let proxies = ProxyState::new(&dynamic.proxies, dynamic.cache.max_object_bytes, &mut obs.m);
+        // Phase 1b: SiteTable::build also returns synthetic per-site
+        // PHP routes which must be appended to the user's [[proxy]] list
+        // *before* ProxyState::new indexes the combined table.
+        let (sites, synthetic_proxies) = SiteTable::build(&dynamic.sites)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sites: {e}")))?;
+        let mut all_proxies = dynamic.proxies.clone();
+        all_proxies.extend(synthetic_proxies);
+        let proxies = ProxyState::new(&all_proxies, dynamic.cache.max_object_bytes, &mut obs.m);
         let log = open_log(dynamic.access_log.as_deref()).map_err(io::Error::other)?;
         obs.log_enabled = log.is_some();
-        let sites = SiteTable::build(&dynamic.sites)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput,
-                                        format!("sites: {e}")))?;
         let (log_fd, log_owns) = log.unwrap_or((-1, false));
 
         Ok(Self {
@@ -871,7 +876,7 @@ impl Worker {
             return Err("worker is shutting down".into());
         }
         let files = d.static_files.as_ref().map(FileCache::new);
-        let sites = SiteTable::build(&d.sites)
+        let (sites, synthetic_proxies) = SiteTable::build(&d.sites)
             .map_err(|e| format!("sites reload: {e}"))?;
         // Phase 1b: rebuild the SNI resolver on every TLS reload so new
         // per-site certs (added via vajra site add in single mode) are
@@ -887,7 +892,11 @@ impl Worker {
         };
         let new_quic = self.q_build_server_config(d)?;
         let log = open_log(d.access_log.as_deref())?; // re-opens the file: log rotation via reload
-        let state = ProxyState::new(&d.proxies, d.cache.max_object_bytes, &mut self.obs.m);
+        // Append synthetic per-site PHP routes so the reloaded
+        // ProxyTable matches what SiteTable::build produced above.
+        let mut all_proxies = d.proxies.clone();
+        all_proxies.extend(synthetic_proxies);
+        let state = ProxyState::new(&all_proxies, d.cache.max_object_bytes, &mut self.obs.m);
 
         self.files = files;
         self.sites = sites;
@@ -1374,8 +1383,15 @@ impl Worker {
             // Host matches a [[site]] block, use that site's FileCache;
             // otherwise fall back to the legacy single-[static] cache.
             let host = std::str::from_utf8(&req.authority).unwrap_or("");
+            let mut site_php: Option<(usize, &PhpConfig)> = None;
             let files_ref: Option<&mut FileCache> = match self.sites.lookup_mut(host) {
-                Some(entry) => Some(&mut entry.files),
+                Some(entry) => {
+                    let SiteEntry { php, php_route_idx, files, .. } = entry;
+                    if let (Some(cfg), Some(idx)) = (php.as_ref(), *php_route_idx) {
+                        site_php = Some((idx, cfg));
+                    }
+                    Some(files)
+                }
                 None => self.files.as_mut(),
             };
             let reply = router::route(
@@ -1384,6 +1400,7 @@ impl Worker {
                 inm,
                 files_ref,
                 &self.proxies.table,
+                site_php,
             );
 
             if let Some((ri, php_target)) = reply.proxy_parts() {

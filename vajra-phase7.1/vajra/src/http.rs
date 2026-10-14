@@ -376,6 +376,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                     if_none_match,
                     selected_files,
                     ctx.proxies,
+                    None, // legacy H1 path has no per-site PHP dispatch
                 );
 
                 if let Some((ri, php_target)) = reply.proxy_parts() {

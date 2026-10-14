@@ -394,6 +394,7 @@ impl Worker {
             inm,
             self.files.as_mut(),
             &self.proxies.table,
+            None, // QUIC path has no per-site PHP dispatch
         );
 
         if let Some((ri, php_target)) = reply.proxy_parts() {

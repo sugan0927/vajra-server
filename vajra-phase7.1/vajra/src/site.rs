@@ -7,7 +7,8 @@
 //! If no `[[site]]` blocks are configured, this table is empty and the
 //! worker falls back to the legacy single-`[static]` behaviour.
 
-use crate::config::{SiteSettings, StaticSettings};
+use crate::config::{Balance, ProxySettings, SiteMode, SiteSettings, StaticSettings, UpAddr};
+use crate::php::PhpConfig;
 use crate::static_files::FileCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,6 +19,11 @@ pub struct SiteEntry {
     pub root: PathBuf,
     pub index: String,
     pub files: FileCache,
+    /// Phase 1b: `Some` if this site's mode is php/wordpress.
+    pub php: Option<PhpConfig>,
+    /// Index into the combined `[[proxy]]` table (user proxies followed
+    /// by synthetic per-site PHP routes).  None when `php` is None.
+    pub php_route_idx: Option<usize>,
 }
 
 pub struct SiteTable {
@@ -45,9 +51,10 @@ impl SiteTable {
     /// Build the table from `[[site]]` config blocks. Every `root` must
     /// exist as a directory; the file cache is built eagerly so the first
     /// request does not pay the setup cost.
-    pub fn build(cfgs: &[SiteSettings]) -> Result<Self, String> {
+    pub fn build(cfgs: &[SiteSettings]) -> Result<(Self, Vec<ProxySettings>), String> {
         let mut sites = Vec::with_capacity(cfgs.len());
         let mut by_host: HashMap<String, usize> = HashMap::new();
+        let mut synthetic_proxies: Vec<ProxySettings> = Vec::new();
 
         for (i, c) in cfgs.iter().enumerate() {
             let canon = normalize_host(&c.host);
@@ -84,16 +91,47 @@ impl SiteTable {
                 aliases.push(al);
             }
 
+            // Phase 1b: mode=php/wordpress sites get a synthetic
+            // ProxySettings with php: Some(PhpConfig) so the worker's
+            // combined ProxyTable can dispatch FastCGI by route index.
+            let (php, php_route_idx) = match c.mode {
+                SiteMode::Static => (None, None),
+                SiteMode::Php | SiteMode::WordPress => {
+                    let sock = c.php_sock.as_deref().ok_or_else(|| {
+                        format!("site {canon}: mode={:?} requires php_sock", c.mode)
+                    })?;
+                    let upstream = parse_php_upstream(sock)
+                        .map_err(|e| format!("site {canon}: php_sock: {e}"))?;
+                    let cfg = PhpConfig::wordpress(&c.root);
+                    let idx = synthetic_proxies.len();
+                    synthetic_proxies.push(ProxySettings {
+                        prefix: "/".into(),
+                        upstreams: vec![upstream],
+                        balance: Balance::RoundRobin,
+                        strip_prefix: false,
+                        timeout_secs: 60,
+                        max_fails: 3,
+                        fail_timeout_secs: 30,
+                        cache: false,
+                        cache_default_ttl_secs: 0,
+                        php: Some(cfg.clone()),
+                    });
+                    (Some(cfg), Some(idx))
+                }
+            };
+
             sites.push(SiteEntry {
                 host: canon,
                 aliases,
                 root: c.root.clone(),
                 index: st.index.clone(),
                 files,
+                php,
+                php_route_idx,
             });
         }
 
-        Ok(Self { sites, by_host })
+        Ok((Self { sites, by_host }, synthetic_proxies))
     }
 
     /// Exact host match (after normalisation). `None` if no site matches.
@@ -181,4 +219,17 @@ mod tests {
         assert_eq!(normalize_host("host:notaport"), "host:notaport");
         assert_eq!(normalize_host("  spaced.example  "), "spaced.example");
     }
+}
+
+
+/// Parse a `php_sock` string into an [`UpAddr`]:
+///   * `unix:/run/php/...sock`            -> Unix socket
+///   * `127.0.0.1:9000` / `[::1]:9000`    -> TCP
+fn parse_php_upstream(s: &str) -> Result<UpAddr, String> {
+    if let Some(path) = s.strip_prefix("unix:") {
+        return Ok(UpAddr::Unix(PathBuf::from(path)));
+    }
+    s.parse::<std::net::SocketAddr>()
+        .map(UpAddr::Tcp)
+        .map_err(|e| format!("invalid upstream {s:?}: {e}"))
 }

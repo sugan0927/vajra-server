@@ -4,7 +4,7 @@
 //! Precedence: `/health` -> proxy prefixes (longest match) -> static files
 //! (or the built-in hello page when no static root is configured).
 
-use crate::php::{self, Class, Target};
+use crate::php::{self, Class, PhpConfig, Target};
 use crate::proxy::ProxyTable;
 use crate::static_files::{FileCache, Lookup, OpenFile};
 use std::rc::Rc;
@@ -71,6 +71,7 @@ pub fn route(
     if_none_match: Option<&[u8]>,
     files: Option<&mut FileCache>,
     proxies: &ProxyTable,
+    site_php: Option<(usize, &PhpConfig)>,
 ) -> Reply {
     let is_read = method == "GET" || method == "HEAD";
 
@@ -84,6 +85,14 @@ pub fn route(
     if path == "/health" && is_read {
         return mem(200, BODY_HEALTH);
     }
+
+    // Phase 1b: per-site PHP takes priority over global proxy prefixes.
+    // The worker resolves the [[site]] entry and passes its (route_idx,
+    // PhpConfig) here.  For static-only sites this is None.
+    if let Some((pi, cfg)) = site_php {
+        return route_php(pi, cfg, is_read, path, if_none_match, files);
+    }
+
     if let Some(i) = proxies.find(path) {
         return Reply::Proxy(i);
     }
@@ -166,7 +175,22 @@ fn route_php(
         Class::Bad => return Reply::BadRequest,
         Class::NotFound => return mem(404, BODY_404),
         Class::Script(t) => return Reply::Php(pi, Box::new(t)),
-        Class::Other(n) => n,
+        Class::Other(n) => {
+            // Phase 1b: FileCache resolves "/" and "/foo/" to the
+            // site's index file (e.g. index.php) and returns raw
+            // bytes — which is why WordPress's front-controller was
+            // leaking as octet-stream.  Route directory-like paths
+            // through PHP's fallback (directory index / front
+            // controller) instead.  Non-directory paths still fall
+            // through to static serving below.
+            if n == "/" || n.ends_with('/') {
+                return match php::fallback(cfg, &n) {
+                    Some(t) => Reply::Php(pi, Box::new(t)),
+                    None => mem(404, BODY_404),
+                };
+            }
+            n
+        }
     };
     let found = match files {
         Some(fc) => fc.lookup(path),
