@@ -59,6 +59,120 @@ svc_enable_now()    { systemctl enable --now "$1" 2>/dev/null || true; }
 svc_daemon_reload() { systemctl daemon-reload 2>/dev/null || true; }
 
 SITES_DIR=/etc/vajra/sites
+
+# ─── Path A: runtime mode + single-process helpers ──────────────────
+# The system runs in one of two modes, chosen by /etc/vajra/mode:
+#   legacy  — one systemd unit per domain (vajra-site@<domain>) plus a
+#             per-domain nginx vhost. Default; unchanged behaviour.
+#   single  — one vajra.service serving every [[site]] block from
+#             /etc/vajra/app.toml. No nginx.
+
+vajra_runtime_mode() {
+  local f=/etc/vajra/mode
+  if [[ -f "$f" ]]; then
+    tr -d '[:space:]' < "$f"
+    echo
+  else
+    echo "legacy"
+  fi
+}
+
+vajra_config_gen_bin() {
+  if   [[ -x /usr/local/bin/vajra-config-gen ]]; then
+    echo /usr/local/bin/vajra-config-gen
+  elif [[ -x "$(dirname "$0")/vajra-config-gen" ]]; then
+    echo "$(dirname "$0")/vajra-config-gen"
+  else
+    echo ""
+  fi
+}
+
+site_meta_path() { echo "${SITES_DIR}/$1.meta"; }
+
+# write_site_meta <domain> <mode> <root> <aliases> <php_sock>
+#   mode ∈ {static, php, wordpress}
+#   aliases is comma-separated ("www.x, x2") or empty
+#   php_sock is "unix:/run/php/..." or empty (static only)
+write_site_meta() {
+  local domain="$1" mode="$2" root="$3" aliases="$4" php_sock="$5"
+  local meta; meta="$(site_meta_path "$domain")"
+  local tmp="${meta}.tmp.$$"
+  {
+    printf 'host    = %s\n' "$domain"
+    [[ -n "$aliases" ]] && printf 'aliases = %s\n' "$aliases"
+    printf 'root    = %s\n' "$root"
+    case "$mode" in
+      static) ;;
+      php|wordpress)
+        printf 'mode    = %s\n' "$mode"
+        [[ -n "$php_sock" ]] && printf 'php_sock = %s\n' "$php_sock"
+        ;;
+      *)
+        rm -f "$tmp"
+        return 1
+        ;;
+    esac
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta"
+}
+
+# regenerate_app_config — run vajra-config-gen, verify output, reload
+# vajra.service. Returns 0 on success. Caller handles rollback.
+regenerate_app_config() {
+  local gen; gen="$(vajra_config_gen_bin)"
+  if [[ -z "$gen" ]]; then
+    err "vajra-config-gen not found (checked /usr/local/bin and script dir)"
+    return 1
+  fi
+  if ! "$gen" >&2; then
+    err "vajra-config-gen failed"
+    return 1
+  fi
+  if ! /usr/local/bin/vajra --config /etc/vajra/app.toml --check >/dev/null 2>&1; then
+    err "generated /etc/vajra/app.toml failed vajra --check"
+    return 1
+  fi
+  if systemctl is-active --quiet vajra.service 2>/dev/null; then
+    if ! ( systemctl reload vajra.service 2>/dev/null \
+        || systemctl restart vajra.service 2>/dev/null ); then
+      err "vajra.service reload/restart failed"
+      return 1
+    fi
+    echo "   → vajra.service reloaded  ✅"
+  else
+    echo "   ⚠  vajra.service is not active — config updated but not loaded"
+    echo "       run: systemctl enable --now vajra.service"
+  fi
+  return 0
+}
+
+# The single-process tail of cmd_add. Shared files/db/PHP-pool setup
+# already ran; this just publishes the site to the runtime config.
+cmd_add_finish_single() {
+  local domain="$1" mode="$2" root="$3" aliases="$4" php_sock="$5"
+
+  # shell "html" → Rust SiteMode "static"
+  local meta_mode="$mode"
+  [[ "$meta_mode" == "html" ]] && meta_mode="static"
+
+  write_site_meta "$domain" "$meta_mode" "$root" "$aliases" "$php_sock" \
+    || die "Failed to write site meta"
+
+  if ! regenerate_app_config; then
+    # Roll back the meta we just wrote so the site doesn't half-appear.
+    rm -f "$(site_meta_path "$domain")"
+    regenerate_app_config >/dev/null 2>&1 || true
+    die "Config regeneration failed; site files/db remain, meta rolled back"
+  fi
+
+  echo
+  echo "ℹ  Note: TLS termination in single-process mode lands in Phase 3."
+  echo "   For now, obtain a certificate manually and add [tls] to"
+  echo "   /etc/vajra/globals.toml, then re-run:"
+  echo "       vajra-config-gen && systemctl reload vajra"
+  echo
+}
+
 WWW_ROOT=/var/www/sites
 CERTBOT_ROOT=/var/www/certbot
 FIRST_PORT=8080
@@ -589,6 +703,25 @@ SITE_ROOT=${SITE_ROOT}
 CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
   chmod 600 "${SITES_DIR}/${DOMAIN}.env"
+
+  # ─── Path A: single-process short circuit ──────────────────────────
+  # When /etc/vajra/mode says "single", the site is published to
+  # /etc/vajra/app.toml and the shared vajra.service is reloaded.
+  # No per-domain systemd unit, no nginx vhost.
+  if [[ "$(vajra_runtime_mode)" == "single" ]]; then
+    cmd_add_finish_single "$DOMAIN" "$MODE" "$SITE_ROOT" "$WWW_ALIAS" "$PHP_SOCK"
+    echo
+    echo "═══════════════════════════════════════════════"
+    echo "  ✅ Site ready (single-process mode)"
+    echo "═══════════════════════════════════════════════"
+    echo "  URL:    https://${DOMAIN}   (once TLS is configured)"
+    echo "  Root:   ${SITE_ROOT}"
+    echo "  Mode:   ${MODE}"
+    echo "  Config: /etc/vajra/app.toml"
+    echo "  Meta:   $(site_meta_path "$DOMAIN")"
+    echo
+    return 0
+  fi
 
   systemctl daemon-reload
   systemctl enable --now "vajra-site@${DOMAIN}.service"
