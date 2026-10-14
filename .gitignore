@@ -15,3 +15,9 @@
 *.env
 .secrets/
 *.log
+
+# Editor / manual backups
+*.bak
+*.bak-*
+*.orig
+*.rej
