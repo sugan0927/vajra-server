@@ -873,6 +873,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
+ExecStartPre=/bin/mkdir -p /var/www/certbot/.well-known/acme-challenge
 ExecStart=/usr/local/bin/vajra --config /etc/vajra/app.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
@@ -885,6 +886,22 @@ UNIT
     systemctl daemon-reload
     echo "   → /etc/systemd/system/vajra.service"
 
+
+    # Phase 1b.5: install certbot deploy hook so renewals reload vajra.
+    if [[ -f "$(dirname "$0")/certbot-hooks/10-vajra-reload.sh" ]]; then
+      install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy 2>/dev/null || true
+      install -m 0755 "$(dirname "$0")/certbot-hooks/10-vajra-reload.sh" \
+        /etc/letsencrypt/renewal-hooks/deploy/10-vajra-reload.sh 2>/dev/null || \
+        warn "deploy hook install skipped (no /etc/letsencrypt)"
+      echo "   → /etc/letsencrypt/renewal-hooks/deploy/10-vajra-reload.sh"
+    fi
+
+    # Phase 1b.5: seed ACME contact email if not present
+    if [[ -n "${FIRST_EMAIL:-}" && ! -f /etc/vajra/certbot.email ]]; then
+      printf '%s\n' "$FIRST_EMAIL" > /etc/vajra/certbot.email
+      chmod 0644 /etc/vajra/certbot.email
+      echo "   → /etc/vajra/certbot.email"
+    fi
     if /usr/local/bin/vajra --config /etc/vajra/app.toml --check >/dev/null 2>&1; then
       systemctl enable --now vajra.service
       echo "   ✅ vajra.service started"
