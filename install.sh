@@ -269,7 +269,33 @@ add_filter('https_local_ssl_verify', '__return_false');
 MUEOF
   chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT/wp-content/mu-plugins"
 
-  echo "✅ Site created: https://${DOMAIN}"
+  echo ""
+  echo "════════════════════════════════════════════════════════════════"
+  echo "✅ Site created successfully!"
+  echo "   Website:     https://${DOMAIN}"
+  echo "   Admin URL:   https://${DOMAIN}/wp-admin/"
+  echo "   Admin User:  ${ADMIN_USER}"
+  echo "   Admin Pass:  ${ADMIN_PASS}"
+  echo "   DB Name:     ${DB_NAME}"
+  echo "   DB User:     ${DB_USER}"
+  echo "   DB Pass:     ${DB_PASS}"
+  echo "════════════════════════════════════════════════════════════════"
+  echo ""
+
+  # क्रेडेंशियल्स को एक सुरक्षित फाइल में सेव करें
+  local CRED_FILE="/root/vajra-site-${DOMAIN}.txt"
+  cat > "$CRED_FILE" <<CREDS
+Site:       https://${DOMAIN}
+Admin URL:  https://${DOMAIN}/wp-admin/
+Admin User: ${ADMIN_USER}
+Admin Pass: ${ADMIN_PASS}
+DB Name:    ${DB_NAME}
+DB User:    ${DB_USER}
+DB Pass:    ${DB_PASS}
+CREDS
+  chmod 600 "$CRED_FILE"
+  echo "🔐 Credentials saved to: ${CRED_FILE}"
+  echo ""
 }
 
 case "${1:-}" in
