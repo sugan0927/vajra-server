@@ -48,7 +48,7 @@ detect_distro() {
 www_user() {
   case "$DISTRO_FAMILY" in
     debian) echo "www-data" ;;
-    rhel)   echo "nginx"    ;;
+    rhel)   echo "apache"   ;;
     arch)   echo "http"     ;;
   esac
 }
@@ -231,6 +231,17 @@ main() {
   log "0/6 — Pre-flight"
   detect_distro
   WWW_USER="$(www_user)"
+  # सुनिश्चित करें कि यूज़र मौजूद है, वरना apache या nobody पर फॉलबैक करें
+  if ! id -u "$WWW_USER" >/dev/null 2>&1; then
+    if id -u apache >/dev/null 2>&1; then
+      WWW_USER="apache"
+    elif id -u nginx >/dev/null 2>&1; then
+      WWW_USER="nginx"
+    else
+      useradd -r -s /sbin/nologin "$WWW_USER" 2>/dev/null || WWW_USER="nobody"
+    fi
+    echo "   → adjusted www user to: $WWW_USER"
+  fi
 
   log "1/6 — Base Packages (No Nginx)"
   pkg_update
