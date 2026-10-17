@@ -183,16 +183,22 @@ cmd_add() {
     systemctl start vajra.service || true
 
     log "Updating Vajra config..."
-    cat >> "$APP_TOML" <<TOML
+    cat > "$APP_TOML" <<TOML
+[server]
+listen  = "0.0.0.0:80"
+workers = 1
+
+[tls]
+listen  = "0.0.0.0:443"
+cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+key     = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 
 [[site]]
-host    = "${DOMAIN}"
-root    = "${SITE_ROOT}"
-index   = "index.php"
-mode    = "wordpress"
+host     = "${DOMAIN}"
+root     = "${SITE_ROOT}"
+index    = "index.php"
+mode     = "wordpress"
 php_sock = "unix:${PHP_SOCK}"
-tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML
 
     systemctl restart vajra.service
@@ -281,6 +287,21 @@ main() {
 
   log "2/6 — PHP Setup"
   setup_php
+  
+  # PHP-FPM सर्विस को हमेशा चालू रखें
+  systemctl enable --now "$PHP_FPM_SVC" 2>/dev/null || true
+  
+  # सॉकेट के बनने का इंतज़ार करें (RHEL/CentOS में लेट बन सकता है)
+  for i in {1..10}; do
+    [[ -S "$PHP_SOCK" ]] && break
+    sleep 1
+  done
+
+  # RHEL/CentOS पर सॉकेट की अनुमतियाँ सेट करें
+  if [[ "$DISTRO_FAMILY" == "rhel" ]] && [[ -S "$PHP_SOCK" ]]; then
+    chown apache:apache "$PHP_SOCK" 2>/dev/null || true
+    chmod 660 "$PHP_SOCK" 2>/dev/null || true
+  fi
 
   log "3/6 — Vajra Binary"
   install_vajra_binary
