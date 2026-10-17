@@ -2913,7 +2913,15 @@ fn stage_tx(c: &mut Conn) {
                 }
                 c.out.clear();
             }
-            if c.close_after && !c.sent_close_notify {
+            // Defer close_notify until any pending response body (proxy job or
+            // file transfer) has been staged. Otherwise the client sees
+            // `close_notify` before the response body and discards everything
+            // that follows, resulting in "Empty reply from server" (cURL 52).
+            //
+            // Regression test: `curl --http1.1 -H "Connection: close" <url>`
+            // where <url> is served by PHP-FPM (proxy path).
+            let response_pending = c.proxy.is_some() || c.xfer.is_some();
+            if c.close_after && !c.sent_close_notify && !response_pending {
                 t.send_close_notify();
                 c.sent_close_notify = true;
             }
