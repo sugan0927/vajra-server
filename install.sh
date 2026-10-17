@@ -195,7 +195,7 @@ tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML
 
-    systemctl reload vajra.service || systemctl restart vajra.service
+    systemctl restart vajra.service
 
     cd "$SITE_ROOT"
     local DB_NAME="wp_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-30)"
@@ -257,6 +257,21 @@ main() {
   log "1/6 — Base Packages"
   pkg_update
   pkg_install curl wget ca-certificates gnupg openssl python3 certbot || true
+
+  # CentOS/RHEL Specific Fixes
+  if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+    # 1. Firewall में पोर्ट 80/443 खोलें
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
+      firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
+      firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+    # 2. io_uring को अनब्लॉक करें
+    echo 0 > /proc/sys/kernel/io_uring_disabled 2>/dev/null || true
+    echo "kernel.io_uring_disabled = 0" > /etc/sysctl.d/99-enable-io-uring.conf
+    # 3. SELinux को Permissive करें
+    setenforce 0 2>/dev/null || true
+  fi
   if [[ "$DISTRO_FAMILY" == "debian" ]] || [[ "$DISTRO_FAMILY" == "rhel" ]]; then
     pkg_install mariadb-server || true
   elif [[ "$DISTRO_FAMILY" == "arch" ]]; then
@@ -292,6 +307,7 @@ After=network.target ${PHP_FPM_SVC}.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/vajra --config /etc/vajra/app.toml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 [Install]
 WantedBy=multi-user.target
