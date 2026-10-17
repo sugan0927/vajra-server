@@ -371,6 +371,10 @@ main() {
 
   log "5/6 — Vajra Directories & Services"
   mkdir -p /etc/vajra/sites /var/log/vajra /var/www/sites /var/www/certbot
+# ── WP-CLI shared cache (distro-aware) ──
+mkdir -p /var/www/.wp-cli/cache
+chown -R "$WWW_USER:$WWW_USER" /var/www/.wp-cli
+chmod 750 /var/www/.wp-cli
   chown -R "$WWW_USER:$WWW_USER" /var/log/vajra /var/www/sites
 
   if [[ ! -f /etc/vajra/app.toml ]]; then
