@@ -620,7 +620,7 @@ impl Worker {
         // PHP routes which must be appended to the user's [[proxy]] list
         // *before* ProxyState::new indexes the combined table.
         let (sites, synthetic_proxies) = SiteTable::build(&dynamic.sites)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sites: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sites: {e}")))?;
         let mut all_proxies = dynamic.proxies.clone();
         all_proxies.extend(synthetic_proxies);
         let proxies = ProxyState::new(&all_proxies, dynamic.cache.max_object_bytes, &mut obs.m);
@@ -2888,8 +2888,29 @@ fn stage_tx(c: &mut Conn) {
             }
         }
         Some(t) => {
+            // BUG FIX: rustls' internal write buffer is bounded (~64 KB).
+            // `write_all` fails silently on overflow (WriteZero), and the
+            // previous `let _ =` + `c.out.clear()` combination dropped all
+            // remaining response bytes — the cause of stalls at ~61440 bytes.
+            //
+            // Fix: loop, writing whatever rustls accepts and immediately
+            // draining ciphertext into c.net after each write, until c.out
+            // is fully consumed.
             if !c.out.is_empty() {
-                let _ = t.writer().write_all(&c.out);
+                let mut off = 0usize;
+                while off < c.out.len() {
+                    match t.writer().write(&c.out[off..]) {
+                        Ok(0) => break,
+                        Ok(n) => off += n,
+                        Err(_) => break,
+                    }
+                    while t.wants_write() {
+                        match t.write_tls(&mut c.net) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                }
                 c.out.clear();
             }
             if c.close_after && !c.sent_close_notify {

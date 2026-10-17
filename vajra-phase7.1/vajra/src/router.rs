@@ -183,7 +183,11 @@ fn route_php(
             // through PHP's fallback (directory index / front
             // controller) instead.  Non-directory paths still fall
             // through to static serving below.
-            if n == "/" || n.ends_with('/') {
+            // The check must use the ORIGINAL `path`, not `n`.
+            // `php::classify` strips a trailing slash from Class::Other
+            // output ("/wp-admin/" -> "/wp-admin"), so n.ends_with('/')
+            // is never true for the exact case we need to catch.
+            if path == "/" || path.ends_with('/') {
                 return match php::fallback(cfg, &n) {
                     Some(t) => Reply::Php(pi, Box::new(t)),
                     None => mem(404, BODY_404),
@@ -250,19 +254,19 @@ mod tests {
     fn builtin_routes() {
         let t = ProxyTable::empty();
         assert!(matches!(
-            route("GET", "/health", None, None, &t),
+            route("GET", "/health", None, None, &t, None),
             Reply::Mem { status: 200, .. }
         ));
         assert!(matches!(
-            route("GET", "/", None, None, &t),
+            route("GET", "/", None, None, &t, None),
             Reply::Mem { status: 200, .. }
         ));
         assert!(matches!(
-            route("GET", "/x", None, None, &t),
+            route("GET", "/x", None, None, &t, None),
             Reply::Mem { status: 404, .. }
         ));
         assert!(matches!(
-            route("POST", "/", None, None, &t),
+            route("POST", "/", None, None, &t, None),
             Reply::Mem {
                 status: 405,
                 allow: true,
@@ -275,19 +279,19 @@ mod tests {
     fn proxy_takes_every_method_but_health_wins() {
         let t = table();
         assert!(matches!(
-            route("POST", "/api/x", None, None, &t),
+            route("POST", "/api/x", None, None, &t, None),
             Reply::Proxy(0)
         ));
         assert!(matches!(
-            route("GET", "/api/", None, None, &t),
+            route("GET", "/api/", None, None, &t, None),
             Reply::Proxy(0)
         ));
         assert!(matches!(
-            route("GET", "/health", None, None, &t),
+            route("GET", "/health", None, None, &t, None),
             Reply::Mem { status: 200, .. }
         ));
         assert!(matches!(
-            route("GET", "/other", None, None, &t),
+            route("GET", "/other", None, None, &t, None),
             Reply::Mem { status: 404, .. }
         ));
     }
@@ -313,7 +317,7 @@ mod tests {
         let api = ProxySettings::simple("/api/", "127.0.0.1:9".parse().unwrap(), false, 1);
         let t = ProxyTable::new(&[api, php], 1 << 20);
 
-        let mut r = |m: &str, p: &str| route(m, p, None, Some(&mut files), &t);
+        let mut r = |m: &str, p: &str| route(m, p, None, Some(&mut files), &t, None);
         // Explicit proxy prefixes and /health keep priority.
         assert!(matches!(r("GET", "/api/x"), Reply::Proxy(0)));
         assert!(matches!(
@@ -358,23 +362,23 @@ mod tests {
         // ever touching the filesystem. This is what keeps the handler
         // safe from `..` and `/etc/passwd` style attacks.
         assert!(matches!(
-            route("GET", "/.well-known/acme-challenge/../etc/passwd", None, None, &t),
+            route("GET", "/.well-known/acme-challenge/../etc/passwd", None, None, &t, None),
             Reply::Mem { status: 404, .. }
         ));
         assert!(matches!(
-            route("GET", "/.well-known/acme-challenge/a/b", None, None, &t),
+            route("GET", "/.well-known/acme-challenge/a/b", None, None, &t, None),
             Reply::Mem { status: 404, .. }
         ));
 
         // Non-read methods → 405 with `Allow: GET, HEAD` behavior.
         assert!(matches!(
-            route("POST", "/.well-known/acme-challenge/tok", None, None, &t),
+            route("POST", "/.well-known/acme-challenge/tok", None, None, &t, None),
             Reply::Mem { status: 405, allow: true, .. }
         ));
 
         // Well-formed token that just isn't on disk → 404, not panic.
         assert!(matches!(
-            route("GET", "/.well-known/acme-challenge/abc123_-XYZ", None, None, &t),
+            route("GET", "/.well-known/acme-challenge/abc123_-XYZ", None, None, &t, None),
             Reply::Mem { status: 404, .. }
         ));
     }

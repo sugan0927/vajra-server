@@ -1,2 +1,7 @@
-*.bak
-*.pre-*
+/target
+**/*.pre-*
+**/*.before-*
+**/*.with-diag
+**/*.rs.pre-h2-disable
+*.bin
+/tmp/

@@ -148,6 +148,7 @@ fn https_http11_large_file_via_async_reads() {
 }
 
 #[test]
+#[ignore = "h2 disabled at ALPN; see CHANGELOG 0.14.4"]
 fn alpn_selects_http2_and_http11() {
     let Some(env) = start(&make_root("alpn"), vec![]) else {
         return;
@@ -275,6 +276,7 @@ fn h2_collect(
 }
 
 #[test]
+#[ignore = "h2 disabled at ALPN; see CHANGELOG 0.14.4"]
 fn http2_small_file_and_404() {
     let Some(env) = start(&make_root("h2small"), vec![]) else {
         return;
@@ -378,6 +380,7 @@ fn http2_multiplexes_concurrent_streams() {
 }
 
 #[test]
+#[ignore = "h2 disabled at ALPN; see CHANGELOG 0.14.4"]
 fn http2_conditional_get_returns_304() {
     let Some(env) = start(&make_root("h2cond"), vec![]) else {
         return;
@@ -407,6 +410,7 @@ fn http2_conditional_get_returns_304() {
 }
 
 #[test]
+#[ignore = "h2 disabled at ALPN; see CHANGELOG 0.14.4"]
 fn http2_protocol_violation_gets_goaway() {
     let Some(env) = start(&make_root("h2bad"), vec![]) else {
         return;
@@ -430,6 +434,7 @@ fn http2_protocol_violation_gets_goaway() {
 }
 
 #[test]
+#[ignore = "h2 disabled at ALPN; see CHANGELOG 0.14.4"]
 fn http2_proxy_roundtrip_and_post_body() {
     // Minimal upstream: echoes the request body length.
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

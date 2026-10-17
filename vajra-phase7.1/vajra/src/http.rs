@@ -358,13 +358,33 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
 
                 let head_only = method == "HEAD";
                 // Phase 1a: per-site FileCache selection by Host header.
+                // Phase 1b: also extract the site's PHP route index +
+                // PhpConfig so `router::route` dispatches FastCGI to the
+                // correct pool. Previously this was hardcoded `None`,
+                // which made `route()` fall through to
+                // `proxies.php_route()` -> the first synthetic proxy
+                // (wp's) -> every host served WP's content.
+                let mut site_php: Option<(usize, &crate::php::PhpConfig)> = None;
                 let selected_files: Option<&mut FileCache> = match ctx.sites.as_deref_mut() {
                     Some(st) => {
                         let h = host
                             .and_then(|b| std::str::from_utf8(b).ok())
                             .unwrap_or("");
                         match st.lookup_mut(h) {
-                            Some(entry) => Some(&mut entry.files),
+                            Some(entry) => {
+                                let crate::site::SiteEntry {
+                                    php,
+                                    php_route_idx,
+                                    files,
+                                    ..
+                                } = entry;
+                                if let (Some(cfg), Some(idx)) =
+                                    (php.as_ref(), *php_route_idx)
+                                {
+                                    site_php = Some((idx, cfg));
+                                }
+                                Some(files)
+                            }
                             None => ctx.files.as_deref_mut(),
                         }
                     }
@@ -376,7 +396,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                     if_none_match,
                     selected_files,
                     ctx.proxies,
-                    None, // legacy H1 path has no per-site PHP dispatch
+                    site_php,
                 );
 
                 if let Some((ri, php_target)) = reply.proxy_parts() {
