@@ -61,3 +61,21 @@ served WordPress content belonging to `wp.aidoor.co.in`.
 
 ## [0.14.0] and earlier
 Initial phase-7.1 development. Not publicly released.
+
+## [0.15.1] - 2026-10-17
+
+### Fixed
+- HTTP/1.1 requests with `Connection: close` that route through a
+  proxy (PHP-FPM) or file transfer received `cURL error 52: Empty
+  reply from server`. The cause was `stage_tx` sending the TLS
+  `close_notify` alert *before* the response bytes were staged, so
+  the client saw "end of stream" and discarded the response that
+  followed. `close_notify` is now deferred until any pending proxy
+  job or file transfer has been drained (`c.proxy.is_none()` and
+  `c.xfer.is_none()`).
+
+  This also fixes the original symptom that motivated this release:
+  WordPress loopback requests, WP-Cron, and Site Health all use
+  HTTP/1.0 (or HTTP/1.1 + `Connection: close`), which hit exactly
+  this code path. The `mu-plugins/vajra-loopback-fix.php` workaround
+  can be removed from WordPress sites once this version is installed.
