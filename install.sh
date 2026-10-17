@@ -233,7 +233,7 @@ TOML
   # wp-config.php को writable बनाएं
   chmod 644 wp-config.php
   wp --allow-root config set WP_HTTP_BLOCK_EXTERNAL false --raw
-  wp --allow-root config set WP_ACCESSIBLE_HOSTS "*.wordpress.org,*.wp.com,${DOMAIN},127.0.0.1,localhost" --raw
+  wp --allow-root config set WP_ACCESSIBLE_HOSTS "*.wordpress.org,*.wp.com,${DOMAIN},127.0.0.1,localhost"
   
   # WordPress Install
   wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="wpadmin" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
