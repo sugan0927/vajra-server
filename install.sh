@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# Vajra universal installer (rev 12 — Fully cross-distro, Auto-Health)
-# Supports: Debian, Ubuntu, CentOS, RHEL, Rocky, Alma, Fedora, Arch
+# Vajra universal installer (v13 — Ultimate Universal Fix)
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -170,10 +169,21 @@ die()  { printf "\033[1;31m❌ %s\033[0m\n" "$*" >&2; exit 1; }
 
 cmd_add() {
   if [[ $# -lt 2 ]]; then
-    echo "Usage: vajra-site add <domain> <email> [--php|--html]"
+    echo "Usage: vajra-site add <domain> <email> [--admin-user <user>] [--admin-pass <pass>]"
     exit 1
   fi
   local DOMAIN="$1" EMAIL="$2"; shift 2
+  local ADMIN_USER="wpadmin"
+  local ADMIN_PASS=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --admin-user) ADMIN_USER="$2"; shift 2 ;;
+      --admin-pass) ADMIN_PASS="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
   local SITE_ROOT="${WWW_ROOT}/${DOMAIN}"
   mkdir -p "$SITE_ROOT"
 
@@ -218,7 +228,9 @@ TOML
   local DB_NAME="wp_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-30)"
   local DB_USER="u_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-20)"
   local DB_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
-  local ADMIN_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
+  if [[ -z "$ADMIN_PASS" ]]; then
+    ADMIN_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
+  fi
 
   db_cli() { if command -v mariadb >/dev/null 2>&1; then echo "mariadb"; else echo "mysql"; fi; }
   db_exec() { "$(db_cli)" "$@"; }
@@ -230,13 +242,18 @@ TOML
 
   wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
   
-  # wp-config.php को writable बनाएं
+  # wp-config.php को सही मालिक और अनुमति दें
+  chown "$WWW_USER:$WWW_USER" wp-config.php
   chmod 644 wp-config.php
+  
+  # कॉन्फ़िगरेशन सेट करें (--raw सिर्फ true/false के लिए)
   wp --allow-root config set WP_HTTP_BLOCK_EXTERNAL false --raw
   wp --allow-root config set WP_ACCESSIBLE_HOSTS "*.wordpress.org,*.wp.com,${DOMAIN},127.0.0.1,localhost"
   
   # WordPress Install
-  wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="wpadmin" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
+  wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="$ADMIN_USER" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
+  
+  # सुरक्षा के लिए वापस 640 करें
   chmod 640 wp-config.php
 
   # Site Health Fixes
@@ -358,7 +375,7 @@ UNIT
 
   echo "✅ Vajra Stack Installed!"
   if [[ -n "$FIRST_DOMAIN" && -n "$FIRST_EMAIL" ]]; then
-    /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" || true
+    /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" "${@:3}" || true
   fi
 }
 
