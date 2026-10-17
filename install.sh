@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════
-# Vajra universal installer (rev 10 — Vajra-Only / No Nginx)
-# ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 FIRST_DOMAIN="${1:-}"
 FIRST_EMAIL="${2:-}"
 SITE_MODE="${SITE_MODE:-wordpress}"
+
 if [[ "${3:-}" == "--php"  ]]; then SITE_MODE="php";  fi
 if [[ "${3:-}" == "--html" ]]; then SITE_MODE="html"; fi
-if [[ "${3:-}" == "--wordpress" || "${3:-}" == "--wp" ]]; then SITE_MODE="wordpress"; fi
 
 VAJRA_REPO="${VAJRA_REPO:-sugan0927/vajra-server}"
 VAJRA_VERSION="${VAJRA_VERSION:-latest}"
@@ -92,7 +89,23 @@ setup_php() {
       PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
       PHP_FPM_SVC="php${PHP_VER}-fpm"
       ;;
-    # ... (RHEL/Arch are same as before, omitted for brevity but you can copy from previous)
+    rhel)
+      dnf install -y epel-release || true
+      dnf config-manager --set-enabled crb 2>/dev/null || true
+      pkg_install php php-cli php-fpm php-mysqlnd php-curl php-xml php-mbstring php-zip php-gd || true
+      pkg_install php-intl php-bcmath php-imagick php-fileinfo php-exif || true
+      if ! command -v php >/dev/null 2>&1; then die "PHP installation failed on RHEL."; fi
+      PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.3")"
+      PHP_SOCK="/run/php-fpm/www.sock"
+      PHP_FPM_SVC="php-fpm"
+      ;;
+    arch)
+      pkg_install curl ca-certificates php php-fpm php-gd php-imagick php-intl
+      PHP_VER="$(pacman -Si php 2>/dev/null | awk '/^Version/{print $3}' | cut -d. -f1,2)"
+      [[ -n "$PHP_VER" ]] || PHP_VER="8"
+      PHP_SOCK="/run/php-fpm/php-fpm.sock"
+      PHP_FPM_SVC="php-fpm"
+      ;;
   esac
   echo "   → PHP $PHP_VER (socket: $PHP_SOCK)"
 }
@@ -145,9 +158,12 @@ die()  { printf "\033[1;31m❌ %s\033[0m\n" "$*" >&2; exit 1; }
 [[ $EUID -ne 0 ]] && die "Run as root"
 
 cmd_add() {
+  if [[ $# -lt 2 ]]; then
+    echo "Usage: vajra-site add <domain> <email> [--php|--html]"
+    exit 1
+  fi
   local DOMAIN="$1" EMAIL="$2"; shift 2
   local MODE="wordpress"
-  
   local SITE_ROOT="${WWW_ROOT}/${DOMAIN}"
   mkdir -p "$SITE_ROOT"
 
@@ -161,13 +177,11 @@ cmd_add() {
     fi
     chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT"
 
-    # Get SSL Cert via Certbot (standalone on port 80)
     log "Getting SSL Certificate..."
     systemctl stop vajra.service 2>/dev/null || true
     certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive || true
     systemctl start vajra.service || true
 
-    # Append to app.toml
     log "Updating Vajra config..."
     cat >> "$APP_TOML" <<TOML
 
@@ -183,7 +197,6 @@ TOML
 
     systemctl reload vajra.service || systemctl restart vajra.service
 
-    # WP-CLI Install
     cd "$SITE_ROOT"
     local DB_NAME="wp_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-30)"
     local DB_USER="u_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-20)"
@@ -201,7 +214,6 @@ TOML
     wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
     wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="wpadmin" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
 
-    # Site Health Fixes
     wp --allow-root plugin delete akismet hello 2>/dev/null || true
     wp --allow-root plugin install wp-super-cache --activate 2>/dev/null || true
     mkdir -p "$SITE_ROOT/wp-content/mu-plugins"
@@ -211,7 +223,7 @@ add_filter('https_ssl_verify', '__return_false');
 add_filter('https_local_ssl_verify', '__return_false');
 MUEOF
     chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT/wp-content/mu-plugins"
-    
+
     echo "✅ Site created: https://${DOMAIN}"
   fi
 }
@@ -231,7 +243,6 @@ main() {
   log "0/6 — Pre-flight"
   detect_distro
   WWW_USER="$(www_user)"
-  # सुनिश्चित करें कि यूज़र मौजूद है, वरना apache या nobody पर फॉलबैक करें
   if ! id -u "$WWW_USER" >/dev/null 2>&1; then
     if id -u apache >/dev/null 2>&1; then
       WWW_USER="apache"
@@ -243,17 +254,15 @@ main() {
     echo "   → adjusted www user to: $WWW_USER"
   fi
 
-  log "1/6 — Base Packages (No Nginx)"
+  log "1/6 — Base Packages"
   pkg_update
-  pkg_install curl wget ca-certificates gnupg openssl python3 certbot
-  if [[ "$DISTRO_FAMILY" == "debian" ]]; then
-    pkg_install mariadb-server
-  elif [[ "$DISTRO_FAMILY" == "rhel" ]]; then
-    pkg_install mariadb-server
+  pkg_install curl wget ca-certificates gnupg openssl python3 certbot || true
+  if [[ "$DISTRO_FAMILY" == "debian" ]] || [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+    pkg_install mariadb-server || true
   elif [[ "$DISTRO_FAMILY" == "arch" ]]; then
-    pkg_install mariadb
+    pkg_install mariadb || true
   fi
-  systemctl enable --now mariadb
+  systemctl enable --now mariadb || true
 
   log "2/6 — PHP Setup"
   setup_php
@@ -268,7 +277,6 @@ main() {
   mkdir -p /etc/vajra/sites /var/log/vajra /var/www/sites /var/www/certbot
   chown -R "$WWW_USER:$WWW_USER" /var/log/vajra /var/www/sites
 
-  # Create default app.toml if it doesn't exist
   if [[ ! -f /etc/vajra/app.toml ]]; then
     cat > /etc/vajra/app.toml <<TOML
 [server]
@@ -296,7 +304,7 @@ UNIT
 
   echo "✅ Vajra Stack Installed!"
   if [[ -n "$FIRST_DOMAIN" && -n "$FIRST_EMAIL" ]]; then
-    /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL"
+    /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" || true
   fi
 }
 
