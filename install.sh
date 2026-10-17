@@ -122,27 +122,52 @@ setup_php() {
 
 # ─── Vajra Binary Downloader ────────────────────────────────────────────
 install_vajra_binary() {
-  if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then return; fi
-  if [[ "$VAJRA_VERSION" == "latest" ]]; then
-    VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${VAJRA_REPO}/releases/latest" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
-  fi
-  echo "   → tag: $VAJRA_VERSION"
-  local _BASE="https://github.com/${VAJRA_REPO}/releases/download/${VAJRA_VERSION}"
-  local TMP; TMP="$(mktemp -d)"
-  local _downloaded=0
-  for _asset in "vajra-${VAJRA_VERSION}-x86_64-linux-musl.tar.gz" "vajra-${VAJRA_VERSION}-x86_64-unknown-linux-musl.tar.gz"; do
-    if curl -fL --retry 2 --connect-timeout 10 --progress-bar "$_BASE/$_asset" -o "$TMP/$_asset"; then
-      tar -xzf "$TMP/$_asset" -C "$TMP" && _downloaded=1 && break
+    if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then return; fi
+
+    if [[ "$VAJRA_VERSION" == "latest" ]]; then
+        VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${VAJRA_REPO}/releases/latest" | grep -m 1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
     fi
-  done
-  if [[ "$_downloaded" == "1" ]]; then
-    local SRC; SRC="$(find "$TMP" -type f -name vajra | head -1)"
-    install -m 0755 "$SRC" /usr/local/bin/vajra
-    rm -rf "$TMP"
-    echo "   → installed vajra"
-  else
-    die "Could not download pre-built Vajra binary."
-  fi
+
+    echo " → tag: $VAJRA_VERSION"
+
+    # GitHub API से सटीक फाइल लिंक प्राप्त करें (Python के माध्यम से)
+    local _ASSET_URL
+    _ASSET_URL=$(python3 - "$VAJRA_REPO" "$VAJRA_VERSION" <<'INNER_PYEOF'
+import json, urllib.request, sys
+
+repo = sys.argv[1]
+ver = sys.argv[2]
+url = f"https://api.github.com/repos/{repo}/releases/tags/{ver}"
+
+try:
+    req = urllib.request.Request(url, headers={'User-Agent': 'Vajra-Installer'})
+    data = json.loads(urllib.request.urlopen(req).read().decode())
+    for asset in data.get("assets", []):
+        if asset["name"].endswith(".tar.gz"):
+            print(asset["browser_download_url"])
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+INNER_PYEOF
+    )
+
+    if [[ -z "$_ASSET_URL" ]]; then
+        die "GitHub Release ${VAJRA_VERSION} में .tar.gz फाइल नहीं मिली"
+    fi
+
+    echo " → downloading: $_ASSET_URL"
+    local TMP; TMP="$(mktemp -d)"
+
+    if curl -fL --retry 3 --progress-bar "$_ASSET_URL" -o "$TMP/vajra.tar.gz"; then
+        tar -xzf "$TMP/vajra.tar.gz" -C "$TMP"
+        local SRC; SRC="$(find "$TMP" -type f -name vajra | head -1)"
+        install -m 0755 "$SRC" /usr/local/bin/vajra
+        rm -rf "$TMP"
+        echo " → installed vajra"
+    else
+        die "Vajra binary डाउनलोड करने में विफल रहा।"
+    fi
 }
 
 # ─── WP-CLI Installer ───────────────────────────────────────────────────
