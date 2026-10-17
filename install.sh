@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════
+# Vajra universal installer (rev 12 — Fully cross-distro, Auto-Health)
+# Supports: Debian, Ubuntu, CentOS, RHEL, Rocky, Alma, Fedora, Arch
+# ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 FIRST_DOMAIN="${1:-}"
@@ -13,6 +17,7 @@ VAJRA_VERSION="${VAJRA_VERSION:-latest}"
 VAJRA_SKIP_BINARY="${VAJRA_SKIP_BINARY:-0}"
 
 log()  { printf "\n\033[1;32m▶ %s\033[0m\n" "$*"; }
+warn() { printf "\033[1;33m⚠  %s\033[0m\n" "$*"; }
 die()  { printf "\033[1;31m❌ %s\033[0m\n" "$*" >&2; exit 1; }
 
 # ─── Distro Detection ───────────────────────────────────────────────────
@@ -90,11 +95,17 @@ setup_php() {
       PHP_FPM_SVC="php${PHP_VER}-fpm"
       ;;
     rhel)
-      dnf install -y epel-release || true
-      dnf config-manager --set-enabled crb 2>/dev/null || true
-      pkg_install php php-cli php-fpm php-mysqlnd php-curl php-xml php-mbstring php-zip php-gd || true
-      pkg_install php-intl php-bcmath php-imagick php-fileinfo php-exif || true
-      if ! command -v php >/dev/null 2>&1; then die "PHP installation failed on RHEL."; fi
+      if [[ "$DISTRO_ID" == "fedora" ]]; then
+        pkg_install dnf-plugins-core || true
+        pkg_install php php-cli php-fpm php-mysqlnd php-curl php-xml php-mbstring php-zip php-gd || true
+        pkg_install php-intl php-bcmath php-pecl-imagick php-process || true
+      else
+        dnf install -y epel-release || true
+        dnf config-manager --set-enabled crb 2>/dev/null || true
+        pkg_install php php-cli php-fpm php-mysqlnd php-curl php-xml php-mbstring php-zip php-gd || true
+        pkg_install php-intl php-bcmath php-imagick php-fileinfo php-exif || true
+      fi
+      if ! command -v php >/dev/null 2>&1; then die "PHP installation failed on Fedora/RHEL."; fi
       PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.3")"
       PHP_SOCK="/run/php-fpm/www.sock"
       PHP_FPM_SVC="php-fpm"
@@ -143,7 +154,7 @@ install_wp_cli() {
   fi
 }
 
-# ─── The `vajra-site` CLI Tool (Vajra-Only) ─────────────────────────────
+# ─── The `vajra-site` CLI Tool (Vajra-Only, robust) ─────────────────────
 create_vajra_site_cli() {
 cat > /usr/local/bin/vajra-site <<'VAJRA_SITE_SCRIPT'
 #!/usr/bin/env bash
@@ -163,27 +174,26 @@ cmd_add() {
     exit 1
   fi
   local DOMAIN="$1" EMAIL="$2"; shift 2
-  local MODE="wordpress"
   local SITE_ROOT="${WWW_ROOT}/${DOMAIN}"
   mkdir -p "$SITE_ROOT"
 
-  if [[ "$MODE" == "wordpress" ]]; then
-    log "Installing WordPress..."
-    if [[ ! -f "$SITE_ROOT/wp-load.php" ]]; then
-      local TMP; TMP="$(mktemp -d)"
-      curl -fL https://wordpress.org/latest.tar.gz | tar -xz -C "$TMP"
-      cp -a "$TMP/wordpress/." "$SITE_ROOT/"
-      rm -rf "$TMP"
-    fi
-    chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT"
+  log "Installing WordPress..."
+  if [[ ! -f "$SITE_ROOT/wp-load.php" ]]; then
+    local TMP; TMP="$(mktemp -d)"
+    curl -fL https://wordpress.org/latest.tar.gz | tar -xz -C "$TMP"
+    cp -a "$TMP/wordpress/." "$SITE_ROOT/"
+    rm -rf "$TMP"
+  fi
+  chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT"
 
-    log "Getting SSL Certificate..."
-    systemctl stop vajra.service 2>/dev/null || true
-    certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive || true
-    systemctl start vajra.service || true
+  log "Getting SSL Certificate..."
+  systemctl stop vajra.service 2>/dev/null || true
+  certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive || true
+  systemctl start vajra.service || true
 
-    log "Updating Vajra config..."
-    cat > "$APP_TOML" <<TOML
+  log "Updating Vajra config..."
+  # नया [tls] ब्लॉक सही फॉर्मेट में जोड़ें
+  cat > "$APP_TOML" <<TOML
 [server]
 listen  = "0.0.0.0:80"
 workers = 1
@@ -201,37 +211,48 @@ mode     = "wordpress"
 php_sock = "unix:${PHP_SOCK}"
 TOML
 
-    systemctl restart vajra.service
+  systemctl restart vajra.service
 
-    cd "$SITE_ROOT"
-    local DB_NAME="wp_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-30)"
-    local DB_USER="u_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-20)"
-    local DB_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
-    local ADMIN_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
+  # WP-CLI Install
+  cd "$SITE_ROOT"
+  local DB_NAME="wp_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-30)"
+  local DB_USER="u_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-20)"
+  local DB_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
+  local ADMIN_PASS="$(openssl rand -base64 18 | tr -d '/+=\n' | cut -c1-16)"
 
-    db_cli() { if command -v mariadb >/dev/null 2>&1; then echo "mariadb"; else echo "mysql"; fi; }
-    db_exec() { "$(db_cli)" "$@"; }
+  db_cli() { if command -v mariadb >/dev/null 2>&1; then echo "mariadb"; else echo "mysql"; fi; }
+  db_exec() { "$(db_cli)" "$@"; }
 
-    db_exec -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
-    db_exec -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
-    db_exec -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
-    db_exec -e "FLUSH PRIVILEGES;"
+  db_exec -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
+  db_exec -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
+  db_exec -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
+  db_exec -e "FLUSH PRIVILEGES;"
 
-    wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
-    wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="wpadmin" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
+  wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
+  
+  # wp-config.php को writable बनाएं
+  chmod 644 wp-config.php
+  wp --allow-root config set WP_HTTP_BLOCK_EXTERNAL false --raw
+  wp --allow-root config set WP_ACCESSIBLE_HOSTS "*.wordpress.org,*.wp.com,${DOMAIN},127.0.0.1,localhost" --raw
+  
+  # WordPress Install
+  wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="wpadmin" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
+  chmod 640 wp-config.php
 
-    wp --allow-root plugin delete akismet hello 2>/dev/null || true
-    wp --allow-root plugin install wp-super-cache --activate 2>/dev/null || true
-    mkdir -p "$SITE_ROOT/wp-content/mu-plugins"
-    cat > "$SITE_ROOT/wp-content/mu-plugins/vajra-loopback-fix.php" <<'MUEOF'
+  # Site Health Fixes
+  wp --allow-root plugin delete akismet hello 2>/dev/null || true
+  wp --allow-root plugin install wp-super-cache --activate 2>/dev/null || true
+  
+  # mu-plugin for loopback
+  mkdir -p "$SITE_ROOT/wp-content/mu-plugins"
+  cat > "$SITE_ROOT/wp-content/mu-plugins/vajra-loopback-fix.php" <<'MUEOF'
 <?php
 add_filter('https_ssl_verify', '__return_false');
 add_filter('https_local_ssl_verify', '__return_false');
 MUEOF
-    chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT/wp-content/mu-plugins"
+  chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT/wp-content/mu-plugins"
 
-    echo "✅ Site created: https://${DOMAIN}"
-  fi
+  echo "✅ Site created: https://${DOMAIN}"
 }
 
 case "${1:-}" in
@@ -255,7 +276,8 @@ main() {
     elif id -u nginx >/dev/null 2>&1; then
       WWW_USER="nginx"
     else
-      useradd -r -s /sbin/nologin "$WWW_USER" 2>/dev/null || WWW_USER="nobody"
+      useradd -r -s /sbin/nologin -d /var/www -c "Apache" apache 2>/dev/null || true
+      WWW_USER="apache"
     fi
     echo "   → adjusted www user to: $WWW_USER"
   fi
@@ -263,21 +285,20 @@ main() {
   log "1/6 — Base Packages"
   pkg_update
   pkg_install curl wget ca-certificates gnupg openssl python3 certbot || true
-
-  # CentOS/RHEL Specific Fixes
+  
+  # RHEL Family: Firewall, io_uring, SELinux Fix
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
-    # 1. Firewall में पोर्ट 80/443 खोलें
     if command -v firewall-cmd >/dev/null 2>&1; then
       firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
       firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
       firewall-cmd --reload >/dev/null 2>&1 || true
     fi
-    # 2. io_uring को अनब्लॉक करें
     echo 0 > /proc/sys/kernel/io_uring_disabled 2>/dev/null || true
     echo "kernel.io_uring_disabled = 0" > /etc/sysctl.d/99-enable-io-uring.conf
-    # 3. SELinux को Permissive करें
     setenforce 0 2>/dev/null || true
+    sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
   fi
+
   if [[ "$DISTRO_FAMILY" == "debian" ]] || [[ "$DISTRO_FAMILY" == "rhel" ]]; then
     pkg_install mariadb-server || true
   elif [[ "$DISTRO_FAMILY" == "arch" ]]; then
@@ -288,18 +309,14 @@ main() {
   log "2/6 — PHP Setup"
   setup_php
   
-  # PHP-FPM सर्विस को हमेशा चालू रखें
+  # PHP-FPM को हमेशा चालू रखें
   systemctl enable --now "$PHP_FPM_SVC" 2>/dev/null || true
-  
-  # सॉकेट के बनने का इंतज़ार करें (RHEL/CentOS में लेट बन सकता है)
   for i in {1..10}; do
     [[ -S "$PHP_SOCK" ]] && break
     sleep 1
   done
-
-  # RHEL/CentOS पर सॉकेट की अनुमतियाँ सेट करें
   if [[ "$DISTRO_FAMILY" == "rhel" ]] && [[ -S "$PHP_SOCK" ]]; then
-    chown apache:apache "$PHP_SOCK" 2>/dev/null || true
+    chown "$WWW_USER:$WWW_USER" "$PHP_SOCK" 2>/dev/null || true
     chmod 660 "$PHP_SOCK" 2>/dev/null || true
   fi
 
@@ -316,8 +333,8 @@ main() {
   if [[ ! -f /etc/vajra/app.toml ]]; then
     cat > /etc/vajra/app.toml <<TOML
 [server]
-http_listen  = "0.0.0.0:80"
-https_listen = "0.0.0.0:443"
+listen  = "0.0.0.0:80"
+workers = 1
 TOML
   fi
 
@@ -328,7 +345,7 @@ After=network.target ${PHP_FPM_SVC}.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/vajra --config /etc/vajra/app.toml
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 [Install]
 WantedBy=multi-user.target
