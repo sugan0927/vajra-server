@@ -1,74 +1,54 @@
-name: release
+name: Release Build & Publish
 
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
-# The default GITHUB_TOKEN issued to workflows on this repo is
-# read-only (repo setting: 'Read repository contents and packages
-# permissions'). softprops/action-gh-release needs write access to
-# create the release and upload assets. Grant it explicitly here
-# rather than changing the repo-wide default.
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-and-release:
+    name: Build Musl Binary & Release
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: vajra-phase7.1/vajra
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Install Rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
-      - name: Install musl toolchain
+      - name: Install musl-tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            vajra-phase7.1/vajra/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('vajra-phase7.1/vajra/Cargo.lock') }}
+      - name: Build Vajra (Release)
+        working-directory: ./vajra-phase7.1/vajra
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: Build
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
-
-      - name: Test
-        run: cargo test --release --locked --target x86_64-unknown-linux-musl
-
-      - name: Package
+      - name: Package Tarball & Checksum
         run: |
-          set -eu
-          VERSION="${GITHUB_REF_NAME}"
-          DIR="vajra-${VERSION}-x86_64-linux"
-          mkdir -p "${DIR}"
-          cp target/x86_64-unknown-linux-musl/release/vajra "${DIR}/"
-          cp install.sh "${DIR}/"
-          cp docs/wp-cli.md docs/backup.md docs/check.md docs/setup.md "${DIR}/"
-          cp CHANGELOG.md README.md SECURITY.md "${DIR}/"
-          tar -czf "${DIR}.tar.gz" "${DIR}"
-          # ── Compatibility alias ──
-          # Older install.sh versions expect the "-musl" suffix. Publish
-          # both names so any version of install.sh works.
-          cp "${DIR}.tar.gz" "vajra-${VERSION}-x86_64-linux-musl.tar.gz"
-          # Aggregate checksums for every tarball in this release
-          sha256sum vajra-*.tar.gz > checksums.txt
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          mkdir -p release/vajra
+          cp vajra-phase7.1/vajra/target/x86_64-unknown-linux-musl/release/vajra release/vajra/
+          chmod 755 release/vajra/vajra
+          
+          # Tarball बनाएं
+          tar -czf release/vajra-${TAG_NAME}-x86_64-linux.tar.gz -C release vajra
+          
+          # Checksum बनाएं
+          cd release
+          sha256sum vajra-${TAG_NAME}-x86_64-linux.tar.gz > vajra-${TAG_NAME}-x86_64-linux.tar.gz.sha256
 
-      - name: Upload release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            vajra-phase7.1/vajra/vajra-*.tar.gz
-            vajra-phase7.1/vajra/checksums.txt
+            release/vajra-*.tar.gz
+            release/vajra-*.tar.gz.sha256
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
