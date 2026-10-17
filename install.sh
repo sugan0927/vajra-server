@@ -130,7 +130,7 @@ install_vajra_binary() {
   local _BASE="https://github.com/${VAJRA_REPO}/releases/download/${VAJRA_VERSION}"
   local TMP; TMP="$(mktemp -d)"
   local _downloaded=0
-  for _asset in "vajra-${VAJRA_VERSION}-x86_64-linux-musl.tar.gz" "vajra-${VAJRA_VERSION}-x86_64-unknown-linux-musl.tar.gz"; do
+  for _asset in "vajra-${VAJRA_VERSION#v}-x86_64-linux.tar.gz" "vajra-${VAJRA_VERSION}-x86_64-unknown-linux-musl.tar.gz"; do
     if curl -fL --retry 2 --connect-timeout 10 --progress-bar "$_BASE/$_asset" -o "$TMP/$_asset"; then
       tar -xzf "$TMP/$_asset" -C "$TMP" && _downloaded=1 && break
     fi
