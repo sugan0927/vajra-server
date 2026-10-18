@@ -422,11 +422,15 @@ verify_and_fix_services() {
 
     # 2. PHP-FPM Check
     local php_svc="php-fpm"
-    if [[ "$OS_FAMILY" == "debian" ]]; then
-        php_svc=$(ls /lib/systemd/system/php*-fpm.service 2>/dev/null | head -1 | xargs -r basename | sed 's/\.service//')
-        php_svc=${php_svc:-php-fpm}
+    
+    # Universal Check: अगर डिफ़ॉल्ट php-fpm नहीं है, तो php*-fpm (जैसे Debian में php8.3-fpm) खोजें
+    if ! systemctl list-unit-files "php-fpm.service" --no-legend 2>/dev/null | grep -q "php-fpm.service"; then
+        local found_php=$(ls /usr/lib/systemd/system/php*-fpm.service /lib/systemd/system/php*-fpm.service 2>/dev/null | head -1)
+        if [ -n "$found_php" ]; then
+            php_svc=$(basename "$found_php" .service)
+        fi
     fi
-
+    
     if ! systemctl is-active --quiet "$php_svc"; then
         log "⚠️  PHP-FPM ($php_svc) is down. Attempting to fix..."
         mkdir -p /run/php-fpm /run/php
