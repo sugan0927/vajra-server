@@ -403,7 +403,59 @@ UNIT
   log "6/6 — Installing vajra-site CLI"
   create_vajra_site_cli
 
-  echo "✅ Vajra Stack Installed!"
+  
+verify_and_fix_services() {
+    log "🔍 Verifying core services (MariaDB, PHP-FPM, Vajra)..."
+    
+    # 1. MariaDB Check
+    local db_svc="mariadb"
+    if ! systemctl is-active --quiet "$db_svc"; then
+        log "⚠️  MariaDB is down. Attempting to fix..."
+        mkdir -p /run/mariadb /var/run/mysqld
+        chown -R mysql:mysql /var/lib/mysql /run/mariadb /var/run/mysqld 2>/dev/null || true
+        systemctl restart "$db_svc" 2>/dev/null || systemctl restart mysql 2>/dev/null || true
+    fi
+    if ! systemctl is-active --quiet "$db_svc"; then
+        die "❌ MariaDB could not be started. Please check logs."
+    fi
+    log "✅ MariaDB is running."
+
+    # 2. PHP-FPM Check
+    local php_svc="php-fpm"
+    if [[ "$OS_FAMILY" == "debian" ]]; then
+        php_svc=$(ls /lib/systemd/system/php*-fpm.service 2>/dev/null | head -1 | xargs -r basename | sed 's/\.service//')
+        php_svc=${php_svc:-php-fpm}
+    fi
+
+    if ! systemctl is-active --quiet "$php_svc"; then
+        log "⚠️  PHP-FPM ($php_svc) is down. Attempting to fix..."
+        mkdir -p /run/php-fpm /run/php
+        chown -R "$WWW_USER:$WWW_USER" /run/php-fpm /run/php 2>/dev/null || true
+        if command -v setsebool >/dev/null; then
+            setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+            setsebool -P httpd_can_network_connect_db 1 2>/dev/null || true
+        fi
+        systemctl restart "$php_svc" 2>/dev/null || true
+    fi
+    if ! systemctl is-active --quiet "$php_svc"; then
+        die "❌ PHP-FPM could not be started. Please check logs."
+    fi
+    log "✅ PHP-FPM is running."
+
+    # 3. Vajra Check
+    if ! systemctl is-active --quiet vajra; then
+        log "⚠️  Vajra Web Server is down. Attempting to fix..."
+        systemctl reset-failed vajra 2>/dev/null || true
+        systemctl restart vajra 2>/dev/null || true
+    fi
+    if ! systemctl is-active --quiet vajra; then
+        die "❌ Vajra Web Server could not be started. Please check logs."
+    fi
+    log "✅ Vajra Web Server is running."
+}
+
+verify_and_fix_services
+echo "✅ Vajra Stack Installed!"
   if [[ -n "$FIRST_DOMAIN" && -n "$FIRST_EMAIL" ]]; then
     /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" "${@:3}" || true
   fi
