@@ -197,29 +197,32 @@ create_vajra_site_cli() {
 cat > /usr/local/bin/vajra-site <<'VAJRA_SITE_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-# ── Dynamic web-user detection (Debian: www-data, RHEL: apache, Arch: http) ──
+
+# ── Dynamic web-user detection ──
 if id -u www-data >/dev/null 2>&1; then WWW_USER="www-data"
 elif id -u apache >/dev/null 2>&1; then WWW_USER="apache"
 elif id -u nginx >/dev/null 2>&1; then WWW_USER="nginx"
 elif id -u http >/dev/null 2>&1; then WWW_USER="http"
 else WWW_USER="nobody"; fi
+
 PHP_SOCK="__PHP_SOCK__"
 APP_TOML="/etc/vajra/app.toml"
 WWW_ROOT="/var/www/sites"
 
 log()  { printf "\n\033[1;32m▶ %s\033[0m\n" "$*"; }
+warn() { printf "\033[1;33m⚠  %s\033[0m\n" "$*"; }
 die()  { printf "\033[1;31m❌ %s\033[0m\n" "$*" >&2; exit 1; }
 [[ $EUID -ne 0 ]] && die "Run as root"
 
 cmd_add() {
   if [[ $# -lt 2 ]]; then
-    echo "Usage: vajra-site add <domain> <email> [--admin-user <user>] [--admin-pass <pass>]"
+    echo "Usage: vajra-site add <domain> <email> [--php|--html] [--admin-user <user>] [--admin-pass <pass>]"
     exit 1
   fi
   local DOMAIN="$1" EMAIL="$2"; shift 2
   local ADMIN_USER="wpadmin"
   local ADMIN_PASS=""
-  local SITE_MODE="__DEFAULT_SITE_MODE__"
+  local SITE_MODE="wordpress"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -232,28 +235,34 @@ cmd_add() {
   done
 
   local SITE_ROOT="${WWW_ROOT}/${DOMAIN}"
-  
-  # अगर साइट पहले से इंस्टॉल है, तो दोबारा कुछ न करें
-  if [[ -f "$SITE_ROOT/wp-load.php" ]]; then
-      echo "✅ Site ${DOMAIN} is already installed at ${SITE_ROOT}."
-      echo "   To reinstall, remove it first: rm -rf ${SITE_ROOT}"
-      exit 0
-  fi
-
   mkdir -p "$SITE_ROOT"
 
-  log "Installing WordPress..."
-  if [[ ! -f "$SITE_ROOT/wp-load.php" ]]; then
-    local TMP; TMP="$(mktemp -d)"
-    curl -fL https://wordpress.org/latest.tar.gz | tar -xz -C "$TMP"
-    cp -a "$TMP/wordpress/." "$SITE_ROOT/"
-    rm -rf "$TMP"
+  # Idempotency: skip if already installed
+  if [[ -f "$SITE_ROOT/wp-load.php" ]]; then
+    echo "✅ Site ${DOMAIN} is already installed at ${SITE_ROOT}."
+    echo "   To reinstall, remove it first: rm -rf ${SITE_ROOT}"
+    exit 0
   fi
-  chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT"
+
+  log "Installing WordPress..."
+  local TMP; TMP="$(mktemp -d)"
+  curl -fL https://wordpress.org/latest.tar.gz | tar -xz -C "$TMP"
+  cp -a "$TMP/wordpress/." "$SITE_ROOT/"
+  rm -rf "$TMP"
 
   log "Getting SSL Certificate..."
   systemctl stop vajra.service 2>/dev/null || true
-  certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive || true
+
+  if [[ -d "/etc/letsencrypt/live/${DOMAIN}" ]]; then
+      echo "   → SSL Certificate for ${DOMAIN} already exists. Skipping certbot."
+  else
+      # STRICT: die on failure — do not continue with broken config
+      if ! certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" \
+           --agree-tos --email "$EMAIL" --non-interactive; then
+          systemctl start vajra.service || true
+          die "❌ SSL Certificate generation failed for ${DOMAIN}. Check DNS / Let's Encrypt rate limits."
+      fi
+  fi
   systemctl start vajra.service || true
 
   log "Updating Vajra config (append mode)..."
@@ -262,12 +271,14 @@ cmd_add() {
 [server]
 listen  = "0.0.0.0:80"
 workers = 1
+
 [tls]
 listen  = "0.0.0.0:443"
 cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 key     = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML_EOF
   fi
+
   if ! grep -q '^\[tls\]' "$APP_TOML"; then
     cat >> "$APP_TOML" <<TOML_EOF
 
@@ -277,7 +288,10 @@ cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 key     = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML_EOF
   fi
-  if ! grep -q "^host *= *\"${DOMAIN}\"" "$APP_TOML"; then
+
+  if grep -q "^host *= *\"${DOMAIN}\"" "$APP_TOML"; then
+    echo "   → site ${DOMAIN} already present — skipping"
+  else
     cat >> "$APP_TOML" <<TOML_EOF
 
 [[site]]
@@ -289,12 +303,16 @@ php_sock = "unix:${PHP_SOCK}"
 tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML_EOF
-  else
-    echo "   → site ${DOMAIN} already present — skipping"
   fi
+
+  # Validate: no unresolved placeholders before restarting Vajra
+  if grep -q '__[A-Z_]*__' "$APP_TOML"; then
+    die "❌ app.toml contains unresolved placeholders (e.g. __DEFAULT_SITE_MODE__). Aborting before Vajra restart."
+  fi
+
   systemctl restart vajra.service
 
-  # WP-CLI Install
+  # ── WP-CLI Install ──
   cd "$SITE_ROOT"
   local DB_NAME="wp_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-30)"
   local DB_USER="u_$(echo "$DOMAIN" | tr '.-' '__' | cut -c1-20)"
@@ -311,34 +329,36 @@ TOML_EOF
   db_exec -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
   db_exec -e "FLUSH PRIVILEGES;"
 
-  wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
-  
-  # wp-config.php को सही मालिक और अनुमति दें
-  chown "$WWW_USER:$WWW_USER" wp-config.php
-  chmod 644 wp-config.php
-  
-  # कॉन्फ़िगरेशन सेट करें (--raw सिर्फ true/false के लिए)
+  wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" \
+     --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
   wp --allow-root config set WP_HTTP_BLOCK_EXTERNAL false --raw
   wp --allow-root config set WP_ACCESSIBLE_HOSTS "*.wordpress.org,*.wp.com,${DOMAIN},127.0.0.1,localhost"
-  
-  # WordPress Install
-  wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" --admin_user="$ADMIN_USER" --admin_password="$ADMIN_PASS" --admin_email="$EMAIL" --skip-email
-  
-  # सुरक्षा के लिए वापस 640 करें
-  chmod 640 wp-config.php
+  wp --allow-root core install --url="https://${DOMAIN}" --title="WordPress" \
+     --admin_user="$ADMIN_USER" --admin_password="$ADMIN_PASS" \
+     --admin_email="$EMAIL" --skip-email
 
-  # Site Health Fixes
   wp --allow-root plugin delete akismet hello 2>/dev/null || true
   wp --allow-root plugin install wp-super-cache --activate 2>/dev/null || true
-  
-  # mu-plugin for loopback
+
   mkdir -p "$SITE_ROOT/wp-content/mu-plugins"
   cat > "$SITE_ROOT/wp-content/mu-plugins/vajra-loopback-fix.php" <<'MUEOF'
 <?php
 add_filter('https_ssl_verify', '__return_false');
 add_filter('https_local_ssl_verify', '__return_false');
 MUEOF
-  chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT/wp-content/mu-plugins"
+
+  # ── CRITICAL: Final ownership + permissions (single authoritative pass) ──
+  log "Fixing file ownership and permissions (critical for CentOS/RHEL)..."
+  chown -R "$WWW_USER:$WWW_USER" "$SITE_ROOT"
+  find "$SITE_ROOT" -type d -exec chmod 755 {} \;
+  find "$SITE_ROOT" -type f -exec chmod 644 {} \;
+  chmod 640 "$SITE_ROOT/wp-config.php" 2>/dev/null || true
+
+  # SELinux context restore (RHEL/CentOS only)
+  if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R "$SITE_ROOT" 2>/dev/null || true
+    echo "   → SELinux context restored for $SITE_ROOT"
+  fi
 
   echo ""
   echo "════════════════════════════════════════════════════════════════"
@@ -353,7 +373,6 @@ MUEOF
   echo "════════════════════════════════════════════════════════════════"
   echo ""
 
-  # क्रेडेंशियल्स को एक सुरक्षित फाइल में सेव करें
   local CRED_FILE="/root/vajra-site-${DOMAIN}.txt"
   cat > "$CRED_FILE" <<CREDS
 Site:       https://${DOMAIN}
@@ -375,6 +394,7 @@ case "${1:-}" in
 esac
 VAJRA_SITE_SCRIPT
 
+# Only substitute PHP_SOCK (no more WWW_USER or SITE_MODE placeholders)
 sed -i "s|__PHP_SOCK__|${PHP_SOCK}|g" /usr/local/bin/vajra-site
 chmod 0755 /usr/local/bin/vajra-site
 }
