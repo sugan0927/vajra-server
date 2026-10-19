@@ -124,24 +124,58 @@ setup_php() {
 install_vajra_binary() {
   if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then return; fi
   if [[ "$VAJRA_VERSION" == "latest" ]]; then
-    VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${VAJRA_REPO}/releases/latest" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+    VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${VAJRA_REPO}/releases/latest" \
+      | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
   fi
   echo "   → tag: $VAJRA_VERSION"
-  local _BASE="https://github.com/${VAJRA_REPO}/releases/download/${VAJRA_VERSION}"
+  local BASE="https://github.com/${VAJRA_REPO}/releases/download/${VAJRA_VERSION}"
+  local VER_NOV="${VAJRA_VERSION#v}"
   local TMP; TMP="$(mktemp -d)"
-  local _downloaded=0
-  for _asset in "vajra-${VAJRA_VERSION#v}-x86_64-linux.tar.gz" "vajra-${VAJRA_VERSION}-x86_64-unknown-linux-musl.tar.gz"; do
-    if curl -fL --retry 2 --connect-timeout 10 --progress-bar "$_BASE/$_asset" -o "$TMP/$_asset"; then
-      tar -xzf "$TMP/$_asset" -C "$TMP" && _downloaded=1 && break
+  local -a CANDIDATES=(
+    "vajra-${VAJRA_VERSION}-linux-x86_64.tar.gz"
+    "vajra-${VER_NOV}-linux-x86_64.tar.gz"
+    "vajra-${VAJRA_VERSION}-x86_64-linux.tar.gz"
+    "vajra-${VER_NOV}-x86_64-linux.tar.gz"
+    "vajra-${VAJRA_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+    "vajra-${VER_NOV}-x86_64-unknown-linux-musl.tar.gz"
+  )
+  local api_url="https://api.github.com/repos/${VAJRA_REPO}/releases/tags/${VAJRA_VERSION}"
+  while IFS= read -r a; do
+    [[ -z "$a" ]] && continue
+    [[ "$a" == *.sha256 ]] && continue
+    CANDIDATES+=("$a")
+  done < <(curl -fsSL "$api_url" 2>/dev/null \
+    | grep -oE '"browser_download_url"\s*:\s*"[^"]+\.tar\.gz"' \
+    | sed -E 's|.*/||; s|"$||' | grep -E 'x86_64|linux' || true)
+  local asset ok=0
+  for asset in "${CANDIDATES[@]}"; do
+    echo "   → trying: $asset"
+    if curl -fL --retry 2 --connect-timeout 10 --max-time 180 -sS \
+         "$BASE/$asset" -o "$TMP/$asset" 2>/dev/null; then
+      if curl -fL -sS "$BASE/${asset}.sha256" -o "$TMP/${asset}.sha256" 2>/dev/null; then
+        if ( cd "$TMP" && sha256sum -c "${asset}.sha256" >/dev/null 2>&1 ); then
+          echo "   → checksum OK"
+        else
+          echo "   → checksum FAILED, skipping"
+          continue
+        fi
+      fi
+      if tar -xzf "$TMP/$asset" -C "$TMP" 2>/dev/null; then
+        local SRC
+        SRC=$(find "$TMP" -type f -name vajra -not -name '*.tar.gz' 2>/dev/null | head -1)
+        if [[ -n "$SRC" ]]; then
+          install -m 0755 "$SRC" /usr/local/bin/vajra
+          echo "   → installed vajra from $asset"
+          ok=1; break
+        fi
+      fi
     fi
   done
-  if [[ "$_downloaded" == "1" ]]; then
-    local SRC; SRC="$(find "$TMP" -type f -name vajra | head -1)"
-    install -m 0755 "$SRC" /usr/local/bin/vajra
-    rm -rf "$TMP"
-    echo "   → installed vajra"
-  else
-    die "Could not download pre-built Vajra binary."
+  rm -rf "$TMP"
+  if [[ "$ok" != "1" ]]; then
+    die "Could not download Vajra binary from ${BASE}.
+  Tried: ${CANDIDATES[*]}
+  Check https://github.com/${VAJRA_REPO}/releases/tag/${VAJRA_VERSION}"
   fi
 }
 
