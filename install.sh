@@ -209,11 +209,14 @@ cmd_add() {
   local DOMAIN="$1" EMAIL="$2"; shift 2
   local ADMIN_USER="wpadmin"
   local ADMIN_PASS=""
+  local SITE_MODE="__DEFAULT_SITE_MODE__"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --admin-user) ADMIN_USER="$2"; shift 2 ;;
       --admin-pass) ADMIN_PASS="$2"; shift 2 ;;
+      --php)  SITE_MODE="php";  shift ;;
+      --html) SITE_MODE="html"; shift ;;
       *) shift ;;
     esac
   done
@@ -235,26 +238,42 @@ cmd_add() {
   certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" --agree-tos --email "$EMAIL" --non-interactive || true
   systemctl start vajra.service || true
 
-  log "Updating Vajra config..."
-  # नया [tls] ब्लॉक सही फॉर्मेट में जोड़ें
-  cat > "$APP_TOML" <<TOML
+  log "Updating Vajra config (append mode)..."
+  if [[ ! -f "$APP_TOML" ]]; then
+    cat > "$APP_TOML" <<TOML_EOF
 [server]
 listen  = "0.0.0.0:80"
 workers = 1
+[tls]
+listen  = "0.0.0.0:443"
+cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+key     = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+TOML_EOF
+  fi
+  if ! grep -q '^\[tls\]' "$APP_TOML"; then
+    cat >> "$APP_TOML" <<TOML_EOF
 
 [tls]
 listen  = "0.0.0.0:443"
 cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
 key     = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+TOML_EOF
+  fi
+  if ! grep -q "^host *= *\"${DOMAIN}\"" "$APP_TOML"; then
+    cat >> "$APP_TOML" <<TOML_EOF
 
 [[site]]
 host     = "${DOMAIN}"
 root     = "${SITE_ROOT}"
 index    = "index.php"
-mode     = "wordpress"
+mode     = "${SITE_MODE}"
 php_sock = "unix:${PHP_SOCK}"
-TOML
-
+tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+TOML_EOF
+  else
+    echo "   → site ${DOMAIN} already present — skipping"
+  fi
   systemctl restart vajra.service
 
   # WP-CLI Install
@@ -365,6 +384,10 @@ main() {
   
   # RHEL Family: Firewall, io_uring, SELinux Fix
   if [[ "$DISTRO_FAMILY" == "rhel" ]]; then
+    # Disable Apache/Nginx if they were pulled in by PHP
+    systemctl stop httpd nginx 2>/dev/null || true
+    systemctl disable httpd nginx 2>/dev/null || true
+
     if command -v firewall-cmd >/dev/null 2>&1; then
       firewall-cmd --permanent --add-service=http >/dev/null 2>&1 || true
       firewall-cmd --permanent --add-service=https >/dev/null 2>&1 || true
@@ -388,7 +411,7 @@ main() {
   
   # PHP-FPM को हमेशा चालू रखें
   systemctl enable --now "$PHP_FPM_SVC" 2>/dev/null || true
-  for i in {1..10}; do
+  for i in {1..30}; do
     [[ -S "$PHP_SOCK" ]] && break
     sleep 1
   done
@@ -479,6 +502,20 @@ verify_and_fix_services() {
         die "❌ PHP-FPM could not be started. Please check logs."
     fi
     log "✅ PHP-FPM is running."
+
+    # Socket presence check
+    local _sock="${PHP_SOCK:-}"
+    if [[ -z "$_sock" ]] || [[ ! -S "$_sock" ]]; then
+        log "⚠️  PHP-FPM socket missing ($_sock) — waiting up to 15s..."
+        for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            [[ -S "$_sock" ]] && break
+            sleep 1
+        done
+    fi
+    if [[ -z "$_sock" ]] || [[ ! -S "$_sock" ]]; then
+        die "❌ PHP-FPM socket never appeared ($_sock). Check: journalctl -u ${php_svc:-php-fpm}"
+    fi
+    log "✅ PHP-FPM socket present: $_sock"
 
     # 3. Vajra Check
     if ! systemctl is-active --quiet vajra; then
