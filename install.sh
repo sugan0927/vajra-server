@@ -192,7 +192,12 @@ create_vajra_site_cli() {
 cat > /usr/local/bin/vajra-site <<'VAJRA_SITE_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-WWW_USER="__WWW_USER__"
+# ── Dynamic web-user detection (Debian: www-data, RHEL: apache, Arch: http) ──
+if id -u www-data >/dev/null 2>&1; then WWW_USER="www-data"
+elif id -u apache >/dev/null 2>&1; then WWW_USER="apache"
+elif id -u nginx >/dev/null 2>&1; then WWW_USER="nginx"
+elif id -u http >/dev/null 2>&1; then WWW_USER="http"
+else WWW_USER="nobody"; fi
 PHP_SOCK="__PHP_SOCK__"
 APP_TOML="/etc/vajra/app.toml"
 WWW_ROOT="/var/www/sites"
@@ -365,7 +370,7 @@ case "${1:-}" in
 esac
 VAJRA_SITE_SCRIPT
 
-sed -i "s|__WWW_USER__|${WWW_USER}|g; s|__PHP_SOCK__|${PHP_SOCK}|g" /usr/local/bin/vajra-site
+sed -i "s|__PHP_SOCK__|${PHP_SOCK}|g" /usr/local/bin/vajra-site
 chmod 0755 /usr/local/bin/vajra-site
 }
 
