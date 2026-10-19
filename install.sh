@@ -53,7 +53,12 @@ www_user() {
     arch)   echo "http"     ;;
   esac
 }
-WWW_USER=""
+# ── Dynamic web-user detection ──
+if id -u www-data >/dev/null 2>&1; then WWW_USER="www-data"
+elif id -u apache >/dev/null 2>&1; then WWW_USER="apache"
+elif id -u nginx >/dev/null 2>&1; then WWW_USER="nginx"
+elif id -u http >/dev/null 2>&1; then WWW_USER="http"
+else WWW_USER="nobody"; fi
 
 # ─── Package Manager ────────────────────────────────────────────────────
 pkg_update() {
