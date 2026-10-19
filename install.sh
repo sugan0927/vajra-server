@@ -500,3 +500,4 @@ echo "✅ Vajra Stack Installed!"
 }
 
 main "$@"
+# Updated installer with binary fix
