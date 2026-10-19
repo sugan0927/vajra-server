@@ -122,52 +122,61 @@ setup_php() {
 
 # ─── Vajra Binary Downloader ────────────────────────────────────────────
 install_vajra_binary() {
-    if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then return; fi
-
-    if [[ "$VAJRA_VERSION" == "latest" ]]; then
-        VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${VAJRA_REPO}/releases/latest" | grep -m 1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
+  if [[ "$VAJRA_SKIP_BINARY" == "1" ]]; then return; fi
+  if [[ "$VAJRA_VERSION" == "latest" ]]; then
+    VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${VAJRA_REPO}/releases/latest" \
+      | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+  fi
+  echo "   → tag: $VAJRA_VERSION"
+  local BASE="https://github.com/${VAJRA_REPO}/releases/download/${VAJRA_VERSION}"
+  local VER_NOV="${VAJRA_VERSION#v}"
+  local TMP; TMP="$(mktemp -d)"
+  local -a CANDIDATES=(
+    "vajra-${VAJRA_VERSION}-linux-x86_64.tar.gz"
+    "vajra-${VER_NOV}-linux-x86_64.tar.gz"
+    "vajra-${VAJRA_VERSION}-x86_64-linux.tar.gz"
+    "vajra-${VER_NOV}-x86_64-linux.tar.gz"
+    "vajra-${VAJRA_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+    "vajra-${VER_NOV}-x86_64-unknown-linux-musl.tar.gz"
+  )
+  local api_url="https://api.github.com/repos/${VAJRA_REPO}/releases/tags/${VAJRA_VERSION}"
+  while IFS= read -r a; do
+    [[ -z "$a" ]] && continue
+    [[ "$a" == *.sha256 ]] && continue
+    CANDIDATES+=("$a")
+  done < <(curl -fsSL "$api_url" 2>/dev/null \
+    | grep -oE '"browser_download_url"\s*:\s*"[^"]+\.tar\.gz"' \
+    | sed -E 's|.*/||; s|"$||' | grep -E 'x86_64|linux' || true)
+  local asset ok=0
+  for asset in "${CANDIDATES[@]}"; do
+    echo "   → trying: $asset"
+    if curl -fL --retry 2 --connect-timeout 10 --max-time 180 -sS \
+         "$BASE/$asset" -o "$TMP/$asset" 2>/dev/null; then
+      if curl -fL -sS "$BASE/${asset}.sha256" -o "$TMP/${asset}.sha256" 2>/dev/null; then
+        if ( cd "$TMP" && sha256sum -c "${asset}.sha256" >/dev/null 2>&1 ); then
+          echo "   → checksum OK"
+        else
+          echo "   → checksum FAILED, skipping"
+          continue
+        fi
+      fi
+      if tar -xzf "$TMP/$asset" -C "$TMP" 2>/dev/null; then
+        local SRC
+        SRC=$(find "$TMP" -type f -name vajra -not -name '*.tar.gz' 2>/dev/null | head -1)
+        if [[ -n "$SRC" ]]; then
+          install -m 0755 "$SRC" /usr/local/bin/vajra
+          echo "   → installed vajra from $asset"
+          ok=1; break
+        fi
+      fi
     fi
-
-    echo " → tag: $VAJRA_VERSION"
-
-    # GitHub API से सटीक फाइल लिंक प्राप्त करें (Python के माध्यम से)
-    local _ASSET_URL
-    _ASSET_URL=$(python3 - "$VAJRA_REPO" "$VAJRA_VERSION" <<'INNER_PYEOF'
-import json, urllib.request, sys
-
-repo = sys.argv[1]
-ver = sys.argv[2]
-url = f"https://api.github.com/repos/{repo}/releases/tags/{ver}"
-
-try:
-    req = urllib.request.Request(url, headers={'User-Agent': 'Vajra-Installer'})
-    data = json.loads(urllib.request.urlopen(req).read().decode())
-    for asset in data.get("assets", []):
-        if asset["name"].endswith(".tar.gz"):
-            print(asset["browser_download_url"])
-            sys.exit(0)
-except Exception:
-    pass
-sys.exit(1)
-INNER_PYEOF
-    )
-
-    if [[ -z "$_ASSET_URL" ]]; then
-        die "GitHub Release ${VAJRA_VERSION} में .tar.gz फाइल नहीं मिली"
-    fi
-
-    echo " → downloading: $_ASSET_URL"
-    local TMP; TMP="$(mktemp -d)"
-
-    if curl -fL --retry 3 --progress-bar "$_ASSET_URL" -o "$TMP/vajra.tar.gz"; then
-        tar -xzf "$TMP/vajra.tar.gz" -C "$TMP"
-        local SRC; SRC="$(find "$TMP" -type f -name vajra | head -1)"
-        install -m 0755 "$SRC" /usr/local/bin/vajra
-        rm -rf "$TMP"
-        echo " → installed vajra"
-    else
-        die "Vajra binary डाउनलोड करने में विफल रहा।"
-    fi
+  done
+  rm -rf "$TMP"
+  if [[ "$ok" != "1" ]]; then
+    die "Could not download Vajra binary from ${BASE}.
+  Tried: ${CANDIDATES[*]}
+  Check https://github.com/${VAJRA_REPO}/releases/tag/${VAJRA_VERSION}"
+  fi
 }
 
 # ─── WP-CLI Installer ───────────────────────────────────────────────────
@@ -428,7 +437,63 @@ UNIT
   log "6/6 — Installing vajra-site CLI"
   create_vajra_site_cli
 
-  echo "✅ Vajra Stack Installed!"
+  
+verify_and_fix_services() {
+    log "🔍 Verifying core services (MariaDB, PHP-FPM, Vajra)..."
+    
+    # 1. MariaDB Check
+    local db_svc="mariadb"
+    if ! systemctl is-active --quiet "$db_svc"; then
+        log "⚠️  MariaDB is down. Attempting to fix..."
+        mkdir -p /run/mariadb /var/run/mysqld
+        chown -R mysql:mysql /var/lib/mysql /run/mariadb /var/run/mysqld 2>/dev/null || true
+        systemctl restart "$db_svc" 2>/dev/null || systemctl restart mysql 2>/dev/null || true
+    fi
+    if ! systemctl is-active --quiet "$db_svc"; then
+        die "❌ MariaDB could not be started. Please check logs."
+    fi
+    log "✅ MariaDB is running."
+
+    # 2. PHP-FPM Check
+    local php_svc="php-fpm"
+    
+    # Universal Check: अगर डिफ़ॉल्ट php-fpm नहीं है, तो php*-fpm (जैसे Debian में php8.3-fpm) खोजें
+    if ! systemctl list-unit-files "php-fpm.service" --no-legend 2>/dev/null | grep -q "php-fpm.service"; then
+        local found_php=$(ls /usr/lib/systemd/system/php*-fpm.service /lib/systemd/system/php*-fpm.service 2>/dev/null | head -1)
+        if [ -n "$found_php" ]; then
+            php_svc=$(basename "$found_php" .service)
+        fi
+    fi
+    
+    if ! systemctl is-active --quiet "$php_svc"; then
+        log "⚠️  PHP-FPM ($php_svc) is down. Attempting to fix..."
+        mkdir -p /run/php-fpm /run/php
+        chown -R "$WWW_USER:$WWW_USER" /run/php-fpm /run/php 2>/dev/null || true
+        if command -v setsebool >/dev/null; then
+            setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+            setsebool -P httpd_can_network_connect_db 1 2>/dev/null || true
+        fi
+        systemctl restart "$php_svc" 2>/dev/null || true
+    fi
+    if ! systemctl is-active --quiet "$php_svc"; then
+        die "❌ PHP-FPM could not be started. Please check logs."
+    fi
+    log "✅ PHP-FPM is running."
+
+    # 3. Vajra Check
+    if ! systemctl is-active --quiet vajra; then
+        log "⚠️  Vajra Web Server is down. Attempting to fix..."
+        systemctl reset-failed vajra 2>/dev/null || true
+        systemctl restart vajra 2>/dev/null || true
+    fi
+    if ! systemctl is-active --quiet vajra; then
+        die "❌ Vajra Web Server could not be started. Please check logs."
+    fi
+    log "✅ Vajra Web Server is running."
+}
+
+verify_and_fix_services
+echo "✅ Vajra Stack Installed!"
   if [[ -n "$FIRST_DOMAIN" && -n "$FIRST_EMAIL" ]]; then
     /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" "${@:3}" || true
   fi
