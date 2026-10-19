@@ -1,0 +1,52 @@
+name: Universal Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Stage tarball
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          STAGE="vajra-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "$STAGE"/{bin,systemd,etc/vajra,etc/php,scripts}
+          cp "target/${{ matrix.target }}/release/vajra" "$STAGE/bin/"
+          strip "$STAGE/bin/vajra" || true
+          chmod 755 "$STAGE/bin/vajra"
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+          sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vajra-${{ matrix.arch }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
