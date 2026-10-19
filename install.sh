@@ -222,6 +222,14 @@ cmd_add() {
   done
 
   local SITE_ROOT="${WWW_ROOT}/${DOMAIN}"
+  
+  # अगर साइट पहले से इंस्टॉल है, तो दोबारा कुछ न करें
+  if [[ -f "$SITE_ROOT/wp-load.php" ]]; then
+      echo "✅ Site ${DOMAIN} is already installed at ${SITE_ROOT}."
+      echo "   To reinstall, remove it first: rm -rf ${SITE_ROOT}"
+      exit 0
+  fi
+
   mkdir -p "$SITE_ROOT"
 
   log "Installing WordPress..."
