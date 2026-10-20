@@ -113,7 +113,28 @@ fn default_health_enabled() -> bool {
 }
 
 #[derive(Clone, Debug)]
+pub struct ObjectCacheSettings {
+    pub enabled: bool,
+    pub listen: String,
+    pub max_memory_mb: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawObjectCache {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_oc_listen")]
+    pub listen: String,
+    #[serde(default = "default_oc_mem")]
+    pub max_memory_mb: usize,
+}
+
+fn default_oc_listen() -> String { "127.0.0.1:6379".to_string() }
+fn default_oc_mem() -> usize { 128 }
+
+#[derive(Clone, Debug)]
 pub struct Settings {
+    pub object_cache: Option<ObjectCacheSettings>,
     pub health: Option<HealthConfig>,
     pub listen: SocketAddr,
     /// 0 means "one per CPU" (resolved by `main`).
@@ -316,6 +337,7 @@ impl Default for CacheSettings {
 /// Everything a worker can swap at runtime without dropping connections.
 #[derive(Debug, Clone, Default)]
 pub struct Dynamic {
+    pub object_cache: Option<ObjectCacheSettings>,
     pub static_files: Option<StaticSettings>,
     pub sites: Vec<SiteSettings>,
     pub proxies: Vec<ProxySettings>,
@@ -363,6 +385,7 @@ impl StaticSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            object_cache: None,
             health: None,
             listen: DEFAULT_LISTEN.parse().unwrap(),
             workers: 1,
@@ -393,6 +416,8 @@ impl Default for Settings {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    #[serde(default)]
+    pub object_cache: Option<RawObjectCache>,
     /// Phase 1a: multi-site (Host-header) routing table.
     /// TOML section is `[[site]]` (singular); the Rust field is
     /// `sites` (plural) because it holds a list.
@@ -997,6 +1022,11 @@ impl Settings {
             compression: build_compression(raw.compression.unwrap_or_default())?,
             fastcgi_cache: build_fastcgi_cache(raw.fastcgi_cache.unwrap_or_default())?,
             backup: raw.backup.unwrap_or_default(),
+            object_cache: raw.object_cache.map(|raw_oc| ObjectCacheSettings {
+                enabled: raw_oc.enabled,
+                listen: raw_oc.listen,
+                max_memory_mb: raw_oc.max_memory_mb,
+            }),
             health: raw.health,
             listen,
             workers: raw.server.workers,
@@ -1037,6 +1067,7 @@ impl Settings {
             }),
             access_log: self.access_log.clone(),
             log_format: self.log_format,
+            object_cache: self.object_cache.clone(),
             cache: self.cache,
             headers: self.headers.clone(),
             access: self.access.clone(),

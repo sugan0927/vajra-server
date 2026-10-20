@@ -8,6 +8,7 @@
 //! configured, TLS), its own io_uring, TLS config, file cache, response cache
 //! and upstream pools, so threads share nothing after startup. The main thread
 //! only talks to workers over their control channels.
+mod object_cache;
 
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
@@ -290,6 +291,20 @@ fn main() {
     }
     if let Some(l) = &settings.access_log {
         println!("vajra: access log {l}");
+    }
+
+    
+    // ─── Start Built-in Object Cache (Redis) ───
+    if let Some(ref oc_config) = settings.object_cache {
+        if oc_config.enabled {
+            let cache = std::sync::Arc::new(crate::object_cache::ObjectCache::new(oc_config.max_memory_mb));
+            let listen_addr = oc_config.listen.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = cache.start_server(listen_addr) {
+                    eprintln!("vajra: object_cache error: {e}");
+                }
+            });
+        }
     }
 
     let dynamic = settings.dynamic();

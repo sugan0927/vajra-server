@@ -17,6 +17,7 @@
 //! * [`control`]      - lock-free cross-core command channel (scrape, reload, shutdown)
 //! * [`admin`]        - control-plane manager + admin HTTP endpoint
 //! * [`arena`], [`config`], [`date`], [`sys`] - supporting pieces
+pub mod object_cache;
 
 pub mod cli;
 pub mod access;

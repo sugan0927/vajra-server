@@ -294,6 +294,12 @@ TOML_EOF
   else
     cat >> "$APP_TOML" <<TOML_EOF
 
+
+[object_cache]
+enabled = true
+listen = "127.0.0.1:6379"
+max_memory_mb = 128
+
 [[site]]
 host     = "${DOMAIN}"
 root     = "${SITE_ROOT}"
