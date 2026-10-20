@@ -478,13 +478,46 @@ chmod 750 /var/www/.wp-cli
 listen  = "0.0.0.0:80"
 workers = 1
 
+[tls]
+listen  = "0.0.0.0:443"
+cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+key     = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+
 [compression]
 brotli = true
 gzip = true
 level = 6
 gzip_level = 6
 min_size = 1024
+
+[headers]
+hsts = "max-age=31536000; includeSubDomains"
+x_content_type_options = "nosniff"
+x_frame_options = "SAMEORIGIN"
+referrer_policy = "strict-origin-when-cross-origin"
+
+[fastcgi_cache]
+enabled = true
+path = "/var/cache/vajra/fastcgi"
+max_size_mb = 512
+default_ttl_secs = 3600
+exclude_paths = ["/wp-admin/*", "/wp-login.php", "/wp-json/*"]
+bypass_cookie = ["woocommerce_items_in_cart", "wp_woocommerce_session_", "comment_author_"]
+
+[[site]]
+host     = "${DOMAIN}"
+root     = "/var/www/sites/${DOMAIN}"
+index    = "index.php"
+mode     = "wordpress"
+php_sock = "unix:${PHP_SOCK}"
+tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML
+
+    # 3. FastCGI कैश डायरेक्टरी बनाएँ और परमिशन सेट करें (Debian/CentOS दोनों के लिए)
+    mkdir -p /var/cache/vajra/fastcgi
+    chown -R nobody:nobody /var/cache/vajra/fastcgi 2>/dev/null || chown -R www-data:www-data /var/cache/vajra/fastcgi 2>/dev/null || true
+
   fi
 
   cat > /etc/systemd/system/vajra.service <<UNIT
