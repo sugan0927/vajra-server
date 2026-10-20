@@ -317,13 +317,24 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 //
                 // Absent `ctx.client_ip` (tests), both checks are
                 // skipped entirely.
+                let xff = lookup_header(req.headers, "x-forwarded-for");
+                let xri = lookup_header(req.headers, "x-real-ip");
+                let real_client_ip = ctx.client_ip.map(|peer| {
+                    if let Some(access) = ctx.access {
+                        access.effective_client_ip(peer, xff, xri)
+                    } else {
+                        if let Some(xff_ip) = xff.and_then(|v| std::str::from_utf8(v.as_ref()).ok()).and_then(|s| s.split(',').next()).and_then(|s| s.trim().parse::<std::net::IpAddr>().ok()) {
+                            xff_ip
+                        } else if let Some(xri_ip) = xri.and_then(|v| std::str::from_utf8(v.as_ref()).ok()).and_then(|s| s.trim().parse::<std::net::IpAddr>().ok()) {
+                            xri_ip
+                        } else {
+                            peer
+                        }
+                    }
+                });
+
                 if let Some(peer) = ctx.client_ip {
-                    let xff = lookup_header(req.headers, "x-forwarded-for");
-                    let xri = lookup_header(req.headers, "x-real-ip");
-                    let client = ctx
-                        .access
-                        .map(|a| a.effective_client_ip(peer, xff, xri))
-                        .unwrap_or(peer);
+                    let client = real_client_ip.unwrap_or(peer);
 
                     // ─── IP access control ────────────────────────
                     if let Some(access) = ctx.access {
@@ -443,7 +454,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                         cache::Lookup::Hit(hit) => {
                             let accept_enc_hit: Option<&str> = hdrs.iter()
                                 .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
-                                .and_then(|(_, v)| std::str::from_utf8(v).ok());
+                                .and_then(|(_, v)| std::str::from_utf8(v.as_ref()).ok());
                             let comp_default = crate::compress::CompressionSettings::default();
                             let comp_hit = ctx.compression.unwrap_or(&comp_default);
                             write_proxy_response(
@@ -488,7 +499,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                             host,
                             headers: &hdrs,
                             body,
-                            client_ip: ctx.client_ip,
+                            client_ip: real_client_ip,
                             secure: ctx.secure,
                             upgrade,
                             php: php_target,
@@ -511,7 +522,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                             let host_str = host_lc.as_deref().unwrap_or("");
                             let cookie = hdrs.iter().find_map(|&(n, v)| {
                                 if n.eq_ignore_ascii_case(b"cookie") {
-                                    std::str::from_utf8(v).ok()
+                                    std::str::from_utf8(v.as_ref()).ok()
                                 } else {
                                     None
                                 }
@@ -535,7 +546,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                         crate::metrics::record_fastcgi_cache_hit();
                                         let accept_enc_hit: Option<&str> = hdrs.iter()
                                             .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
-                                            .and_then(|(_, v)| std::str::from_utf8(v).ok());
+                                            .and_then(|(_, v)| std::str::from_utf8(v.as_ref()).ok());
                                         let comp_default = crate::compress::CompressionSettings::default();
                                         let comp_hit = ctx.compression.unwrap_or(&comp_default);
                                         write_proxy_response(

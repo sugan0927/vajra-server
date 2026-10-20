@@ -303,7 +303,7 @@ max_memory_mb = 128
 
 [security]
 enabled = true
-max_conns_per_ip = 30
+max_conns_per_ip = 10000
 auto_ban_enabled = true
 ban_duration_secs = 600
 max_errors_per_minute = 50
