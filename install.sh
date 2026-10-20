@@ -557,6 +557,48 @@ SVC_EOF
 # Production app.toml sections (rate_limit, access, PHP-FPM spare)
 # Idempotent: only adds what's missing, never overwrites
 # ═══════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
+# Re-tune PHP-FPM after a site is added (fixes "No vajra pools" warning
+# that appears on first install when no [[site]] exists yet)
+# ═══════════════════════════════════════════════════════════════════════
+retune_php_fpm_after_site() {
+    # Read RAM to pick max_children (same logic as tune_system)
+    local RAM_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    local MAX_CHILDREN
+    if   [ "$RAM_MB" -ge 4096 ]; then MAX_CHILDREN=32
+    elif [ "$RAM_MB" -ge 2048 ]; then MAX_CHILDREN=16
+    elif [ "$RAM_MB" -ge 1024 ]; then MAX_CHILDREN=8
+    else                              MAX_CHILDREN=4
+    fi
+
+    local php_pool_dirs=()
+    case "$DISTRO_FAMILY" in
+        debian) php_pool_dirs=(/etc/php/*/fpm/pool.d) ;;
+        rhel)   php_pool_dirs=(/etc/php-fpm.d) ;;
+        arch)   php_pool_dirs=(/etc/php/php-fpm.d) ;;
+    esac
+
+    local tuned=0
+    for dir in "${php_pool_dirs[@]}"; do
+        [ -d "$dir" ] || continue
+        for conf in "$dir"/vajra-*.conf; do
+            [ -f "$conf" ] || continue
+            sed -i "s/^pm\.max_children\s*=.*/pm.max_children = $MAX_CHILDREN/" "$conf" 2>/dev/null || true
+            sed -i "s/^pm\.max_requests\s*=.*/pm.max_requests = 1000/" "$conf" 2>/dev/null || true
+            if ! grep -q '^pm\.min_spare_servers' "$conf"; then
+                sed -i '/^pm\.start_servers/a pm.min_spare_servers = 2\npm.max_spare_servers = 6' "$conf" 2>/dev/null || true
+            fi
+            tuned=1
+        done
+    done
+
+    if [ "$tuned" -eq 1 ]; then
+        local phpsvc=$(systemctl list-units --type=service --state=running 2>/dev/null | grep -oE 'php[0-9.]*-fpm|php-fpm' | head -1)
+        [ -n "$phpsvc" ] && systemctl restart "$phpsvc" 2>/dev/null || true
+        log "   ✓ PHP-FPM retuned: max_children=$MAX_CHILDREN for vajra pools"
+    fi
+}
+
 ensure_app_toml_sections() {
     log "Ensuring production app.toml sections..."
 
@@ -868,6 +910,8 @@ verify_and_fix_services
 echo "✅ Vajra Stack Installed!"
   if [[ -n "$FIRST_DOMAIN" && -n "$FIRST_EMAIL" ]]; then
     /usr/local/bin/vajra-site add "$FIRST_DOMAIN" "$FIRST_EMAIL" "${@:3}" || true
+        retune_php_fpm_after_site
+
   fi
 }
 
