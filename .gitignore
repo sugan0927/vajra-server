@@ -6,3 +6,4 @@ target/
 /vajra-snap-*
 *.log
 install.sh.bak
+install.sh.pre-tuning.*
