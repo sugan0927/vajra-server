@@ -259,11 +259,11 @@ cmd_add() {
       # STRICT: die on failure — do not continue with broken config
       if ! certbot certonly --standalone -d "$DOMAIN" -d "www.$DOMAIN" \
            --agree-tos --email "$EMAIL" --non-interactive; then
-          systemctl start vajra.service || true
+          systemctl restart vajra.service || true
           die "❌ SSL Certificate generation failed for ${DOMAIN}. Check DNS / Let's Encrypt rate limits."
       fi
   fi
-  systemctl start vajra.service || true
+  systemctl restart vajra.service || true
 
   log "Updating Vajra config (append mode)..."
   if [[ ! -f "$APP_TOML" ]]; then
@@ -477,6 +477,13 @@ chmod 750 /var/www/.wp-cli
 [server]
 listen  = "0.0.0.0:80"
 workers = 1
+
+[compression]
+brotli = true
+gzip = true
+level = 6
+gzip_level = 6
+min_size = 1024
 TOML
   fi
 
