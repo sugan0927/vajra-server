@@ -1137,6 +1137,7 @@ impl Worker {
         };
         if reset {
             stats.conns_in_window = 0;
+            stats.error_count = 0;
             stats.window_start = Some(now);
         }
         
@@ -1153,7 +1154,7 @@ impl Worker {
         if !reject && stats.conns_in_window >= self.security.max_conns_per_ip {
             reject = true;
             if self.security.auto_ban_enabled {
-                stats.banned_until = Some(now + std::time::Duration::from_secs(self.security.ban_duration_secs));
+                stats.banned_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.security.ban_duration_secs));
             }
         }
     }
@@ -2493,6 +2494,18 @@ impl Worker {
             CacheMode::None => {}
         }
 
+        // DDoS Protection: 404/403 errors count करें
+        if head.status == 404 || head.status == 403 {
+            if let Some(client_ip) = job.client_ip {
+                if let Some(stats) = self.ip_stats.get_mut(&client_ip) {
+                    stats.error_count += 1;
+                    if stats.error_count >= self.security.max_errors_per_minute {
+                        stats.banned_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.security.ban_duration_secs));
+                    }
+                }
+            }
+        }
+        
         let bodyless = head.status == 204 || head.status == 304;
         let bytes = if job.head_req || bodyless {
             0

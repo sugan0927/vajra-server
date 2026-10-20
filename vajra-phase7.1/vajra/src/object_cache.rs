@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 
 pub struct CacheItem {
     pub value: Vec<u8>,
+    pub hash: Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
     pub expires_at: Option<Instant>,
 }
 
@@ -99,6 +100,12 @@ impl ObjectCache {
             "INFO" => self.cmd_info(),
             "GET" => self.cmd_get(&args[1..]),
             "SET" => self.cmd_set(&args[1..]),
+            "HSET" => self.cmd_hset(&args[1..]),
+            "HGET" => self.cmd_hget(&args[1..]),
+            "HGETALL" => self.cmd_hgetall(&args[1..]),
+            "HDEL" => self.cmd_hdel(&args[1..]),
+            "HINCRBY" => self.cmd_hincrby(&args[1..]),
+            "SELECT" => b"+OK\r\n".to_vec(),
             "SETEX" => self.cmd_setex(&args[1..]),
             "EXPIRE" => self.cmd_expire(&args[1..]),
             "TTL" => self.cmd_ttl(&args[1..]),
@@ -219,6 +226,111 @@ impl ObjectCache {
         format!(":{}\r\n", count).into_bytes()
     }
 
+
+    fn cmd_hset(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        if args.len() < 3 { return b"-ERR wrong number of arguments\r\n".to_vec(); }
+        let key = &args[0];
+        let field = args[1].clone();
+        let value = args[2].clone();
+        
+        let mut item = self.data.entry(key.clone()).or_insert_with(|| CacheItem {
+            value: Vec::new(),
+            hash: Some(std::collections::HashMap::new()),
+            expires_at: None,
+        });
+        
+        if item.hash.is_none() {
+            item.hash = Some(std::collections::HashMap::new());
+        }
+        
+        let is_new = item.hash.as_mut().unwrap().insert(field, value).is_none();
+        if is_new { b":1\r\n".to_vec() } else { b":0\r\n".to_vec() }
+    }
+
+    fn cmd_hget(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        if args.len() < 2 { return b"-ERR wrong number of arguments\r\n".to_vec(); }
+        let key = &args[0];
+        let field = &args[1];
+        
+        if let Some(item) = self.data.get(key) {
+            if let Some(ref hash) = item.hash {
+                if let Some(val) = hash.get(field) {
+                    let mut resp = format!("${}\r\n", val.len()).into_bytes();
+                    resp.extend_from_slice(val);
+                    resp.extend_from_slice(b"\r\n");
+                    return resp;
+                }
+            }
+        }
+        b"$-1\r\n".to_vec()
+    }
+
+    fn cmd_hgetall(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        if args.is_empty() { return b"-ERR wrong number of arguments\r\n".to_vec(); }
+        let key = &args[0];
+        
+        if let Some(item) = self.data.get(key) {
+            if let Some(ref hash) = item.hash {
+                let mut resp = format!("*{}\r\n", hash.len() * 2).into_bytes();
+                for (f, v) in hash.iter() {
+                    resp.extend_from_slice(format!("${}\r\n", f.len()).as_bytes());
+                    resp.extend_from_slice(f);
+                    resp.extend_from_slice(b"\r\n");
+                    resp.extend_from_slice(format!("${}\r\n", v.len()).as_bytes());
+                    resp.extend_from_slice(v);
+                    resp.extend_from_slice(b"\r\n");
+                }
+                return resp;
+            }
+        }
+        b"*0\r\n".to_vec()
+    }
+
+    fn cmd_hdel(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        if args.len() < 2 { return b"-ERR wrong number of arguments\r\n".to_vec(); }
+        let key = &args[0];
+        let mut count = 0;
+        
+        if let Some(mut item) = self.data.get_mut(key) {
+            if let Some(ref mut hash) = item.hash {
+                for f in &args[1..] {
+                    if hash.remove(f).is_some() { count += 1; }
+                }
+            }
+        }
+        format!(":{}\r\n", count).into_bytes()
+    }
+
+    fn cmd_hincrby(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        if args.len() < 3 { return b"-ERR wrong number of arguments\r\n".to_vec(); }
+        let key = &args[0];
+        let field = args[1].clone();
+        let inc_str = String::from_utf8_lossy(&args[2]);
+        
+        let inc: i64 = match inc_str.parse() {
+            Ok(n) => n,
+            Err(_) => return b"-ERR value is not an integer or out of range\r\n".to_vec(),
+        };
+        
+        let mut item = self.data.entry(key.clone()).or_insert_with(|| CacheItem {
+            value: Vec::new(),
+            hash: Some(std::collections::HashMap::new()),
+            expires_at: None,
+        });
+        
+        if item.hash.is_none() {
+            item.hash = Some(std::collections::HashMap::new());
+        }
+        
+        let hash = item.hash.as_mut().unwrap();
+        let current_str = hash.get(&field).cloned().unwrap_or_else(|| b"0".to_vec());
+        let current: i64 = String::from_utf8_lossy(&current_str).parse().unwrap_or(0);
+        let new_val = current + inc;
+        
+        hash.insert(field, new_val.to_string().into_bytes());
+        format!(":{}\r\n", new_val).into_bytes()
+    }
+
     fn cmd_info(&self) -> Vec<u8> {
         let info = format!("# Server\r\nredis_version:7.0.0-vajra\r\n# Memory\r\nused_memory:{}\r\n", self.current_memory.load(Ordering::SeqCst));
         let mut resp = format!("${}\r\n", info.len()).into_bytes();
@@ -236,7 +348,7 @@ impl ObjectCache {
             self.current_memory.store(0, Ordering::SeqCst);
         }
         
-        let item = CacheItem { value: val, expires_at };
+        let item = CacheItem { value: val, hash: None, expires_at };
         if let Some(old) = self.data.insert(key, item) {
             self.current_memory.fetch_sub(old.value.len(), Ordering::SeqCst);
         }
