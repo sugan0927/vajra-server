@@ -250,7 +250,12 @@ fn main() {
         settings.listen, settings.workers
     );
     if let Some(t) = &settings.tls {
-        println!("vajra: https on {}  (HTTP/2 via ALPN)", t.listen);
+        let proto = if crate::tls::ALPN.iter().any(|p| *p == b"h2") {
+            "HTTP/2 via ALPN"
+        } else {
+            "HTTP/1.1 only"
+        };
+        println!("vajra: https on {}  ({})", t.listen, proto);
     }
     if let Some(q) = &settings.quic {
         println!(
