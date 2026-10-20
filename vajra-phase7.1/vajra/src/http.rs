@@ -441,6 +441,11 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                         ctx.now,
                     ) {
                         cache::Lookup::Hit(hit) => {
+                            let accept_enc_hit: Option<&str> = hdrs.iter()
+                                .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                                .and_then(|(_, v)| std::str::from_utf8(v).ok());
+                            let comp_default = crate::compress::CompressionSettings::default();
+                            let comp_hit = ctx.compression.unwrap_or(&comp_default);
                             write_proxy_response(
                                 out,
                                 hit.status,
@@ -450,8 +455,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 keep_alive,
                                 date,
                                 Some("HIT"),
-                                None,
-                            );
+                                None, accept_enc_hit, comp_hit);
                             let bytes = if hit.status == 204 || hit.status == 304 {
                                 0
                             } else {
@@ -529,6 +533,11 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 match fc.get(&key) {
                                     Ok(Some((status, headers, cached))) => {
                                         crate::metrics::record_fastcgi_cache_hit();
+                                        let accept_enc_hit: Option<&str> = hdrs.iter()
+                                            .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                                            .and_then(|(_, v)| std::str::from_utf8(v).ok());
+                                        let comp_default = crate::compress::CompressionSettings::default();
+                                        let comp_hit = ctx.compression.unwrap_or(&comp_default);
                                         write_proxy_response(
                                             out,
                                             status,
@@ -538,8 +547,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                             keep_alive,
                                             date,
                                             None,
-                                            Some("HIT"),
-                                        );
+                                            Some("HIT"), accept_enc_hit, comp_hit);
                                         let bytes = if status == 204 || status == 304 {
                                             0
                                         } else {
@@ -895,7 +903,43 @@ pub fn write_proxy_response(
     date: &[u8; DATE_LEN],
     xcache: Option<&str>,
     fcgi_cache: Option<&str>,
+    accept_encoding: Option<&str>,
+    comp: &crate::compress::CompressionSettings,
 ) {
+
+    let mut body = body;
+    // Initialised empty to satisfy borrow-checker; overwritten on compress.
+    #[allow(unused_assignments)]
+    let mut compressed_data = Vec::new();
+    let mut is_compressed = false;
+    let mut enc_str: &[u8] = b"";
+
+    let mut should_vary = false;
+    if status == 200 && !head_req {
+        let ct = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"content-type")).map(|(_, v)| String::from_utf8_lossy(v).to_string()).unwrap_or_default();
+        if (comp.brotli || comp.gzip) && !ct.is_empty() && !crate::compress::is_pre_compressed(&ct) {
+            should_vary = true;
+        }
+        if crate::compress::decide(comp, accept_encoding, &ct, body.len(), head_req) == crate::compress::Plan::Compress {
+            let enc = crate::compress::negotiate(accept_encoding, comp);
+            if enc == crate::compress::Encoding::Brotli {
+                if let Some(c) = crate::compress::brotli_compress(body, comp.level) {
+                    compressed_data = c;
+                    body = &compressed_data;
+                    is_compressed = true;
+                    enc_str = b"br";
+                }
+            } else if enc == crate::compress::Encoding::Gzip {
+                if let Some(c) = crate::compress::gzip_compress(body, comp.gzip_level) {
+                    compressed_data = c;
+                    body = &compressed_data;
+                    is_compressed = true;
+                    enc_str = b"gzip";
+                }
+            }
+        }
+    }
+
     let bodyless = status == 204 || status == 304;
     out.extend_from_slice(b"HTTP/1.1 ");
     push_u64(out, status as u64);
@@ -918,6 +962,8 @@ pub fn write_proxy_response(
             || n.eq_ignore_ascii_case(b"server")
             || n.eq_ignore_ascii_case(b"x-cache")
             || (n.eq_ignore_ascii_case(b"content-length") && !head_req)
+            || (is_compressed && n.eq_ignore_ascii_case(b"content-encoding"))
+            || (should_vary && n.eq_ignore_ascii_case(b"vary"))
         {
             continue;
         }
@@ -925,6 +971,14 @@ pub fn write_proxy_response(
         out.extend_from_slice(b": ");
         out.extend_from_slice(v);
         out.extend_from_slice(b"\r\n");
+    }
+    if is_compressed {
+        out.extend_from_slice(b"Content-Encoding: ");
+        out.extend_from_slice(enc_str);
+        out.extend_from_slice(b"\r\n");
+    }
+    if should_vary {
+        out.extend_from_slice(b"Vary: Accept-Encoding\r\n");
     }
     if let Some(x) = xcache {
         out.extend_from_slice(b"X-Cache: ");
@@ -1458,8 +1512,7 @@ mod tests {
             true,
             DATE,
             Some("MISS"),
-            None,
-        );
+            None, None, &crate::compress::CompressionSettings::default());
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("HTTP/1.1 201 Created\r\n"));
         assert!(s.contains("X-Custom: 1\r\n") && s.contains("Content-Length: 3\r\n"));
@@ -1468,7 +1521,7 @@ mod tests {
         assert!(s.ends_with("\r\n\r\nabc"));
 
         let mut out = Vec::new();
-        write_proxy_response(&mut out, 200, &hdrs, b"", true, false, DATE, None, None);
+        write_proxy_response(&mut out, 200, &hdrs, b"", true, false, DATE, None, None, None, &crate::compress::CompressionSettings::default());
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.contains("Content-Length: 99\r\n"),

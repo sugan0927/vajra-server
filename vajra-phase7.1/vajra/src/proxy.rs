@@ -399,6 +399,8 @@ pub struct ProxySpec {
     /// Request path (query के बिना) — sidecar के लिए ताकि admin
     /// `purge?path=...` match कर सके।
     pub fcgi_cache_path: Option<Vec<u8>>,
+    /// Raw `Accept-Encoding` request header, if present.
+    pub accept_encoding: Option<String>,
 }
 
 pub struct ReqParts<'a> {
@@ -462,6 +464,11 @@ pub fn make_spec(table: &ProxyTable, route: usize, p: &ReqParts) -> ProxySpec {
             .map(|(_, v)| String::from_utf8_lossy(v).into_owned()),
         fcgi_cache_key: None,
         fcgi_cache_path: None,
+        accept_encoding: p
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+            .map(|(_, v)| String::from_utf8_lossy(v).into_owned()),
     }
 }
 

@@ -1039,7 +1039,10 @@ impl Settings {
             log_format: self.log_format,
             cache: self.cache,
             headers: self.headers.clone(),
-            ..Default::default()
+            access: self.access.clone(),
+            rate_limit: self.rate_limit.clone(),
+            compression: self.compression.clone(),
+            fastcgi_cache: self.fastcgi_cache.clone(),
         }
     }
 

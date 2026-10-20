@@ -254,6 +254,7 @@ struct ProxyJob {
     head: Option<RespHead>,
     chunked: Chunked,
     head_req: bool,
+    accept_encoding: Option<String>,
     idempotent: bool,
     /// HTTP/2 stream awaiting the answer (0 for HTTP/1.1).
     stream: u32,
@@ -299,6 +300,7 @@ impl ProxyJob {
             head: None,
             chunked: Chunked::default(),
             head_req: spec.head,
+            accept_encoding: spec.accept_encoding,
             idempotent: spec.idempotent,
             stream,
             cache: spec.cache,
@@ -2477,8 +2479,7 @@ impl Worker {
                         keep,
                         &date,
                         xcache,
-                        fcgi_status,
-                    );
+                        fcgi_status, job.accept_encoding.as_deref(), &self.compression);
                 }
             }
         }
@@ -3032,6 +3033,7 @@ mod tests {
             cookie: None,
             fcgi_cache_key: None,
             fcgi_cache_path: None,
+            accept_encoding: None,
         };
         ProxyJob::new(spec, st, None, 0)
     }

@@ -5,3 +5,4 @@ target/
 /vajra-cutover-*
 /vajra-snap-*
 *.log
+install.sh.bak
