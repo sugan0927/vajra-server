@@ -152,7 +152,13 @@ fn start(name: &str, retry: bool, proxies: Vec<ProxySettings>) -> Option<Server>
             proxies,
             ..Dynamic::default()
         };
-        match Worker::new(&l, Config::default(), &dynamic, None) {
+        match Worker::new(
+            &l,
+            Config::default(),
+            &dynamic,
+            None,
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        ) {
             Ok(mut w) => {
                 w.attach_control(0, inbox, Duration::from_secs(2));
                 let alt = format!("h3=\":{}\"; ma=60", udp.port());

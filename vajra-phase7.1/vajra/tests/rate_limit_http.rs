@@ -77,7 +77,7 @@ fn fourth_request_after_burst_gets_429_with_retry_after() {
 
     for i in 0..3 {
         let mut ctx = Ctx {
-            sites: None,  // FIX: Phase 1a
+            sites: None, // FIX: Phase 1a
             files: None,
             proxies: &table,
             cache: &mut cache,
@@ -104,7 +104,7 @@ fn fourth_request_after_burst_gets_429_with_retry_after() {
     }
 
     let mut ctx = Ctx {
-        sites: None,  // FIX: Phase 1a
+        sites: None, // FIX: Phase 1a
         files: None,
         proxies: &table,
         cache: &mut cache,
@@ -152,7 +152,7 @@ fn whitelisted_ip_is_never_denied_and_creates_no_buckets() {
 
     for _ in 0..50 {
         let mut ctx = Ctx {
-            sites: None,  // FIX: Phase 1a
+            sites: None, // FIX: Phase 1a
             files: None,
             proxies: &table,
             cache: &mut cache,
@@ -207,7 +207,7 @@ fn per_route_override_has_independent_budget_through_http() {
     // First /api request consumes the 1-token bucket → allowed.
     {
         let mut ctx = Ctx {
-            sites: None,  // FIX: Phase 1a
+            sites: None, // FIX: Phase 1a
             files: None,
             proxies: &table,
             cache: &mut cache,
@@ -237,7 +237,7 @@ fn per_route_override_has_independent_budget_through_http() {
     // Second /api request hits the empty override bucket → 429.
     {
         let mut ctx = Ctx {
-            sites: None,  // FIX: Phase 1a
+            sites: None, // FIX: Phase 1a
             files: None,
             proxies: &table,
             cache: &mut cache,
@@ -265,7 +265,7 @@ fn per_route_override_has_independent_budget_through_http() {
     // Default path has its own 100-token budget → allowed.
     {
         let mut ctx = Ctx {
-            sites: None,  // FIX: Phase 1a
+            sites: None, // FIX: Phase 1a
             files: None,
             proxies: &table,
             cache: &mut cache,
@@ -327,7 +327,7 @@ fn access_deny_wins_over_rate_limit_and_does_not_consume_budget() {
 
     for i in 0..10 {
         let mut ctx = Ctx {
-            sites: None,  // FIX: Phase 1a
+            sites: None, // FIX: Phase 1a
             files: None,
             proxies: &table,
             cache: &mut cache,

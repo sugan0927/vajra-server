@@ -98,7 +98,13 @@ fn start(proxies: Vec<ProxySettings>) -> Option<SocketAddr> {
             proxies,
             ..Dynamic::default()
         };
-        match Worker::new(&l, Config::default(), &dynamic, None) {
+        match Worker::new(
+            &l,
+            Config::default(),
+            &dynamic,
+            None,
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        ) {
             Ok(mut w) => {
                 tx.send(true).unwrap();
                 let _ = w.run();

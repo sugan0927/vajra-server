@@ -293,11 +293,12 @@ fn main() {
         println!("vajra: access log {l}");
     }
 
-    
     // ─── Start Built-in Object Cache (Redis) ───
     if let Some(ref oc_config) = settings.object_cache {
         if oc_config.enabled {
-            let cache = std::sync::Arc::new(crate::object_cache::ObjectCache::new(oc_config.max_memory_mb));
+            let cache = std::sync::Arc::new(crate::object_cache::ObjectCache::new(
+                oc_config.max_memory_mb,
+            ));
             let listen_addr = oc_config.listen.clone();
             std::thread::spawn(move || {
                 if let Err(e) = cache.start_server(listen_addr) {
@@ -312,6 +313,7 @@ fn main() {
     let mut handles = Vec::with_capacity(settings.workers);
     let mut joins = Vec::with_capacity(settings.workers);
 
+    let ip_stats = std::sync::Arc::new(dashmap::DashMap::new());
     for core in 0..settings.workers {
         // Bind in the main thread so bind errors abort startup immediately.
         let plain = sys::listener(settings.listen, true, 4096)
@@ -329,6 +331,7 @@ fn main() {
 
         let (settings, dynamic, ready) = (settings.clone(), dynamic.clone(), ready_tx.clone());
         let quic_cfg = quic_cfg.clone();
+        let ip_stats = ip_stats.clone();
         let j = thread::Builder::new()
             .name(format!("vajra-{core}"))
             .spawn(move || {
@@ -358,7 +361,13 @@ fn main() {
                 }
 
                 // The ring (and all non-Send state) is created on this thread.
-                let mut w = match Worker::new(&listeners, settings.worker, &dynamic, tls_cfg) {
+                let mut w = match Worker::new(
+                    &listeners,
+                    settings.worker,
+                    &dynamic,
+                    tls_cfg,
+                    ip_stats.clone(),
+                ) {
                     Ok(w) => w,
                     Err(e) => {
                         let _ =

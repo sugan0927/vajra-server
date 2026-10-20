@@ -83,7 +83,7 @@ fn http1_requests_never_panic_and_consumption_is_bounded() {
         let mut out = Vec::new();
         for _ in 0..32 {
             let mut ctx = Ctx {
-                sites: None,  // FIX: Phase 1a
+                sites: None, // FIX: Phase 1a
                 files: None,
                 proxies: &table,
                 cache: &mut cache,

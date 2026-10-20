@@ -218,7 +218,13 @@ fn start(root: &Path, proxies: Vec<ProxySettings>, cfg: Config) -> Option<Socket
             proxies,
             ..Dynamic::default()
         };
-        match Worker::new(&l, cfg, &dynamic, None) {
+        match Worker::new(
+            &l,
+            cfg,
+            &dynamic,
+            None,
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        ) {
             Ok(mut w) => {
                 tx.send(true).unwrap();
                 let _ = w.run();
@@ -256,7 +262,13 @@ fn start_with_cache(
             fastcgi_cache: fcgi,
             ..Dynamic::default()
         };
-        match Worker::new(&l, cfg, &dynamic, None) {
+        match Worker::new(
+            &l,
+            cfg,
+            &dynamic,
+            None,
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        ) {
             Ok(mut w) => {
                 tx.send(true).unwrap();
                 let _ = w.run();

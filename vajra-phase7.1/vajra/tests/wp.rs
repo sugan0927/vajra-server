@@ -145,10 +145,7 @@ fn missing_wp_returns_127() {
     // `vajra wp ...` return 0 instead of 127. We override PATH with
     // a directory that exists but is guaranteed to be empty, so the
     // `wp` shell lookup fails no matter what the host has.
-    let empty = std::env::temp_dir().join(format!(
-        "vajra-empty-path-{}",
-        std::process::id()
-    ));
+    let empty = std::env::temp_dir().join(format!("vajra-empty-path-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_vajra"))

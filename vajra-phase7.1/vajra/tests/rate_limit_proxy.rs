@@ -58,7 +58,7 @@ fn drive(
     req: &[u8],
 ) -> Vec<u8> {
     let mut ctx = Ctx {
-        sites: None,  // FIX: Phase 1a
+        sites: None, // FIX: Phase 1a
         files: None,
         proxies: table,
         cache,
@@ -85,7 +85,10 @@ fn is_429(out: &[u8]) -> bool {
     // and any body that happens to contain those bytes, producing
     // rare but real false positives (see flaky
     // `untrusted_peer_ignores_xff` before 2026-10-14).
-    let end = out.windows(2).position(|w| w == b"\r\n").unwrap_or(out.len());
+    let end = out
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .unwrap_or(out.len());
     let line = &out[..end];
     line.ends_with(b" 429") || line.ends_with(b" 429 Too Many Requests")
 }

@@ -62,14 +62,14 @@ use crate::config::{Dynamic, StaticSettings, UpAddr};
 use crate::control::{Cmd, Inbox, Snapshot};
 use crate::date::{DateCache, DATE_LEN};
 use crate::fastcgi;
-use crate::php::PhpConfig;
-use crate::site::{SiteEntry, SiteTable};
 use crate::h2::{FileRead, H2Conn, FILE_CHUNK};
 use crate::http::{self, Action, Ctx};
 use crate::observe::{Http, Observer};
+use crate::php::PhpConfig;
 use crate::proxy::{self, Chunked, Framing, HeadParse, ProxySpec, ProxyState, ReqParts, RespHead};
 use crate::quic::{QConnId, QuicConfig};
 use crate::router;
+use crate::site::{SiteEntry, SiteTable};
 use crate::static_files::{FileCache, OpenFile};
 use crate::sys;
 use crate::tls;
@@ -398,7 +398,7 @@ impl ProxyJob {
 #[repr(align(64))]
 struct Conn {
     pub ip: Option<std::net::IpAddr>,
-        fd: RawFd, // -1 while the slot is free
+    fd: RawFd, // -1 while the slot is free
     /// Receive staging buffer carved from the slab pool (address-stable).
     rbuf: PoolBuf,
     /// A RECV is the operation currently in flight (so it can be cancelled).
@@ -526,14 +526,12 @@ fn open_log(path: Option<&str>) -> Result<Option<(RawFd, bool)>, String> {
     }
 }
 
-
-
 #[derive(Default)]
-struct IpStats {
-    conns_in_window: u32,
-    error_count: u32,
-    window_start: Option<std::time::Instant>,
-    banned_until: Option<std::time::Instant>,
+pub struct IpStats {
+    pub conns_in_window: u32,
+    pub error_count: u32,
+    pub window_start: Option<std::time::Instant>,
+    pub banned_until: Option<std::time::Instant>,
 }
 
 pub struct Worker {
@@ -578,7 +576,7 @@ pub struct Worker {
     /// HTTP/3: UDP socket slots, QUIC engine and timers (see `quic_io`).
     quic: Option<Box<quic_io::QuicRt>>,
     security: crate::config::SecuritySettings,
-    ip_stats: std::collections::HashMap<std::net::IpAddr, IpStats>,
+    ip_stats: std::sync::Arc<dashmap::DashMap<std::net::IpAddr, IpStats>>,
 }
 
 mod quic_io;
@@ -602,6 +600,7 @@ impl Worker {
             cfg,
             &d,
             None,
+            std::sync::Arc::new(dashmap::DashMap::new()),
         )
     }
 
@@ -612,6 +611,7 @@ impl Worker {
         cfg: Config,
         dynamic: &Dynamic,
         tls_cfg: Option<Arc<ServerConfig>>,
+        ip_stats: std::sync::Arc<dashmap::DashMap<std::net::IpAddr, IpStats>>,
     ) -> io::Result<Self> {
         if listeners.iter().any(|l| l.tls) && tls_cfg.is_none() {
             return Err(io::Error::new(
@@ -646,7 +646,7 @@ impl Worker {
 
         Ok(Self {
             security: dynamic.security.clone(),
-            ip_stats: std::collections::HashMap::new(),
+            ip_stats: ip_stats.clone(),
             ring,
             listeners: listeners.to_vec(),
             conns: Vec::new(),
@@ -894,24 +894,22 @@ impl Worker {
             return Err("worker is shutting down".into());
         }
         let files = d.static_files.as_ref().map(FileCache::new);
-        let (sites, synthetic_proxies) = SiteTable::build(&d.sites)
-            .map_err(|e| format!("sites reload: {e}"))?;
+        let (sites, synthetic_proxies) =
+            SiteTable::build(&d.sites).map_err(|e| format!("sites reload: {e}"))?;
         // Phase 1b: rebuild the SNI resolver on every TLS reload so new
         // per-site certs (added via vajra site add in single mode) are
         // picked up. Sites without per-site certs fall back to the
         // top-level [tls] cert.
         let new_tls = match (&d.tls, self.listeners.iter().any(|l| l.tls)) {
             (Some(p), true) => Some(tls::build_server_config_with_sni(
-                &d.sites,
-                &p.cert,
-                &p.key,
+                &d.sites, &p.cert, &p.key,
             )?),
             _ => None,
         };
         let new_quic = self.q_build_server_config(d)?;
         let log = open_log(d.access_log.as_deref())?; // re-opens the file: log rotation via reload
-        // Append synthetic per-site PHP routes so the reloaded
-        // ProxyTable matches what SiteTable::build produced above.
+                                                      // Append synthetic per-site PHP routes so the reloaded
+                                                      // ProxyTable matches what SiteTable::build produced above.
         let mut all_proxies = d.proxies.clone();
         all_proxies.extend(synthetic_proxies);
         let state = ProxyState::new(&all_proxies, d.cache.max_object_bytes, &mut self.obs.m);
@@ -1119,11 +1117,17 @@ impl Worker {
         let mut peer_ip = None;
         if unsafe { libc::getpeername(res, &mut addr as *mut _ as *mut _, &mut len) } == 0 {
             if addr.ss_family == libc::AF_INET as libc::sa_family_t {
-                let addr_in: &libc::sockaddr_in = unsafe { &*(&addr as *const _ as *const libc::sockaddr_in) };
-                peer_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(addr_in.sin_addr.s_addr))));
+                let addr_in: &libc::sockaddr_in =
+                    unsafe { &*(&addr as *const _ as *const libc::sockaddr_in) };
+                peer_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+                    u32::from_be(addr_in.sin_addr.s_addr),
+                )));
             } else if addr.ss_family == libc::AF_INET6 as libc::sa_family_t {
-                let addr_in6: &libc::sockaddr_in6 = unsafe { &*(&addr as *const _ as *const libc::sockaddr_in6) };
-                peer_ip = Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(addr_in6.sin6_addr.s6_addr)));
+                let addr_in6: &libc::sockaddr_in6 =
+                    unsafe { &*(&addr as *const _ as *const libc::sockaddr_in6) };
+                peer_ip = Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                    addr_in6.sin6_addr.s6_addr,
+                )));
             }
         }
 
@@ -1131,51 +1135,57 @@ impl Worker {
             let now = std::time::Instant::now();
             let mut reject = false;
             if self.security.enabled {
-                if let Some(stats) = self.ip_stats.get_mut(&ip) {
-        // Reset window every 60 seconds
-        let reset = match stats.window_start {
-            Some(start) => now.duration_since(start).as_secs() >= 60,
-            None => true,
-        };
-        if reset {
-            stats.conns_in_window = 0;
-            stats.error_count = 0;
-            stats.window_start = Some(now);
-        }
-        
-        // 1. Ban check
-        if let Some(until) = stats.banned_until {
-            if now < until {
-                reject = true;
-            } else {
-                stats.banned_until = None;
-            }
-        }
-        
-        // 2. Connection limit check
-        if !reject && stats.conns_in_window >= self.security.max_conns_per_ip {
-            reject = true;
-            if self.security.auto_ban_enabled {
-                stats.banned_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.security.ban_duration_secs));
-            }
-        }
-    }
+                if let Some(mut stats) = self.ip_stats.get_mut(&ip) {
+                    // Reset window every 60 seconds
+                    let reset = match stats.window_start {
+                        Some(start) => now.duration_since(start).as_secs() >= 60,
+                        None => true,
+                    };
+                    if reset {
+                        stats.conns_in_window = 0;
+                        stats.error_count = 0;
+                        stats.window_start = Some(now);
+                    }
+
+                    // 1. Ban check
+                    if let Some(until) = stats.banned_until {
+                        if now < until {
+                            reject = true;
+                        } else {
+                            stats.banned_until = None;
+                        }
+                    }
+
+                    // 2. Connection limit check
+                    if !reject && stats.conns_in_window >= self.security.max_conns_per_ip {
+                        reject = true;
+                        if self.security.auto_ban_enabled {
+                            stats.banned_until = Some(
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_secs(
+                                        self.security.ban_duration_secs,
+                                    ),
+                            );
+                        }
+                    }
+                }
             }
 
             if reject {
-                unsafe { libc::close(res); }
+                unsafe {
+                    libc::close(res);
+                }
                 return; // कनेक्शन रिजेक्ट
             }
 
             // कनेक्शन स्वीकार करें
-            let stats = self.ip_stats.entry(ip).or_default();
+            let mut stats = self.ip_stats.entry(ip).or_default();
             if stats.window_start.is_none() {
                 stats.window_start = Some(now);
             }
             stats.conns_in_window += 1;
-            
         }
-        
+
         if self.draining.is_some() {
             if res >= 0 {
                 // Raced with shutdown: refuse the connection.
@@ -1467,7 +1477,12 @@ impl Worker {
             let mut site_php: Option<(usize, &PhpConfig)> = None;
             let files_ref: Option<&mut FileCache> = match self.sites.lookup_mut(host) {
                 Some(entry) => {
-                    let SiteEntry { php, php_route_idx, files, .. } = entry;
+                    let SiteEntry {
+                        php,
+                        php_route_idx,
+                        files,
+                        ..
+                    } = entry;
                     if let (Some(cfg), Some(idx)) = (php.as_ref(), *php_route_idx) {
                         site_php = Some((idx, cfg));
                     }
@@ -1548,8 +1563,14 @@ impl Worker {
                         headers: &hdrs,
                         body: &req.body,
                         client_ip: {
-                            let xff = hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"x-forwarded-for")).and_then(|(_, v)| std::str::from_utf8(v).ok());
-                            let xri = hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"x-real-ip")).and_then(|(_, v)| std::str::from_utf8(v).ok());
+                            let xff = hdrs
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case(b"x-forwarded-for"))
+                                .and_then(|(_, v)| std::str::from_utf8(v).ok());
+                            let xri = hdrs
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case(b"x-real-ip"))
+                                .and_then(|(_, v)| std::str::from_utf8(v).ok());
                             peer.map(|p| {
                                 if let Some(xff_str) = xff {
                                     if let Some(first) = xff_str.split(',').next() {
@@ -2517,15 +2538,18 @@ impl Worker {
         // DDoS Protection: 404/403 errors count करें
         if head.status == 404 || head.status == 403 {
             if let Some(client_ip) = job.client_ip {
-                if let Some(stats) = self.ip_stats.get_mut(&client_ip) {
+                if let Some(mut stats) = self.ip_stats.get_mut(&client_ip) {
                     stats.error_count += 1;
                     if stats.error_count >= self.security.max_errors_per_minute {
-                        stats.banned_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(self.security.ban_duration_secs));
+                        stats.banned_until = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_secs(self.security.ban_duration_secs),
+                        );
                     }
                 }
             }
         }
-        
+
         let bodyless = head.status == 204 || head.status == 304;
         let bytes = if job.head_req || bodyless {
             0
@@ -2588,7 +2612,10 @@ impl Worker {
                         keep,
                         &date,
                         xcache,
-                        fcgi_status, job.accept_encoding.as_deref(), &self.compression);
+                        fcgi_status,
+                        job.accept_encoding.as_deref(),
+                        &self.compression,
+                    );
                 }
             }
         }

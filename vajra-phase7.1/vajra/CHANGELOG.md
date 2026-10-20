@@ -97,3 +97,47 @@ Initial phase-7.1 development. Not publicly released.
   HTTP/1.0 (or HTTP/1.1 + `Connection: close`), which hit exactly
   this code path. The `mu-plugins/vajra-loopback-fix.php` workaround
   can be removed from WordPress sites once this version is installed.
+
+## [0.15.8] - 2026-10-20
+
+### Fixed
+- Compile & ship per-IP rate-limiting / banning feature (`IpStats`) that
+  was introduced in v0.15.7 but never built:
+  - `Worker::new` now takes shared `Arc<DashMap<IpAddr, IpStats>>`
+  - `IpStats` (and its fields) made `pub` for cross-module access
+  - Fixed `mut` bindings in `get_mut` / `entry` paths
+  - Fixed `Arc` move-in-loop in `src/main.rs` (per-worker clone)
+  - Updated 8 test call sites (`tests/*.rs`) to pass the new arg
+
+### Changed
+- All workers now share **one global** IP-stats map — banning decisions
+  are consistent across worker threads (previously per-worker).
+
+### Known limitations
+- 11 integration tests remain `#[ignore]`:
+  - HTTP/2 (`h2` disabled at ALPN — see 0.14.4)
+  - Some HTTP/1.1 HTTPS paths marked `WIP: stale after phase7.1 changes`
+  - One WebSocket upgrade-refusal test
+  These are documented WIP, not regressions in this release.
+
+## [0.15.8] - 2026-10-20
+
+### Fixed
+- Compile & ship per-IP rate-limiting / banning feature (`IpStats`) that
+  was introduced in v0.15.7 but never built:
+  - `Worker::new` now takes shared `Arc<DashMap<IpAddr, IpStats>>`
+  - `IpStats` (and its fields) made `pub` for cross-module access
+  - Fixed `mut` bindings in `get_mut` / `entry` paths
+  - Fixed `Arc` move-in-loop in `src/main.rs` (per-worker clone)
+  - Updated 8 test call sites (`tests/*.rs`) to pass the new arg
+
+### Changed
+- All workers now share **one global** IP-stats map — banning decisions
+  are consistent across worker threads (previously per-worker).
+
+### Known limitations
+- 11 integration tests remain `#[ignore]`:
+  - HTTP/2 (`h2` disabled at ALPN — see 0.14.4)
+  - Some HTTP/1.1 HTTPS paths marked `WIP: stale after phase7.1 changes`
+  - One WebSocket upgrade-refusal test
+  These are documented WIP, not regressions in this release.

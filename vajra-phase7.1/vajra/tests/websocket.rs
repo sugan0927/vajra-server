@@ -110,7 +110,13 @@ fn start(upstream: SocketAddr) -> Option<Server> {
             fd: sock.as_raw_fd(),
             tls: false,
         }];
-        match Worker::new(&l, Config::default(), &dynamic, None) {
+        match Worker::new(
+            &l,
+            Config::default(),
+            &dynamic,
+            None,
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        ) {
             Ok(mut w) => {
                 w.attach_control(0, inbox, Duration::from_secs(2));
                 ready_tx.send(true).unwrap();

@@ -64,7 +64,13 @@ fn start(root: &Path, proxies: Vec<ProxySettings>) -> Option<Env> {
             proxies,
             ..Dynamic::default()
         };
-        match Worker::new(&l, Config::default(), &dynamic, Some(tls_cfg)) {
+        match Worker::new(
+            &l,
+            Config::default(),
+            &dynamic,
+            Some(tls_cfg),
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        ) {
             Ok(mut w) => {
                 tx.send(true).unwrap();
                 let _ = w.run();
