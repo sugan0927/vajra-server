@@ -615,67 +615,73 @@ retune_php_fpm_after_site() {
 # Idempotent: safe to run any number of times.
 # ═══════════════════════════════════════════════════════════════════════
 install_retune_wrapper() {
+    # Safe, defensive wrapper:
+    #   - Cache-busted GitHub fetch (bypasses stale CDN)
+    #   - Verifies fetched script supports --retune
+    #   - Falls back to local /opt/vajra-server/install.sh if needed
+    #   - Refuses to run full install accidentally
     cat > /usr/local/bin/vajra-retune <<'RETUNE_WRAPPER_EOF'
 #!/usr/bin/env bash
 # vajra-retune — re-apply production tuning on existing Vajra install
-# Idempotent: safe to run multiple times
-# Usage: sudo vajra-retune [--offline]
+# Idempotent, defensive: verifies --retune support before executing
 set -euo pipefail
 
 VAJRA_REPO="${VAJRA_REPO:-sugan0927/vajra-server}"
 CACHE="/var/cache/vajra/install.sh"
-URL="https://raw.githubusercontent.com/${VAJRA_REPO}/main/install.sh"
+LOCAL="/opt/vajra-server/install.sh"
+URL="https://raw.githubusercontent.com/${VAJRA_REPO}/main/install.sh?nocache=$(date +%s)"
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ vajra-retune: must run as root"
-    exit 1
-fi
-
+if [ "$(id -u)" -ne 0 ]; then echo "❌ must be root"; exit 1; fi
 if [ ! -f /etc/vajra/app.toml ]; then
-    echo "❌ vajra-retune: /etc/vajra/app.toml not found"
-    echo "   Vajra is not installed."
-    echo "   Run the installer:"
-    echo "   curl -fsSL ${URL} | sudo bash"
+    echo "❌ Vajra not installed (/etc/vajra/app.toml missing)"
     exit 1
 fi
 
+# ─── 1. Cache-busted fetch + verify --retune support ───
+echo "▶ Fetching latest installer (cache-busted)..."
 mkdir -p "$(dirname "$CACHE")"
-
-# Refresh cache if older than 24h (or --offline skips fetch)
-if [ "${1:-}" != "--offline" ]; then
-    if [ ! -f "$CACHE" ] || [ -z "$(find "$CACHE" -mmin -1440 2>/dev/null)" ]; then
-        echo "▶ Fetching latest installer from GitHub..."
-        if curl -fsSL --max-time 15 "$URL" -o "$CACHE.tmp" 2>/dev/null; then
-            mv "$CACHE.tmp" "$CACHE"
-            echo "▶ Fetched: $CACHE ($(wc -l < "$CACHE") lines)"
+if curl -fsSL --max-time 15 "$URL" -o "$CACHE.tmp" 2>/dev/null; then
+    if grep -q 'RETUNE_ONLY' "$CACHE.tmp"; then
+        mv "$CACHE.tmp" "$CACHE"
+        echo "▶ Fetched: $(wc -l < "$CACHE") lines ✅"
+    else
+        echo "⚠ Fetched script too old (no --retune support)"
+        rm -f "$CACHE.tmp"
+        if [ -f "$LOCAL" ] && grep -q 'RETUNE_ONLY' "$LOCAL"; then
+            cp "$LOCAL" "$CACHE"
+            echo "▶ Using local $LOCAL ($(wc -l < "$CACHE") lines)"
         else
-            rm -f "$CACHE.tmp"
-            if [ -f "$CACHE" ]; then
-                echo "⚠ Fetch failed, using stale cache: $CACHE"
-            else
-                echo "❌ Fetch failed and no cache available"
-                exit 1
-            fi
+            echo "❌ No usable installer available"
+            exit 1
         fi
+    fi
+else
+    rm -f "$CACHE.tmp"
+    if [ -f "$CACHE" ] && grep -q 'RETUNE_ONLY' "$CACHE"; then
+        echo "⚠ Fetch failed, using cached $CACHE"
+    elif [ -f "$LOCAL" ] && grep -q 'RETUNE_ONLY' "$LOCAL"; then
+        cp "$LOCAL" "$CACHE"
+        echo "⚠ Fetch failed, using local $LOCAL"
+    else
+        echo "❌ Fetch failed and no usable local copy"
+        exit 1
     fi
 fi
 
-# Fallback: local install.sh copy if cache empty
-if [ ! -f "$CACHE" ] && [ -f /opt/vajra-server/install.sh ]; then
-    cp /opt/vajra-server/install.sh "$CACHE"
-    echo "▶ Using local /opt/vajra-server/install.sh"
-fi
-
-if [ ! -f "$CACHE" ]; then
-    echo "❌ No installer available (offline, no cache, no local copy)"
+# ─── 2. Final safety gate ───
+if ! grep -q 'RETUNE_ONLY' "$CACHE"; then
+    echo "❌ Refusing: cached script does not support --retune"
+    echo "   Would run full install on production — aborting."
     exit 1
 fi
 
+echo "▶ Running retune..."
 exec bash "$CACHE" --retune
 RETUNE_WRAPPER_EOF
     chmod +x /usr/local/bin/vajra-retune
-    echo "   ✓ /usr/local/bin/vajra-retune installed"
+    echo "   ✓ /usr/local/bin/vajra-retune installed (safe wrapper)"
 }
+
 
 ensure_app_toml_sections() {
     log "Ensuring production app.toml sections..."
