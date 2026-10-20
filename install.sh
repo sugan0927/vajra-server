@@ -418,6 +418,244 @@ chmod 0755 /usr/local/bin/vajra-site
 }
 
 # ─── Main Flow ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# System tuning for high-traffic production (v0.15.9+)
+# RAM/nproc-aware — safe on 512MB VPS to 8GB VPS
+# Idempotent: re-running will not break anything
+# ═══════════════════════════════════════════════════════════════════════
+tune_system() {
+    log "System tuning (RAM/nproc-aware)..."
+
+    # ─── Read system resources ───
+    local NPROC=$(nproc)
+    local RAM_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+
+    # ─── PHP-FPM max_children (RAM-based) ───
+    local MAX_CHILDREN
+    if   [ "$RAM_MB" -ge 4096 ]; then MAX_CHILDREN=32
+    elif [ "$RAM_MB" -ge 2048 ]; then MAX_CHILDREN=16
+    elif [ "$RAM_MB" -ge 1024 ]; then MAX_CHILDREN=8
+    else                              MAX_CHILDREN=4
+    fi
+    echo "   → nproc=$NPROC RAM=${RAM_MB}MB → PHP max_children=$MAX_CHILDREN"
+
+    # ─── Redis max_memory (25% RAM, min 256, max 2048 MB) ───
+    local REDIS_MB=$((RAM_MB / 4))
+    [ "$REDIS_MB" -lt 256  ] && REDIS_MB=256
+    [ "$REDIS_MB" -gt 2048 ] && REDIS_MB=2048
+
+    # ─── Cache size (12.5% RAM, min 1024, max 4096 MB) ───
+    local CACHE_MB=$((RAM_MB / 8))
+    [ "$CACHE_MB" -lt 1024 ] && CACHE_MB=1024
+    [ "$CACHE_MB" -gt 4096 ] && CACHE_MB=4096
+
+    # ─── Kernel sysctl (universal, safe on all distros) ───
+    SYSCTL_DIR=/etc/sysctl.d
+    [ -d "$SYSCTL_DIR" ] || SYSCTL_DIR=/etc/sysctl.conf
+
+    cat > "$SYSCTL_DIR/99-vajra-tuning.conf" <<'SYSCTL_EOF'
+# Vajra production kernel tuning
+# Safe for 512MB+ VPS, includes BBR (kernel >= 4.9)
+
+# Connection queues
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+
+# TIME_WAIT reuse (critical for many short connections)
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+
+# Keepalive
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+
+# File descriptors
+fs.file-max = 1000000
+fs.nr_open = 1000000
+
+# BBR congestion control (auto-detected)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+SYSCTL_EOF
+
+    # Apply safely (BBR fallback if kernel too old)
+    sysctl --system 2>/dev/null || true
+    if ! sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
+        sed -i '/tcp_congestion_control/d; /default_qdisc/d' "$SYSCTL_DIR/99-vajra-tuning.conf" 2>/dev/null || true
+        echo "   ⚠ BBR unavailable (kernel < 4.9?) — skipped BBR, kept other tuning"
+    else
+        echo "   ✓ BBR enabled"
+    fi
+
+    # ─── Update Vajra app.toml (workers, cache, redis) ───
+    if [ -f /etc/vajra/app.toml ]; then
+        # workers = nproc
+        sed -i "s/^workers\s*=.*/workers = $NPROC/" /etc/vajra/app.toml
+
+        # Redis memory
+        sed -i "s/^max_memory_mb\s*=.*/max_memory_mb = $REDIS_MB/" /etc/vajra/app.toml
+
+        # Cache size + TTL
+        sed -i "s/^max_size_mb\s*=.*/max_size_mb = $CACHE_MB/" /etc/vajra/app.toml
+        sed -i "s/^default_ttl_secs\s*=.*/default_ttl_secs = 21600/" /etc/vajra/app.toml
+
+        echo "   ✓ app.toml: workers=$NPROC, redis=${REDIS_MB}MB, cache=${CACHE_MB}MB/6h"
+    fi
+
+    # ─── systemd LimitNOFILE ───
+    mkdir -p /etc/systemd/system/vajra.service.d
+    cat > /etc/systemd/system/vajra.service.d/limits.conf <<'SVC_EOF'
+[Service]
+LimitNOFILE=1000000
+LimitNPROC=65535
+LimitCORE=0
+SVC_EOF
+    systemctl daemon-reload
+    echo "   ✓ systemd LimitNOFILE=1000000"
+
+    # ─── PHP-FPM pool tuning (per family) ───
+    local php_pool_dirs=()
+    case "$DISTRO_FAMILY" in
+        debian) php_pool_dirs=(/etc/php/*/fpm/pool.d) ;;
+        rhel)   php_pool_dirs=(/etc/php-fpm.d) ;;
+        arch)   php_pool_dirs=(/etc/php/php-fpm.d) ;;
+    esac
+
+    local tuned_any=0
+    for dir in "${php_pool_dirs[@]}"; do
+        [ -d "$dir" ] || continue
+        for conf in "$dir"/*.conf; do
+            [ -f "$conf" ] || continue
+            # Only touch vajra pools
+            if grep -q 'vajra' "$conf" 2>/dev/null; then
+                sed -i "s/^pm\.max_children\s*=.*/pm.max_children = $MAX_CHILDREN/" "$conf"
+                sed -i "s/^pm\.max_requests\s*=.*/pm.max_requests = 1000/" "$conf"
+                # Ensure pm=dynamic exists
+                if ! grep -q '^pm\s*=' "$conf"; then
+                    sed -i "s/^\[vajra-.*\]/[&]\npm = dynamic\npm.max_children = $MAX_CHILDREN\npm.start_servers = $((MAX_CHILDREN/4))\npm.min_spare_servers = $((MAX_CHILDREN/4))\npm.max_spare_servers = $((MAX_CHILDREN/2))\npm.max_requests = 1000/" "$conf"
+                fi
+                tuned_any=1
+            fi
+        done
+    done
+
+    if [ "$tuned_any" -eq 1 ]; then
+        # Restart PHP-FPM
+        local phpsvc=$(systemctl list-units --type=service --state=running 2>/dev/null | grep -oE 'php[0-9.]*-fpm|php-fpm' | head -1)
+        [ -n "$phpsvc" ] && systemctl restart "$phpsvc" 2>/dev/null || true
+        echo "   ✓ PHP-FPM max_children=$MAX_CHILDREN"
+    else
+        echo "   ⚠ No vajra PHP-FPM pools found — will tune after site add"
+    fi
+
+    log "✅ System tuning applied"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# Production app.toml sections (rate_limit, access, PHP-FPM spare)
+# Idempotent: only adds what's missing, never overwrites
+# ═══════════════════════════════════════════════════════════════════════
+ensure_app_toml_sections() {
+    log "Ensuring production app.toml sections..."
+
+    if [ ! -f /etc/vajra/app.toml ]; then
+        warn "app.toml missing — skipping section ensure (will be created on first site add)"
+        return 0
+    fi
+
+    # ─── [rate_limit] — safe defaults, won't trigger for real users ───
+    if ! grep -q '^\[rate_limit\]' /etc/vajra/app.toml; then
+        cat >> /etc/vajra/app.toml <<'RATE_LIMIT_EOF'
+
+[rate_limit]
+enabled = true
+requests_per_second = 200
+burst = 400
+whitelist_ips = ["127.0.0.1/32", "::1/128"]
+max_tracked_ips = 100000
+cleanup_interval_secs = 300
+aggregate_ipv6_64 = true
+
+# Aggressive limits for known attack paths (optional, uncomment to enable)
+# [[rate_limit.overrides]]
+# path = "/wp-login.php"
+# requests_per_second = 5
+# burst = 10
+#
+# [[rate_limit.overrides]]
+# path = "/xmlrpc.php"
+# requests_per_second = 2
+# burst = 5
+RATE_LIMIT_EOF
+        echo "   ✓ [rate_limit] added (200 rps / 400 burst — CDN safe)"
+    else
+        echo "   ℹ [rate_limit] already present — skipped"
+    fi
+
+    # ─── [access] — empty trusted_proxies, Cloudflare IPs commented ───
+    if ! grep -q '^\[access\]' /etc/vajra/app.toml; then
+        cat >> /etc/vajra/app.toml <<'ACCESS_EOF'
+
+[access]
+trusted_proxies = []
+
+# ─── Cloudflare IP ranges (uncomment + remove `trusted_proxies = []` above) ───
+# Only needed if Vajra is behind Cloudflare (orange cloud). Without this,
+# Cloudflare-proxied traffic will be rate-limited on the edge IPs.
+#trusted_proxies = [
+#    "173.245.48.0/20",   "103.21.244.0/22",  "103.22.200.0/22",
+#    "103.31.4.0/22",     "141.101.64.0/18",  "108.162.192.0/18",
+#    "190.93.240.0/20",   "188.114.96.0/20",  "197.234.240.0/22",
+#    "198.41.128.0/17",   "162.158.0.0/15",   "104.16.0.0/13",
+#    "104.24.0.0/14",     "172.64.0.0/13",    "131.0.72.0/22",
+#    "2400:cb00::/32",    "2606:4700::/32",   "2803:f800::/32",
+#    "2405:b500::/32",    "2405:8100::/32",   "2a06:98c0::/29",
+#    "2c0f:f248::/32",
+#]
+ACCESS_EOF
+        echo "   ✓ [access] added (empty; Cloudflare IPs ready to uncomment)"
+    else
+        echo "   ℹ [access] already present — skipped"
+    fi
+
+    # ─── PHP-FPM spare servers fix (pm=dynamic needs these) ───
+    local php_pool_dirs=()
+    case "$DISTRO_FAMILY" in
+        debian) php_pool_dirs=(/etc/php/*/fpm/pool.d) ;;
+        rhel)   php_pool_dirs=(/etc/php-fpm.d) ;;
+        arch)   php_pool_dirs=(/etc/php/php-fpm.d) ;;
+    esac
+
+    local tuned_any=0
+    for dir in "${php_pool_dirs[@]}"; do
+        [ -d "$dir" ] || continue
+        for conf in "$dir"/vajra-*.conf; do
+            [ -f "$conf" ] || continue
+            if ! grep -q '^pm\.min_spare_servers' "$conf"; then
+                # Insert after pm.start_servers
+                sed -i '/^pm\.start_servers/a pm.min_spare_servers = 2\npm.max_spare_servers = 6' "$conf" 2>/dev/null || true
+                tuned_any=1
+            fi
+        done
+    done
+
+    if [ "$tuned_any" -eq 1 ]; then
+        local phpsvc=$(systemctl list-units --type=service --state=running 2>/dev/null | grep -oE 'php[0-9.]*-fpm|php-fpm' | head -1)
+        [ -n "$phpsvc" ] && systemctl restart "$phpsvc" 2>/dev/null || true
+        echo "   ✓ PHP-FPM spare servers fixed (min=2, max=6)"
+    else
+        echo "   ℹ PHP-FPM spare servers already set"
+    fi
+
+    # ─── Reload vajra to pick up new sections ───
+    systemctl reload vajra 2>/dev/null || systemctl restart vajra 2>/dev/null || true
+    echo "   ✓ vajra reloaded"
+
+    log "✅ Production sections ready"
+}
+
 main() {
   log "0/6 — Pre-flight"
   detect_distro
@@ -622,6 +860,9 @@ verify_and_fix_services() {
     fi
     log "✅ Vajra Web Server is running."
 }
+
+    tune_system
+    ensure_app_toml_sections
 
 verify_and_fix_services
 echo "✅ Vajra Stack Installed!"
