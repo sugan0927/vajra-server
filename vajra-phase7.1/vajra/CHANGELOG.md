@@ -4,6 +4,17 @@ All notable changes to Vajra are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.3] — 2026-10-20
+
+### Fixed
+- **Critical**: `Settings::dynamic()` used `..Default::default()` for
+  `compression`, `access`, `rate_limit`, `fastcgi_cache` — all four
+  silently disabled at runtime despite correct TOML parsing.
+- Brotli/gzip compression end-to-end on HTTP/1.1 (MISS + cache HIT paths).
+- `Vary: Accept-Encoding` on all compressible responses.
+- Duplicate `Content-Length` on proxy responses.
+- Startup log falsely claimed "HTTP/2 via ALPN".
+
 ## [0.14.4] — 2026-10-17
 
 ### Fixed — 3 critical bugs
