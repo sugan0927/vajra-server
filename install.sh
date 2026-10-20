@@ -504,14 +504,6 @@ default_ttl_secs = 3600
 exclude_paths = ["/wp-admin/*", "/wp-login.php", "/wp-json/*"]
 bypass_cookie = ["woocommerce_items_in_cart", "wp_woocommerce_session_", "comment_author_"]
 
-[[site]]
-host     = "${DOMAIN}"
-root     = "/var/www/sites/${DOMAIN}"
-index    = "index.php"
-mode     = "wordpress"
-php_sock = "unix:${PHP_SOCK}"
-tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
 TOML
 
     # 3. FastCGI कैश डायरेक्टरी बनाएँ और परमिशन सेट करें (Debian/CentOS दोनों के लिए)
