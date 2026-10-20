@@ -100,6 +100,9 @@ impl ObjectCache {
             "INFO" => self.cmd_info(),
             "GET" => self.cmd_get(&args[1..]),
             "SET" => self.cmd_set(&args[1..]),
+            "MGET" => self.cmd_mget(&args[1..]),
+            "MSET" => self.cmd_mset(&args[1..]),
+            "KEYS" => self.cmd_keys(&args[1..]),
             "HSET" => self.cmd_hset(&args[1..]),
             "HGET" => self.cmd_hget(&args[1..]),
             "HGETALL" => self.cmd_hgetall(&args[1..]),
@@ -329,6 +332,49 @@ impl ObjectCache {
         
         hash.insert(field, new_val.to_string().into_bytes());
         format!(":{}\r\n", new_val).into_bytes()
+    }
+
+
+    fn cmd_mget(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        let mut resp = format!("*{}\r\n", args.len()).into_bytes();
+        for key in args {
+            if let Some(item) = self.data.get(key) {
+                let mut expired = false;
+                if let Some(exp) = item.expires_at {
+                    if Instant::now() > exp { expired = true; }
+                }
+                if expired {
+                    resp.extend_from_slice(b"$-1\r\n");
+                } else {
+                    resp.extend_from_slice(format!("${}\r\n", item.value.len()).as_bytes());
+                    resp.extend_from_slice(&item.value);
+                    resp.extend_from_slice(b"\r\n");
+                }
+            } else {
+                resp.extend_from_slice(b"$-1\r\n");
+            }
+        }
+        resp
+    }
+
+    fn cmd_mset(&self, args: &[Vec<u8>]) -> Vec<u8> {
+        if args.len() % 2 != 0 { return b"-ERR wrong number of arguments\r\n".to_vec(); }
+        for chunk in args.chunks(2) {
+            self.insert_key(chunk[0].clone(), chunk[1].clone(), None);
+        }
+        b"+OK\r\n".to_vec()
+    }
+
+    fn cmd_keys(&self, _args: &[Vec<u8>]) -> Vec<u8> {
+        // सरलता के लिए, हम सभी keys रिटर्न करते हैं (WordPress flush के लिए)
+        let keys: Vec<_> = self.data.iter().map(|k| k.key().clone()).collect();
+        let mut resp = format!("*{}\r\n", keys.len()).into_bytes();
+        for k in keys {
+            resp.extend_from_slice(format!("${}\r\n", k.len()).as_bytes());
+            resp.extend_from_slice(&k);
+            resp.extend_from_slice(b"\r\n");
+        }
+        resp
     }
 
     fn cmd_info(&self) -> Vec<u8> {
