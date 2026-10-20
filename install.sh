@@ -272,6 +272,10 @@ cmd_add() {
 listen  = "0.0.0.0:80"
 workers = 1
 
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
+
 [tls]
 listen  = "0.0.0.0:443"
 cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
@@ -492,6 +496,10 @@ chmod 750 /var/www/.wp-cli
 listen  = "0.0.0.0:80"
 workers = 1
 
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
+
 [tls]
 listen  = "0.0.0.0:443"
 cert    = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
@@ -521,7 +529,9 @@ bypass_cookie = ["woocommerce_items_in_cart", "wp_woocommerce_session_", "commen
 TOML
 
     # 3. FastCGI कैश डायरेक्टरी बनाएँ और परमिशन सेट करें (Debian/CentOS दोनों के लिए)
+    mkdir -p /var/log/vajra
     mkdir -p /var/cache/vajra/fastcgi
+    chown -R nobody:nobody /var/log/vajra 2>/dev/null || chown -R apache:apache /var/log/vajra 2>/dev/null || true
     chown -R nobody:nobody /var/cache/vajra/fastcgi 2>/dev/null || chown -R www-data:www-data /var/cache/vajra/fastcgi 2>/dev/null || true
 
   fi
