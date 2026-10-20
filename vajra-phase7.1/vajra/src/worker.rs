@@ -526,6 +526,8 @@ fn open_log(path: Option<&str>) -> Result<Option<(RawFd, bool)>, String> {
     }
 }
 
+
+
 #[derive(Default)]
 struct IpStats {
     conns_in_window: u32,
@@ -1545,7 +1547,25 @@ impl Worker {
                         },
                         headers: &hdrs,
                         body: &req.body,
-                        client_ip: peer,
+                        client_ip: {
+                            let xff = hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"x-forwarded-for")).and_then(|(_, v)| std::str::from_utf8(v).ok());
+                            let xri = hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"x-real-ip")).and_then(|(_, v)| std::str::from_utf8(v).ok());
+                            peer.map(|p| {
+                                if let Some(xff_str) = xff {
+                                    if let Some(first) = xff_str.split(',').next() {
+                                        if let Ok(ip) = first.trim().parse::<std::net::IpAddr>() {
+                                            return ip;
+                                        }
+                                    }
+                                }
+                                if let Some(xri_str) = xri {
+                                    if let Ok(ip) = xri_str.trim().parse::<std::net::IpAddr>() {
+                                        return ip;
+                                    }
+                                }
+                                p
+                            })
+                        },
                         secure: true,
                         upgrade: false,
                         php: php_target,
