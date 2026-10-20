@@ -3288,3 +3288,30 @@ mod tests {
         assert!(open_log(Some("/proc/definitely/not/writable")).is_err());
     }
 }
+
+/// Janitor helper: removes idle entries from the shared IpStats map.
+/// An entry is kept when:
+///   * its rate-limit window is still alive (< 120s since last activity), or
+///   * an active ban is set (banned_until > now).
+/// Safe to call from any thread.
+pub fn sweep_ip_stats(map: &dashmap::DashMap<std::net::IpAddr, IpStats>) {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let before = map.len();
+    map.retain(|_ip, s| {
+        let window_alive = s.window_start
+            .map(|t| now.saturating_duration_since(t) < Duration::from_secs(120))
+            .unwrap_or(false);
+        let ban_alive = s.banned_until
+            .map(|t| now < t)
+            .unwrap_or(false);
+        window_alive || ban_alive
+    });
+    let after = map.len();
+    if before != after {
+        eprintln!(
+            "vajra: ip_stats sweep removed {} entries ({} -> {})",
+            before - after, before, after
+        );
+    }
+}

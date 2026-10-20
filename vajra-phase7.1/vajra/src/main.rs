@@ -314,6 +314,21 @@ fn main() {
     let mut joins = Vec::with_capacity(settings.workers);
 
     let ip_stats = std::sync::Arc::new(dashmap::DashMap::new());
+
+    // ─── IP-stats janitor: bound memory growth ───
+    {
+        let ip_stats = ip_stats.clone();
+        std::thread::Builder::new()
+            .name("vajra-ip-janitor".into())
+            .spawn(move || {
+                use std::time::Duration;
+                loop {
+                    std::thread::sleep(Duration::from_secs(60));
+                    vajra::worker::sweep_ip_stats(&ip_stats);
+                }
+            })
+            .expect("ip janitor thread spawn");
+    }
     for core in 0..settings.workers {
         // Bind in the main thread so bind errors abort startup immediately.
         let plain = sys::listener(settings.listen, true, 4096)

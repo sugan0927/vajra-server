@@ -141,3 +141,14 @@ Initial phase-7.1 development. Not publicly released.
   - Some HTTP/1.1 HTTPS paths marked `WIP: stale after phase7.1 changes`
   - One WebSocket upgrade-refusal test
   These are documented WIP, not regressions in this release.
+
+## [0.15.9] - 2026-10-20
+
+### Fixed
+- IP-stats map had no garbage collection: every unique client IP added
+  an entry that persisted for the entire process lifetime. Attackers
+  spraying random IPs could grow memory unboundedly.
+  Added `worker::sweep_ip_stats()` (worker.rs) and a `vajra-ip-janitor`
+  background thread (main.rs) that invokes it every 60 s. Entries are
+  removed when their rate-limit window is older than 120 s AND no
+  active ban is set.

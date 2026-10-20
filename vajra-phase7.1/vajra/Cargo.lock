@@ -2016,7 +2016,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "vajra"
-version = "0.15.8"
+version = "0.15.9"
 dependencies = [
  "brotli",
  "bytes",
