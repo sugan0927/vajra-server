@@ -680,6 +680,14 @@ exec bash "$CACHE" --retune
 RETUNE_WRAPPER_EOF
     chmod +x /usr/local/bin/vajra-retune
     echo "   ✓ /usr/local/bin/vajra-retune installed (safe wrapper)"
+
+    # Sudo compatibility: RHEL/CentOS/Rocky/Alma/Fedora default secure_path
+    # does NOT include /usr/local/bin, so `sudo vajra-retune` fails unless
+    # a copy/symlink exists in a secure_path dir. Fix by symlinking to /usr/bin.
+    if [ -d /usr/bin ] && [ ! -L /usr/bin/vajra-retune ]; then
+        ln -sf /usr/local/bin/vajra-retune /usr/bin/vajra-retune 2>/dev/null || true
+        echo "   ✓ /usr/bin/vajra-retune symlink (sudo compatibility)"
+    fi
 }
 
 
