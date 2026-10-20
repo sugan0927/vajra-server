@@ -300,6 +300,14 @@ enabled = true
 listen = "127.0.0.1:6379"
 max_memory_mb = 128
 
+
+[security]
+enabled = true
+max_conns_per_ip = 30
+auto_ban_enabled = true
+ban_duration_secs = 600
+max_errors_per_minute = 50
+
 [[site]]
 host     = "${DOMAIN}"
 root     = "${SITE_ROOT}"

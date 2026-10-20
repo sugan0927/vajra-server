@@ -397,7 +397,8 @@ impl ProxyJob {
 /// `align(64)`: each connection record starts on its own cache line.
 #[repr(align(64))]
 struct Conn {
-    fd: RawFd, // -1 while the slot is free
+    pub ip: Option<std::net::IpAddr>,
+        fd: RawFd, // -1 while the slot is free
     /// Receive staging buffer carved from the slab pool (address-stable).
     rbuf: PoolBuf,
     /// A RECV is the operation currently in flight (so it can be cancelled).
@@ -429,6 +430,7 @@ struct Conn {
 impl Conn {
     fn new(rbuf: PoolBuf) -> Self {
         Self {
+            ip: None,
             fd: -1,
             rbuf,
             in_recv: false,
@@ -524,6 +526,14 @@ fn open_log(path: Option<&str>) -> Result<Option<(RawFd, bool)>, String> {
     }
 }
 
+#[derive(Default)]
+struct IpStats {
+    conns_in_window: u32,
+    error_count: u32,
+    window_start: Option<std::time::Instant>,
+    banned_until: Option<std::time::Instant>,
+}
+
 pub struct Worker {
     ring: IoUring,
     listeners: Vec<Listener>,
@@ -565,6 +575,8 @@ pub struct Worker {
     draining: Option<Instant>,
     /// HTTP/3: UDP socket slots, QUIC engine and timers (see `quic_io`).
     quic: Option<Box<quic_io::QuicRt>>,
+    security: crate::config::SecuritySettings,
+    ip_stats: std::collections::HashMap<std::net::IpAddr, IpStats>,
 }
 
 mod quic_io;
@@ -631,6 +643,8 @@ impl Worker {
         let (log_fd, log_owns) = log.unwrap_or((-1, false));
 
         Ok(Self {
+            security: dynamic.security.clone(),
+            ip_stats: std::collections::HashMap::new(),
             ring,
             listeners: listeners.to_vec(),
             conns: Vec::new(),
@@ -1097,6 +1111,68 @@ impl Worker {
     }
 
     fn on_accept(&mut self, li: usize, res: i32, flags: u32) {
+        // Injected: DDoS Protection
+        let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let mut peer_ip = None;
+        if unsafe { libc::getpeername(res, &mut addr as *mut _ as *mut _, &mut len) } == 0 {
+            if addr.ss_family == libc::AF_INET as libc::sa_family_t {
+                let addr_in: &libc::sockaddr_in = unsafe { &*(&addr as *const _ as *const libc::sockaddr_in) };
+                peer_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(addr_in.sin_addr.s_addr))));
+            } else if addr.ss_family == libc::AF_INET6 as libc::sa_family_t {
+                let addr_in6: &libc::sockaddr_in6 = unsafe { &*(&addr as *const _ as *const libc::sockaddr_in6) };
+                peer_ip = Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(addr_in6.sin6_addr.s6_addr)));
+            }
+        }
+
+        if let Some(ip) = peer_ip {
+            let now = std::time::Instant::now();
+            let mut reject = false;
+            if self.security.enabled {
+                if let Some(stats) = self.ip_stats.get_mut(&ip) {
+        // Reset window every 60 seconds
+        let reset = match stats.window_start {
+            Some(start) => now.duration_since(start).as_secs() >= 60,
+            None => true,
+        };
+        if reset {
+            stats.conns_in_window = 0;
+            stats.window_start = Some(now);
+        }
+        
+        // 1. Ban check
+        if let Some(until) = stats.banned_until {
+            if now < until {
+                reject = true;
+            } else {
+                stats.banned_until = None;
+            }
+        }
+        
+        // 2. Connection limit check
+        if !reject && stats.conns_in_window >= self.security.max_conns_per_ip {
+            reject = true;
+            if self.security.auto_ban_enabled {
+                stats.banned_until = Some(now + std::time::Duration::from_secs(self.security.ban_duration_secs));
+            }
+        }
+    }
+            }
+
+            if reject {
+                unsafe { libc::close(res); }
+                return; // कनेक्शन रिजेक्ट
+            }
+
+            // कनेक्शन स्वीकार करें
+            let stats = self.ip_stats.entry(ip).or_default();
+            if stats.window_start.is_none() {
+                stats.window_start = Some(now);
+            }
+            stats.conns_in_window += 1;
+            
+        }
+        
         if self.draining.is_some() {
             if res >= 0 {
                 // Raced with shutdown: refuse the connection.

@@ -132,8 +132,48 @@ pub struct RawObjectCache {
 fn default_oc_listen() -> String { "127.0.0.1:6379".to_string() }
 fn default_oc_mem() -> usize { 128 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SecuritySettings {
+    pub enabled: bool,
+    pub max_conns_per_ip: u32,
+    pub auto_ban_enabled: bool,
+    pub ban_duration_secs: u64,
+    pub max_errors_per_minute: u32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RawSecurity {
+    #[serde(default = "default_sec_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_max_conns")]
+    pub max_conns_per_ip: u32,
+    #[serde(default = "default_sec_enabled")]
+    pub auto_ban_enabled: bool,
+    #[serde(default = "default_ban_duration")]
+    pub ban_duration_secs: u64,
+    #[serde(default = "default_max_errors")]
+    pub max_errors_per_minute: u32,
+}
+
+
+pub fn build_security(raw: RawSecurity) -> SecuritySettings {
+    SecuritySettings {
+        enabled: raw.enabled,
+        max_conns_per_ip: raw.max_conns_per_ip,
+        auto_ban_enabled: raw.auto_ban_enabled,
+        ban_duration_secs: raw.ban_duration_secs,
+        max_errors_per_minute: raw.max_errors_per_minute,
+    }
+}
+
+fn default_sec_enabled() -> bool { true }
+fn default_max_conns() -> u32 { 30 }
+fn default_ban_duration() -> u64 { 600 }
+fn default_max_errors() -> u32 { 50 }
+
 #[derive(Clone, Debug)]
 pub struct Settings {
+    pub security: SecuritySettings,
     pub object_cache: Option<ObjectCacheSettings>,
     pub health: Option<HealthConfig>,
     pub listen: SocketAddr,
@@ -337,6 +377,7 @@ impl Default for CacheSettings {
 /// Everything a worker can swap at runtime without dropping connections.
 #[derive(Debug, Clone, Default)]
 pub struct Dynamic {
+    pub security: SecuritySettings,
     pub object_cache: Option<ObjectCacheSettings>,
     pub static_files: Option<StaticSettings>,
     pub sites: Vec<SiteSettings>,
@@ -385,6 +426,13 @@ impl StaticSettings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            security: SecuritySettings {
+                enabled: true,
+                max_conns_per_ip: 30,
+                auto_ban_enabled: true,
+                ban_duration_secs: 600,
+                max_errors_per_minute: 50,
+            },
             object_cache: None,
             health: None,
             listen: DEFAULT_LISTEN.parse().unwrap(),
@@ -416,6 +464,8 @@ impl Default for Settings {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    #[serde(default)]
+    pub security: Option<RawSecurity>,
     #[serde(default)]
     pub object_cache: Option<RawObjectCache>,
     /// Phase 1a: multi-site (Host-header) routing table.
@@ -1022,6 +1072,7 @@ impl Settings {
             compression: build_compression(raw.compression.unwrap_or_default())?,
             fastcgi_cache: build_fastcgi_cache(raw.fastcgi_cache.unwrap_or_default())?,
             backup: raw.backup.unwrap_or_default(),
+            security: build_security(raw.security.unwrap_or_default()),
             object_cache: raw.object_cache.map(|raw_oc| ObjectCacheSettings {
                 enabled: raw_oc.enabled,
                 listen: raw_oc.listen,
@@ -1068,6 +1119,7 @@ impl Settings {
             access_log: self.access_log.clone(),
             log_format: self.log_format,
             object_cache: self.object_cache.clone(),
+            security: self.security.clone(),
             cache: self.cache,
             headers: self.headers.clone(),
             access: self.access.clone(),

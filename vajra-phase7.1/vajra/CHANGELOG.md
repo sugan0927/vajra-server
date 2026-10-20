@@ -4,6 +4,13 @@ All notable changes to Vajra are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.4] — 2026-10-20
+
+### Added
+- Built-in Redis-compatible Object Cache (`[object_cache]`) for WordPress database query caching.
+- Built-in DDoS Protection (`[security]`) with IP connection rate-limiting (30/min) and auto-ban (10 min).
+- Updated `install.sh` to generate the correct `app.toml` with all new sections.
+
 ## [0.15.3] — 2026-10-20
 
 ### Fixed
