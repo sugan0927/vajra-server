@@ -4,6 +4,16 @@
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ─── Retune mode detection (does not occupy positional arg slots) ───
+RETUNE_ONLY=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --retune|-r) RETUNE_ONLY=1 ;;
+    esac
+done
+unset _arg
+
+
 FIRST_DOMAIN="${1:-}"
 FIRST_EMAIL="${2:-}"
 SITE_MODE="${SITE_MODE:-wordpress}"
@@ -599,6 +609,74 @@ retune_php_fpm_after_site() {
     fi
 }
 
+# ═══════════════════════════════════════════════════════════════════════
+# Install /usr/local/bin/vajra-retune — one-command re-tune for existing
+# installations. Fetches latest install.sh and re-applies tuning only.
+# Idempotent: safe to run any number of times.
+# ═══════════════════════════════════════════════════════════════════════
+install_retune_wrapper() {
+    cat > /usr/local/bin/vajra-retune <<'RETUNE_WRAPPER_EOF'
+#!/usr/bin/env bash
+# vajra-retune — re-apply production tuning on existing Vajra install
+# Idempotent: safe to run multiple times
+# Usage: sudo vajra-retune [--offline]
+set -euo pipefail
+
+VAJRA_REPO="${VAJRA_REPO:-sugan0927/vajra-server}"
+CACHE="/var/cache/vajra/install.sh"
+URL="https://raw.githubusercontent.com/${VAJRA_REPO}/main/install.sh"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "❌ vajra-retune: must run as root"
+    exit 1
+fi
+
+if [ ! -f /etc/vajra/app.toml ]; then
+    echo "❌ vajra-retune: /etc/vajra/app.toml not found"
+    echo "   Vajra is not installed."
+    echo "   Run the installer:"
+    echo "   curl -fsSL ${URL} | sudo bash"
+    exit 1
+fi
+
+mkdir -p "$(dirname "$CACHE")"
+
+# Refresh cache if older than 24h (or --offline skips fetch)
+if [ "${1:-}" != "--offline" ]; then
+    if [ ! -f "$CACHE" ] || [ -z "$(find "$CACHE" -mmin -1440 2>/dev/null)" ]; then
+        echo "▶ Fetching latest installer from GitHub..."
+        if curl -fsSL --max-time 15 "$URL" -o "$CACHE.tmp" 2>/dev/null; then
+            mv "$CACHE.tmp" "$CACHE"
+            echo "▶ Fetched: $CACHE ($(wc -l < "$CACHE") lines)"
+        else
+            rm -f "$CACHE.tmp"
+            if [ -f "$CACHE" ]; then
+                echo "⚠ Fetch failed, using stale cache: $CACHE"
+            else
+                echo "❌ Fetch failed and no cache available"
+                exit 1
+            fi
+        fi
+    fi
+fi
+
+# Fallback: local install.sh copy if cache empty
+if [ ! -f "$CACHE" ] && [ -f /opt/vajra-server/install.sh ]; then
+    cp /opt/vajra-server/install.sh "$CACHE"
+    echo "▶ Using local /opt/vajra-server/install.sh"
+fi
+
+if [ ! -f "$CACHE" ]; then
+    echo "❌ No installer available (offline, no cache, no local copy)"
+    exit 1
+fi
+
+exec bash "$CACHE" --retune
+RETUNE_WRAPPER_EOF
+    chmod +x /usr/local/bin/vajra-retune
+    echo "   ✓ /usr/local/bin/vajra-retune installed"
+}
+
 ensure_app_toml_sections() {
     log "Ensuring production app.toml sections..."
 
@@ -915,5 +993,46 @@ echo "✅ Vajra Stack Installed!"
   fi
 }
 
+# ═══════════════════════════════════════════════════════════════════════
+# Retune mode — skip full install, only re-apply tuning
+# Usage: sudo bash install.sh --retune
+# ═══════════════════════════════════════════════════════════════════════
+if [ "$RETUNE_ONLY" = "1" ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        die "❌ retune: must run as root"
+    fi
+
+    log "═══════════════════════════════════════════════════════════"
+    log "  VAJRA RETUNE MODE — tuning only, no installation"
+    log "═══════════════════════════════════════════════════════════"
+
+    if [ ! -f /etc/vajra/app.toml ]; then
+        die "❌ /etc/vajra/app.toml missing — install Vajra first"
+    fi
+
+    detect_distro
+    tune_system
+    ensure_app_toml_sections
+    retune_php_fpm_after_site
+
+    log ""
+    log "✅ Retune complete"
+    log ""
+    log "Verify:"
+    log "  systemctl status vajra"
+    log "  grep -E 'workers|max_memory_mb|default_ttl_secs' /etc/vajra/app.toml"
+    log "  sysctl net.core.somaxconn net.ipv4.tcp_congestion_control"
+    log ""
+
+    # Ensure vajra-retune wrapper exists (idempotent self-heal)
+    install_retune_wrapper 2>/dev/null || true
+    log "💡 Next time: just run 'sudo vajra-retune'"
+    exit 0
+fi
+
 main "$@"
+
+# Post-install: ensure /usr/local/bin/vajra-retune exists (idempotent)
+install_retune_wrapper 2>/dev/null || true
+
 # Updated installer with binary fix
