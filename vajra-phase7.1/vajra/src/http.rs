@@ -323,9 +323,16 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                     if let Some(access) = ctx.access {
                         access.effective_client_ip(peer, xff, xri)
                     } else {
-                        if let Some(xff_ip) = xff.and_then(|v| std::str::from_utf8(v.as_ref()).ok()).and_then(|s| s.split(',').next()).and_then(|s| s.trim().parse::<std::net::IpAddr>().ok()) {
+                        if let Some(xff_ip) = xff
+                            .and_then(|v| std::str::from_utf8(v.as_ref()).ok())
+                            .and_then(|s| s.split(',').next())
+                            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                        {
                             xff_ip
-                        } else if let Some(xri_ip) = xri.and_then(|v| std::str::from_utf8(v.as_ref()).ok()).and_then(|s| s.trim().parse::<std::net::IpAddr>().ok()) {
+                        } else if let Some(xri_ip) = xri
+                            .and_then(|v| std::str::from_utf8(v.as_ref()).ok())
+                            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+                        {
                             xri_ip
                         } else {
                             peer
@@ -378,9 +385,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                 let mut site_php: Option<(usize, &crate::php::PhpConfig)> = None;
                 let selected_files: Option<&mut FileCache> = match ctx.sites.as_deref_mut() {
                     Some(st) => {
-                        let h = host
-                            .and_then(|b| std::str::from_utf8(b).ok())
-                            .unwrap_or("");
+                        let h = host.and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
                         match st.lookup_mut(h) {
                             Some(entry) => {
                                 let crate::site::SiteEntry {
@@ -389,9 +394,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                     files,
                                     ..
                                 } = entry;
-                                if let (Some(cfg), Some(idx)) =
-                                    (php.as_ref(), *php_route_idx)
-                                {
+                                if let (Some(cfg), Some(idx)) = (php.as_ref(), *php_route_idx) {
                                     site_php = Some((idx, cfg));
                                 }
                                 Some(files)
@@ -452,7 +455,8 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                         ctx.now,
                     ) {
                         cache::Lookup::Hit(hit) => {
-                            let accept_enc_hit: Option<&str> = hdrs.iter()
+                            let accept_enc_hit: Option<&str> = hdrs
+                                .iter()
                                 .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
                                 .and_then(|(_, v)| std::str::from_utf8(v.as_ref()).ok());
                             let comp_default = crate::compress::CompressionSettings::default();
@@ -466,7 +470,10 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 keep_alive,
                                 date,
                                 Some("HIT"),
-                                None, accept_enc_hit, comp_hit);
+                                None,
+                                accept_enc_hit,
+                                comp_hit,
+                            );
                             let bytes = if hit.status == 204 || hit.status == 304 {
                                 0
                             } else {
@@ -544,10 +551,16 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                 match fc.get(&key) {
                                     Ok(Some((status, headers, cached))) => {
                                         crate::metrics::record_fastcgi_cache_hit();
-                                        let accept_enc_hit: Option<&str> = hdrs.iter()
-                                            .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
-                                            .and_then(|(_, v)| std::str::from_utf8(v.as_ref()).ok());
-                                        let comp_default = crate::compress::CompressionSettings::default();
+                                        let accept_enc_hit: Option<&str> = hdrs
+                                            .iter()
+                                            .find(|(n, _)| {
+                                                n.eq_ignore_ascii_case(b"accept-encoding")
+                                            })
+                                            .and_then(|(_, v)| {
+                                                std::str::from_utf8(v.as_ref()).ok()
+                                            });
+                                        let comp_default =
+                                            crate::compress::CompressionSettings::default();
                                         let comp_hit = ctx.compression.unwrap_or(&comp_default);
                                         write_proxy_response(
                                             out,
@@ -558,7 +571,10 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                             keep_alive,
                                             date,
                                             None,
-                                            Some("HIT"), accept_enc_hit, comp_hit);
+                                            Some("HIT"),
+                                            accept_enc_hit,
+                                            comp_hit,
+                                        );
                                         let bytes = if status == 204 || status == 304 {
                                             0
                                         } else {
@@ -917,7 +933,6 @@ pub fn write_proxy_response(
     accept_encoding: Option<&str>,
     comp: &crate::compress::CompressionSettings,
 ) {
-
     let mut body = body;
     // Initialised empty to satisfy borrow-checker; overwritten on compress.
     #[allow(unused_assignments)]
@@ -927,11 +942,18 @@ pub fn write_proxy_response(
 
     let mut should_vary = false;
     if status == 200 && !head_req {
-        let ct = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"content-type")).map(|(_, v)| String::from_utf8_lossy(v).to_string()).unwrap_or_default();
-        if (comp.brotli || comp.gzip) && !ct.is_empty() && !crate::compress::is_pre_compressed(&ct) {
+        let ct = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(b"content-type"))
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+            .unwrap_or_default();
+        if (comp.brotli || comp.gzip) && !ct.is_empty() && !crate::compress::is_pre_compressed(&ct)
+        {
             should_vary = true;
         }
-        if crate::compress::decide(comp, accept_encoding, &ct, body.len(), head_req) == crate::compress::Plan::Compress {
+        if crate::compress::decide(comp, accept_encoding, &ct, body.len(), head_req)
+            == crate::compress::Plan::Compress
+        {
             let enc = crate::compress::negotiate(accept_encoding, comp);
             if enc == crate::compress::Encoding::Brotli {
                 if let Some(c) = crate::compress::brotli_compress(body, comp.level) {
@@ -1198,7 +1220,7 @@ mod tests {
     fn run_in(input: &str, t: &ProxyTable, e: &mut Env) -> (Outcome, String) {
         let mut out = Vec::new();
         let mut ctx = Ctx {
-            sites: None,  // FIX4: added by Phase 1a patch
+            sites: None, // FIX4: added by Phase 1a patch
             files: None,
             proxies: t,
             cache: &mut e.cache,
@@ -1523,7 +1545,10 @@ mod tests {
             true,
             DATE,
             Some("MISS"),
-            None, None, &crate::compress::CompressionSettings::default());
+            None,
+            None,
+            &crate::compress::CompressionSettings::default(),
+        );
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("HTTP/1.1 201 Created\r\n"));
         assert!(s.contains("X-Custom: 1\r\n") && s.contains("Content-Length: 3\r\n"));
@@ -1532,7 +1557,19 @@ mod tests {
         assert!(s.ends_with("\r\n\r\nabc"));
 
         let mut out = Vec::new();
-        write_proxy_response(&mut out, 200, &hdrs, b"", true, false, DATE, None, None, None, &crate::compress::CompressionSettings::default());
+        write_proxy_response(
+            &mut out,
+            200,
+            &hdrs,
+            b"",
+            true,
+            false,
+            DATE,
+            None,
+            None,
+            None,
+            &crate::compress::CompressionSettings::default(),
+        );
         let s = String::from_utf8(out).unwrap();
         assert!(
             s.contains("Content-Length: 99\r\n"),

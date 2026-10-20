@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 // ── Embedded shell scripts (compiled into the binary) ────────────────
-const INIT_SH:   &str = include_str!("../shell/init.sh");
-const SITE_SH:   &str = include_str!("../shell/vajra-site.sh");
+const INIT_SH: &str = include_str!("../shell/init.sh");
+const SITE_SH: &str = include_str!("../shell/vajra-site.sh");
 const HARDEN_SH: &str = include_str!("../shell/vajra-harden");
 
 // ── Public entry point ───────────────────────────────────────────────
@@ -124,9 +124,9 @@ fn run_embedded(script_name: &str, args: &[String]) -> i32 {
 
     // Write all three scripts, executable.
     for (name, body) in [
-        ("init.sh",       INIT_SH),
+        ("init.sh", INIT_SH),
         ("vajra-site.sh", SITE_SH),
-        ("vajra-harden",  HARDEN_SH),
+        ("vajra-harden", HARDEN_SH),
     ] {
         if let Err(e) = write_executable(&base.join(name), body) {
             eprintln!("❌ vajra: cannot write {name}: {e}");

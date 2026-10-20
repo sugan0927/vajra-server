@@ -63,8 +63,7 @@ impl SiteTable {
             }
 
             // Build a StaticSettings to validate the root and build the cache.
-            let mut st = StaticSettings::new(&c.root)
-                .map_err(|e| format!("site {canon}: {e}"))?;
+            let mut st = StaticSettings::new(&c.root).map_err(|e| format!("site {canon}: {e}"))?;
             if !c.index.is_empty() {
                 st.index = c.index.clone();
             }
@@ -220,7 +219,6 @@ mod tests {
         assert_eq!(normalize_host("  spaced.example  "), "spaced.example");
     }
 }
-
 
 /// Parse a `php_sock` string into an [`UpAddr`]:
 ///   * `unix:/run/php/...sock`            -> Unix socket

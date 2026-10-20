@@ -19,13 +19,13 @@
 //! * [`arena`], [`config`], [`date`], [`sys`] - supporting pieces
 pub mod object_cache;
 
-pub mod cli;
 pub mod access;
 pub mod admin;
 pub mod arena;
 pub mod backup;
 pub mod cache;
 pub mod check;
+pub mod cli;
 pub mod compress;
 pub mod config;
 pub mod control;

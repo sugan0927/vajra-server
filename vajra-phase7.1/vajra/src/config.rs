@@ -129,8 +129,12 @@ pub struct RawObjectCache {
     pub max_memory_mb: usize,
 }
 
-fn default_oc_listen() -> String { "127.0.0.1:6379".to_string() }
-fn default_oc_mem() -> usize { 128 }
+fn default_oc_listen() -> String {
+    "127.0.0.1:6379".to_string()
+}
+fn default_oc_mem() -> usize {
+    128
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct SecuritySettings {
@@ -155,7 +159,6 @@ pub struct RawSecurity {
     pub max_errors_per_minute: u32,
 }
 
-
 pub fn build_security(raw: RawSecurity) -> SecuritySettings {
     SecuritySettings {
         enabled: raw.enabled,
@@ -166,10 +169,18 @@ pub fn build_security(raw: RawSecurity) -> SecuritySettings {
     }
 }
 
-fn default_sec_enabled() -> bool { true }
-fn default_max_conns() -> u32 { 30 }
-fn default_ban_duration() -> u64 { 600 }
-fn default_max_errors() -> u32 { 50 }
+fn default_sec_enabled() -> bool {
+    true
+}
+fn default_max_conns() -> u32 {
+    30
+}
+fn default_ban_duration() -> u64 {
+    600
+}
+fn default_max_errors() -> u32 {
+    50
+}
 
 #[derive(Clone, Debug)]
 pub struct Settings {

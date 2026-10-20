@@ -362,23 +362,55 @@ mod tests {
         // ever touching the filesystem. This is what keeps the handler
         // safe from `..` and `/etc/passwd` style attacks.
         assert!(matches!(
-            route("GET", "/.well-known/acme-challenge/../etc/passwd", None, None, &t, None),
+            route(
+                "GET",
+                "/.well-known/acme-challenge/../etc/passwd",
+                None,
+                None,
+                &t,
+                None
+            ),
             Reply::Mem { status: 404, .. }
         ));
         assert!(matches!(
-            route("GET", "/.well-known/acme-challenge/a/b", None, None, &t, None),
+            route(
+                "GET",
+                "/.well-known/acme-challenge/a/b",
+                None,
+                None,
+                &t,
+                None
+            ),
             Reply::Mem { status: 404, .. }
         ));
 
         // Non-read methods → 405 with `Allow: GET, HEAD` behavior.
         assert!(matches!(
-            route("POST", "/.well-known/acme-challenge/tok", None, None, &t, None),
-            Reply::Mem { status: 405, allow: true, .. }
+            route(
+                "POST",
+                "/.well-known/acme-challenge/tok",
+                None,
+                None,
+                &t,
+                None
+            ),
+            Reply::Mem {
+                status: 405,
+                allow: true,
+                ..
+            }
         ));
 
         // Well-formed token that just isn't on disk → 404, not panic.
         assert!(matches!(
-            route("GET", "/.well-known/acme-challenge/abc123_-XYZ", None, None, &t, None),
+            route(
+                "GET",
+                "/.well-known/acme-challenge/abc123_-XYZ",
+                None,
+                None,
+                &t,
+                None
+            ),
             Reply::Mem { status: 404, .. }
         ));
     }
