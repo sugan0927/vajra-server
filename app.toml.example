@@ -1,0 +1,38 @@
+# ==========================================
+# Vajra Server Configuration — Example
+# ==========================================
+# Copy to /etc/vajra/app.toml and edit.
+
+[server]
+listen = "0.0.0.0:80"
+workers = 1
+grace_secs = 5
+
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
+
+[tls]
+listen = "0.0.0.0:443"
+cert = "/etc/letsencrypt/live/example.com/fullchain.pem"
+key  = "/etc/letsencrypt/live/example.com/privkey.pem"
+
+[quic]
+listen = "0.0.0.0:443"
+
+[object_cache]
+enabled = true
+listen = "127.0.0.1:6379"
+max_memory_mb = 256
+
+[headers]
+hsts = "max-age=31536000; includeSubDomains"
+
+[[site]]
+host = "example.com"
+root = "/var/www/sites/example.com"
+index = "index.php"
+mode = "wordpress"
+php_sock = "unix:/run/php/vajra-example_com.sock"
+tls_cert = "/etc/letsencrypt/live/example.com/fullchain.pem"
+tls_key  = "/etc/letsencrypt/live/example.com/privkey.pem"
