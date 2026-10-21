@@ -245,6 +245,43 @@ fn main() {
     // is dropped at end of main, which joins the thread.
     let mut backup_scheduler = vajra::backup::scheduler::spawn(settings.backup.clone());
 
+    // ── ACME / Let's Encrypt auto-TLS ──────────────────────────────
+    // The tokio runtime inside AcmeRuntime is CurrentThread (!Send),
+    // so we keep it on the main thread. Only the resolver (Arc) and
+    // domain list (Vec<String>) — both Send + Clone — are handed to
+    // the workers. `_acme_runtime` stays alive until main returns,
+    // which keeps the background ACME state machine running.
+    let (_acme_runtime, acme_resolver, acme_domains) = if settings.acme.enabled {
+        let acme_site_domains: Vec<String> = settings.sites.iter()
+            .filter(|s| s.tls_cert.is_none() && s.tls_key.is_none())
+            .map(|s| s.host.clone())
+            .collect();
+        if acme_site_domains.is_empty() {
+            eprintln!("vajra: acme enabled but no site lacks tls_cert — skipping");
+            (None, None, Vec::<String>::new())
+        } else {
+            match vajra::acme::AcmeRuntime::spawn(acme_site_domains, &settings.acme) {
+                Ok(rt) => {
+                    let resolver = rt.resolver.clone();
+                    let domains = rt.domains.clone();
+                    eprintln!(
+                        "vajra: acme runtime started ({} site(s), staging={})",
+                        domains.len(),
+                        settings.acme.staging
+                    );
+                    (Some(rt), Some(resolver), domains)
+                }
+                Err(e) => {
+                    eprintln!("vajra: acme start failed: {e} — continuing without ACME");
+                    (None, None, Vec::<String>::new())
+                }
+            }
+        }
+    } else {
+        (None, None, Vec::<String>::new())
+    };
+
+
     let ncpu = sys::available_cpus();
     println!(
         "vajra: http  on {}  ({} worker(s))",
@@ -345,6 +382,8 @@ fn main() {
         handles.push(handle);
 
         let (settings, dynamic, ready) = (settings.clone(), dynamic.clone(), ready_tx.clone());
+        let acme_resolver_w = acme_resolver.clone();
+        let acme_domains_w = acme_domains.clone();
         let quic_cfg = quic_cfg.clone();
         let ip_stats = ip_stats.clone();
         let j = thread::Builder::new()
@@ -366,7 +405,13 @@ fn main() {
                         fd: sock.as_raw_fd(),
                         tls: true,
                     });
-                    match tls::build_server_config_with_sni(&dynamic.sites, &t.cert, &t.key) {
+                    match tls::build_server_config_with_sni_and_acme(
+                        &dynamic.sites,
+                        &t.cert,
+                        &t.key,
+                        acme_resolver_w,
+                        acme_domains_w,
+                    ) {
                         Ok(c) => tls_cfg = Some(c),
                         Err(e) => {
                             let _ = ready.send(Err(format!("worker {core}: {e}")));

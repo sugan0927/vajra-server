@@ -182,6 +182,45 @@ fn default_max_errors() -> u32 {
     50
 }
 
+/// Let's Encrypt ACME settings. Only sites without `tls_cert`/`tls_key`
+/// are ACME-managed. Static certs (certbot, acme.sh) unaffected.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcmeSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default = "default_acme_cache")]
+    pub cache_dir: std::path::PathBuf,
+    #[serde(default)]
+    pub staging: bool,
+}
+
+fn default_acme_cache() -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/lib/vajra/acme")
+}
+
+impl AcmeSettings {
+    pub fn is_staging(&self) -> bool { self.staging }
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled && (self.email.is_empty() || !self.email.contains('@')) {
+            return Err("acme: valid email required".into());
+        }
+        Ok(())
+    }
+}
+
+impl Default for AcmeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            email: String::new(),
+            cache_dir: default_acme_cache(),
+            staging: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub security: SecuritySettings,
@@ -209,6 +248,7 @@ pub struct Settings {
     pub rate_limit: RateLimitSettings,
     pub compression: CompressionSettings,
     pub fastcgi_cache: FastcgiCacheSettings,
+    pub acme: AcmeSettings,
 
     /// Day 23: auto-backup policy. Executor is `vajra backup run`.
     pub backup: BackupConfig,
@@ -403,6 +443,7 @@ pub struct Dynamic {
     pub rate_limit: RateLimitSettings,
     pub compression: CompressionSettings,
     pub fastcgi_cache: FastcgiCacheSettings,
+    pub acme: AcmeSettings,
 }
 
 impl StaticSettings {
@@ -465,6 +506,7 @@ impl Default for Settings {
             rate_limit: RateLimitSettings::default(),
             compression: CompressionSettings::default(),
             fastcgi_cache: FastcgiCacheSettings::default(),
+            acme: AcmeSettings::default(),
             backup: BackupConfig::default(),
         }
     }
@@ -508,6 +550,8 @@ struct Raw {
     rate_limit: Option<RawRateLimit>,
     compression: Option<RawCompression>,
     fastcgi_cache: Option<RawFastcgiCache>,
+    #[serde(default)]
+    acme: Option<AcmeSettings>,
 
     /// Day 26: [backup] section, parsed by the scheduler.
     #[serde(default)]
@@ -1082,6 +1126,7 @@ impl Settings {
             rate_limit: build_rate_limit(raw.rate_limit.unwrap_or_default())?,
             compression: build_compression(raw.compression.unwrap_or_default())?,
             fastcgi_cache: build_fastcgi_cache(raw.fastcgi_cache.unwrap_or_default())?,
+            acme: raw.acme.unwrap_or_default(),
             backup: raw.backup.unwrap_or_default(),
             security: build_security(raw.security.unwrap_or_default()),
             object_cache: raw.object_cache.map(|raw_oc| ObjectCacheSettings {
@@ -1137,6 +1182,7 @@ impl Settings {
             rate_limit: self.rate_limit.clone(),
             compression: self.compression.clone(),
             fastcgi_cache: self.fastcgi_cache.clone(),
+            acme: self.acme.clone(),
         }
     }
 

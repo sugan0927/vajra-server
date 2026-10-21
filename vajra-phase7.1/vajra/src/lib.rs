@@ -33,6 +33,7 @@ pub mod date;
 pub mod fastcgi;
 pub mod h2;
 pub mod h3;
+pub mod acme;
 pub mod health;
 pub mod http;
 pub mod metrics;

@@ -15,7 +15,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use rustls_acme::ResolvesServerCertAcme;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -100,6 +101,8 @@ fn load_certified_key(cert: &Path, key: &Path) -> Result<Arc<CertifiedKey>, Stri
 pub struct SniResolver {
     by_host: HashMap<String, Arc<CertifiedKey>>,
     default: Arc<CertifiedKey>,
+    pub acme: Option<Arc<ResolvesServerCertAcme>>,
+    pub acme_domains: HashSet<String>,
 }
 
 impl SniResolver {
@@ -125,17 +128,45 @@ impl SniResolver {
                 by_host.insert(alias.to_lowercase(), ck.clone());
             }
         }
-        Self { by_host, default }
+        Self { by_host, default, acme: None, acme_domains: HashSet::new() }
+    }
+}
+
+
+impl SniResolver {
+    pub fn with_acme(
+        mut self,
+        acme: Option<Arc<ResolvesServerCertAcme>>,
+        domains: Vec<String>,
+    ) -> Self {
+        self.acme = acme;
+        self.acme_domains = domains.into_iter().map(|d| d.to_lowercase()).collect();
+        self
     }
 }
 
 impl ResolvesServerCert for SniResolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        if let Some(name) = hello.server_name() {
-            if let Some(ck) = self.by_host.get(&name.to_lowercase()) {
-                return Some(ck.clone());
+        let sni_lc: Option<String> = hello.server_name().map(|s| s.to_lowercase());
+
+        // ACME-managed domain: hand to ACME resolver
+        // (handles both acme-tls/1 challenge cert and normal SAN cert)
+        if let Some(name) = &sni_lc {
+            if self.acme_domains.contains(name) {
+                if let Some(acme) = &self.acme {
+                    return acme.resolve(hello);
+                }
             }
         }
+
+        // Static cert for known SNI (certbot / acme.sh)
+        if let Some(name) = sni_lc {
+            if let Some(k) = self.by_host.get(&name) {
+                return Some(k.clone());
+            }
+        }
+
+        // Default fallback (first static cert)
         Some(self.default.clone())
     }
 }
@@ -163,5 +194,35 @@ pub fn build_server_config_with_sni(
 
     cfg.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
     cfg.ticketer = provider::Ticketer::new().map_err(|e| format!("tls ticketer: {e}"))?;
+    Ok(Arc::new(cfg))
+}
+
+pub fn build_server_config_with_sni_and_acme(
+    sites: &[SiteSettings],
+    cert: &Path,
+    key: &Path,
+    acme: Option<Arc<ResolvesServerCertAcme>>,
+    acme_domains: Vec<String>,
+) -> Result<Arc<ServerConfig>, String> {
+    let default = load_certified_key(cert, key)?;
+    let resolver = SniResolver::new(sites, default).with_acme(acme, acme_domains);
+
+    let mut cfg = ServerConfig::builder_with_provider(
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .with_safe_default_protocol_versions()
+    .map_err(|e| format!("tls: {e}"))?
+    .with_no_client_auth()
+    .with_cert_resolver(Arc::new(resolver));
+
+    // ALPN: standard + ACME challenge protocol
+    cfg.alpn_protocols = vec![
+        b"h2".to_vec(),
+        b"http/1.1".to_vec(),
+        crate::acme::ACME_TLS_ALPN.to_vec(),
+    ];
+    cfg.ticketer = rustls::crypto::ring::Ticketer::new()
+        .map_err(|e| format!("tls ticketer: {e}"))?;
+
     Ok(Arc::new(cfg))
 }
