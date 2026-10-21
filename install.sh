@@ -135,7 +135,17 @@ setup_php() {
   esac
   echo "   → PHP $PHP_VER (socket: $PHP_SOCK)"
     # ── OpCache aggressive tuning (WordPress) ──
-    case "$DISTRO" in
+    # Detect family if not already set (avoid `set -u` trip)
+    : "${FAMILY:=}"
+    if [ -z "$FAMILY" ]; then
+      if   [ -f /etc/debian_version ]; then FAMILY=debian
+      elif [ -f /etc/redhat-release ] || [ -f /etc/system-release ]; then FAMILY=rhel
+      elif [ -f /etc/arch-release ];   then FAMILY=arch
+      elif [ -f /etc/alpine-release ]; then FAMILY=alpine
+      else FAMILY=unknown
+      fi
+    fi
+    case "$FAMILY" in
       debian|ubuntu)
         OPCACHE_INI="/etc/php/${PHP_VER}/mods-available/opcache.ini"
         OPCACHE_FPM="/etc/php/${PHP_VER}/fpm/conf.d/10-opcache.ini"
