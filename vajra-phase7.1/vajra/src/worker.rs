@@ -397,6 +397,7 @@ impl ProxyJob {
 /// `align(64)`: each connection record starts on its own cache line.
 #[repr(align(64))]
 struct Conn {
+    #[allow(dead_code)]
     pub ip: Option<std::net::IpAddr>,
     fd: RawFd, // -1 while the slot is free
     /// Receive staging buffer carved from the slab pool (address-stable).
