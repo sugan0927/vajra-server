@@ -134,6 +134,44 @@ setup_php() {
       ;;
   esac
   echo "   → PHP $PHP_VER (socket: $PHP_SOCK)"
+    # ── OpCache aggressive tuning (WordPress) ──
+    case "$DISTRO" in
+      debian|ubuntu)
+        OPCACHE_INI="/etc/php/${PHP_VER}/mods-available/opcache.ini"
+        OPCACHE_FPM="/etc/php/${PHP_VER}/fpm/conf.d/10-opcache.ini"
+        ;;
+      rhel|fedora|rocky|alma|centos)
+        OPCACHE_INI="/etc/php.d/10-opcache.ini"
+        OPCACHE_FPM=""
+        ;;
+      arch|manjaro)
+        OPCACHE_INI="/etc/php/conf.d/opcache.ini"
+        OPCACHE_FPM=""
+        ;;
+      *) OPCACHE_INI=""; OPCACHE_FPM="" ;;
+    esac
+    if [ -n "$OPCACHE_INI" ] && [ -d "$(dirname "$OPCACHE_INI")" ]; then
+      cat > "$OPCACHE_INI" << 'OPC_EOF'
+zend_extension=opcache.so
+opcache.enable=1
+opcache.enable_cli=0
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=32
+opcache.max_accelerated_files=20000
+opcache.revalidate_freq=2
+opcache.validate_timestamps=1
+opcache.save_comments=1
+opcache.fast_shutdown=1
+opcache.jit_buffer_size=64M
+opcache.jit=tracing
+OPC_EOF
+      # Symlink into FPM conf.d if not linked (Debian layout)
+      if [ -n "$OPCACHE_FPM" ] && [ ! -L "$OPCACHE_FPM" ]; then
+        ln -sf "$OPCACHE_INI" "$OPCACHE_FPM"
+      fi
+      log "✅ OpCache tuned (${OPCACHE_INI})"
+    fi
+
 }
 
 # ─── Vajra Binary Downloader ────────────────────────────────────────────
@@ -401,6 +439,31 @@ TOML_EOF
         log "✅ Redis Object Cache activated!"
     fi
 
+    # ── FastCGI page cache: create dir + MU-plugin ──
+    mkdir -p /var/cache/vajra/fastcgi
+    chown www-data:www-data /var/cache/vajra/fastcgi 2>/dev/null || \
+        chown apache:apache /var/cache/vajra/fastcgi 2>/dev/null || true
+    chmod 750 /var/cache/vajra/fastcgi
+
+    if [ -d "$SITE_ROOT/wp-content" ]; then
+        mkdir -p "$SITE_ROOT/wp-content/mu-plugins"
+        cat > "$SITE_ROOT/wp-content/mu-plugins/vajra-cache.php" << 'MU_EOF'
+<?php
+// Vajra FastCGI cache: inject public Cache-Control for anonymous users.
+add_filter('wp_headers', function ($h) {
+    if (is_user_logged_in() || is_admin()) return $h;
+    foreach (['woocommerce_items_in_cart','comment_author_','wp-postpass_'] as $c)
+        if (isset($_COOKIE[$c])) return $h;
+    $h['Cache-Control'] = 'public, max-age=300, s-maxage=300';
+    unset($h['Pragma'], $h['Expires']);
+    return $h;
+}, 999);
+MU_EOF
+        chown www-data:www-data "$SITE_ROOT/wp-content/mu-plugins/vajra-cache.php" 2>/dev/null || true
+        log "✅ MU-plugin installed (Cache-Control headers)"
+    fi
+
+
 
   wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" \
      --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
@@ -590,6 +653,9 @@ SVC_EOF
                 # Ensure pm=dynamic exists
                 if ! grep -q '^pm\s*=' "$conf"; then
                     sed -i "s/^\[vajra-.*\]/[&]\npm = dynamic\npm.max_children = $MAX_CHILDREN\npm.start_servers = $((MAX_CHILDREN/4))\npm.min_spare_servers = $((MAX_CHILDREN/4))\npm.max_spare_servers = $((MAX_CHILDREN/2))\npm.max_requests = 1000/" "$conf"
+
+request_slowlog_timeout = 500ms
+slowlog = /var/log/php-fpm-${DOMAIN_SANITIZED}-slow.log
                 fi
                 tuned_any=1
             fi
