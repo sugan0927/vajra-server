@@ -193,3 +193,90 @@ mod tests {
         drop(c);
     }
 }
+// ──────────────────────────────────────────────────────────────
+// MSG_ZEROCOPY support (Linux 4.14+). Lets us hand a userspace
+// buffer to the kernel without an extra copy — useful for the
+// plain-H1 fast path with large bodies. No-op if unsupported.
+// ──────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+/// Enable SO_ZEROCOPY on a TCP socket. Returns Ok(true) if the
+/// kernel accepted it, Ok(false) on very old kernels, Err on real
+/// failures.
+#[allow(dead_code)]
+pub fn enable_zerocopy(tcp_fd: i32) -> std::io::Result<bool> {
+    const SO_ZEROCOPY: libc::c_int = 60;
+    let one: libc::c_int = 1;
+    let ret = unsafe {
+        libc::setsockopt(
+            tcp_fd, libc::SOL_SOCKET, SO_ZEROCOPY,
+            &one as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&one) as libc::socklen_t,
+        )
+    };
+    if ret == 0 {
+        Ok(true)
+    } else {
+        let err = std::io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::ENOPROTOOPT) | Some(libc::EOPNOTSUPP)) {
+            Ok(false)
+        } else {
+            Err(err)
+        }
+    }
+}
+
+/// Try sendmsg(MSG_ZEROCOPY). Falls back to plain send() for
+/// small buffers (<16 KB) or if the kernel refuses.
+#[allow(dead_code)]
+pub fn send_zerocopy(sock_fd: i32, buf: &[u8]) -> std::io::Result<usize> {
+    if buf.len() < 16 * 1024 {
+        return send_bytes(sock_fd, buf);
+    }
+    let mut iov = libc::iovec {
+        iov_base: buf.as_ptr() as *mut libc::c_void,
+        iov_len: buf.len(),
+    };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    const MSG_ZEROCOPY: libc::c_int = 0x4000000;
+    let n = unsafe {
+        libc::sendmsg(sock_fd, &msg, MSG_ZEROCOPY | libc::MSG_NOSIGNAL)
+    };
+    if n >= 0 {
+        Ok(n as usize)
+    } else {
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EOPNOTSUPP) | Some(libc::ENOBUFS) | Some(libc::EINVAL) => {
+                send_bytes(sock_fd, buf)
+            }
+            _ => Err(err),
+        }
+    }
+}
+
+/// Send all bytes, handling partial writes.
+#[allow(dead_code)]
+fn send_bytes(sock_fd: i32, buf: &[u8]) -> std::io::Result<usize> {
+    let mut sent = 0;
+    while sent < buf.len() {
+        let n = unsafe {
+            libc::send(
+                sock_fd,
+                buf[sent..].as_ptr() as *const _,
+                buf.len() - sent,
+                libc::MSG_NOSIGNAL,
+            )
+        };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) { continue; }
+            return Err(err);
+        }
+        if n == 0 { break; } // peer closed
+        sent += n as usize;
+    }
+    Ok(sent)
+}
