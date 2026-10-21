@@ -5,3 +5,5 @@
 **/*.rs.pre-h2-disable
 *.bin
 /tmp/
+*.pre-*
+*.bak
