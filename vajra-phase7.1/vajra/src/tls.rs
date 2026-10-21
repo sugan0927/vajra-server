@@ -24,7 +24,7 @@ use std::sync::Arc;
 use crate::config::SiteSettings;
 
 /// ALPN protocols offered, in preference order.
-pub const ALPN: &[&[u8]] = &[b"http/1.1"]; // HTTP/2 disabled — parser bug
+pub const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 
 fn load_pems(
     cert: &Path,

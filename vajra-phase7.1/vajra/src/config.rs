@@ -1488,15 +1488,15 @@ mod tests {
 /// The five managed header names, in RFC canonical spelling.
 /// Lookup against response headers is case-insensitive.
 pub const SECURITY_HEADERS: [&str; 6] = [
-    "Strict-Transport-Security",
-    "X-Frame-Options",
-    "X-Content-Type-Options",
-    "Referrer-Policy",
-    "Permissions-Policy",
-    "Content-Security-Policy",
+    "strict-transport-security",
+    "x-frame-options",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+    "content-security-policy",
 ];
 
-/// WordPress-compatible Content-Security-Policy.
+/// WordPress-compatible content-security-policy.
 ///
 /// Permits the inline scripts/styles/eval that unmodified WordPress 6.x
 /// and most plugins require; locks down frame-ancestors / base-uri /
