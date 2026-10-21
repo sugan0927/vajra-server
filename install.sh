@@ -280,6 +280,40 @@ cmd_add() {
   if [[ ! -f "$APP_TOML" ]]; then
     cat > "$APP_TOML" <<TOML_EOF
 [server]
+listen = "0.0.0.0:80"
+workers = ${WORKERS:-1}
+grace_secs = 5
+
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
+
+[tls]
+listen = "0.0.0.0:443"
+cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+
+[quic]
+listen = "0.0.0.0:443"
+
+[object_cache]
+enabled = true
+listen = "127.0.0.1:6379"
+max_memory_mb = ${REDIS_MB:-256}
+
+[headers]
+hsts = "max-age=31536000; includeSubDomains"
+
+[[site]]
+host = "${DOMAIN}"
+root = "${SITE_ROOT}"
+index = "index.php"
+mode = "${SITE_MODE}"
+php_sock = "unix:/run/php/vajra-${DOMAIN_SANITIZED}.sock"
+tls_cert = "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+tls_key  = "/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+TOML_EOF
+[server]
 listen  = "0.0.0.0:80"
 workers = 1
 
