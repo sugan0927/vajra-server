@@ -1,3 +1,33 @@
+## [0.15.10] — 2026-10-21
+
+### Fixed
+- **HTTP/2 enabled by default**: restored `h2` in the TLS ALPN list.
+  HTTP/2 was previously disabled due to an older parser bug; the
+  parser is now h2spec-clean (41/41 tests passing), so we can ship it.
+- **RFC 7540 §8.1.2 compliance**: all security headers emitted over
+  HTTP/2 are now lowercase (`strict-transport-security`,
+  `x-frame-options`, `x-content-type-options`, `referrer-policy`,
+  `content-security-policy`, `permissions-policy`). Upper-case header
+  names were causing `ERR_HTTP2_PROTOCOL_ERROR` in browsers/curl.
+
+### Added
+- **`install.sh`: PHP Redis extension** is now installed alongside the
+  other PHP extensions on Debian (`php${PHP_VER}-redis`,
+  `php${PHP_VER}-igbinary`), RHEL/Fedora (`php-pecl-redis`), and
+  Arch (`php-redis`, `php-igbinary`).
+- **`install.sh`: WP Redis auto-activation** — after WordPress core is
+  installed, the `redis-cache` plugin is installed, activated, and
+  `wp redis enable` runs automatically. Users get the PhpRedis client
+  (faster, with dashboard metrics) out of the box instead of Predis.
+- **`install.sh`: default `app.toml` template** now includes `[quic]`
+  and `[object_cache]` sections, so fresh sites get HTTP/3 and the
+  embedded Redis instance enabled with sensible defaults
+  (`workers=${WORKERS:-1}`, `max_memory_mb=${REDIS_MB:-256}`).
+
+### Changed
+- Repo hygiene: `.gitignore` now ignores `*.pre-*` and `*.bak`
+  snapshot files; 16 stale `src/*.pre-*` snapshots were removed.
+
 # Changelog
 
 All notable changes to Vajra are documented here.
