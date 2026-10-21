@@ -104,7 +104,8 @@ setup_php() {
                   "php${PHP_VER}-mysql" "php${PHP_VER}-curl" "php${PHP_VER}-xml" \
                   "php${PHP_VER}-mbstring" "php${PHP_VER}-zip" "php${PHP_VER}-gd" \
                   "php${PHP_VER}-intl" "php${PHP_VER}-bcmath" \
-                  "php${PHP_VER}-imagick" "php${PHP_VER}-fileinfo" "php${PHP_VER}-exif"
+                  "php${PHP_VER}-imagick" "php${PHP_VER}-fileinfo" "php${PHP_VER}-exif" \
+                  "php${PHP_VER}-redis" "php${PHP_VER}-igbinary"
       PHP_SOCK="/run/php/php${PHP_VER}-fpm.sock"
       PHP_FPM_SVC="php${PHP_VER}-fpm"
       ;;
@@ -117,7 +118,7 @@ setup_php() {
         dnf install -y epel-release || true
         dnf config-manager --set-enabled crb 2>/dev/null || true
         pkg_install php php-cli php-fpm php-mysqlnd php-curl php-xml php-mbstring php-zip php-gd || true
-        pkg_install php-intl php-bcmath php-imagick php-fileinfo php-exif || true
+        pkg_install php-intl php-bcmath php-imagick php-fileinfo php-exif php-pecl-redis || true
       fi
       if ! command -v php >/dev/null 2>&1; then die "PHP installation failed on Fedora/RHEL."; fi
       PHP_VER="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || echo "8.3")"
@@ -125,7 +126,7 @@ setup_php() {
       PHP_FPM_SVC="php-fpm"
       ;;
     arch)
-      pkg_install curl ca-certificates php php-fpm php-gd php-imagick php-intl
+      pkg_install curl ca-certificates php php-fpm php-gd php-imagick php-intl php-redis php-igbinary
       PHP_VER="$(pacman -Si php 2>/dev/null | awk '/^Version/{print $3}' | cut -d. -f1,2)"
       [[ -n "$PHP_VER" ]] || PHP_VER="8"
       PHP_SOCK="/run/php-fpm/php-fpm.sock"
@@ -356,6 +357,16 @@ TOML_EOF
   db_exec -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';"
   db_exec -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
   db_exec -e "FLUSH PRIVILEGES;"
+
+    # ─── Auto-Activate Redis Object Cache ───
+    if command -v wp >/dev/null 2>&1; then
+        log "Configuring Redis Object Cache..."
+        # Ensure PhpRedis is loaded
+        sudo -u "$WWW_USER" wp plugin install redis-cache --activate --path="$SITE_ROOT" --allow-root 2>/dev/null || true
+        sudo -u "$WWW_USER" wp redis enable --path="$SITE_ROOT" --allow-root 2>/dev/null || true
+        log "✅ Redis Object Cache activated!"
+    fi
+
 
   wp --allow-root config create --dbname="$DB_NAME" --dbuser="$DB_USER" \
      --dbpass="$DB_PASS" --dbhost=127.0.0.1 --skip-check --force
