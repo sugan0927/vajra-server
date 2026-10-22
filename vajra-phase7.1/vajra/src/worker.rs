@@ -106,8 +106,8 @@ const OP_Q_SEND: u64 = 17;
 const OP_Q_TIMER: u64 = 18;
 
 /// Bytes moved per file->pipe splice.
-const SPLICE_CHUNK: u32 = 128 * 1024;
-const PIPE_SIZE: libc::c_int = 256 * 1024;
+const SPLICE_CHUNK: u32 = 1024 * 1024; // Optimized for Zero-Copy (1MB)
+const PIPE_SIZE: libc::c_int = 1024 * 1024; // Max kernel pipe buffer (1MB)
 const MAX_POOLED_PIPES: usize = 256;
 /// Bytes requested per upstream recv.
 const UP_RECV_CHUNK: usize = 16 * 1024;
@@ -1721,8 +1721,11 @@ impl Worker {
                 Next::Send
             } else if c.xfer.is_some() {
                 if c.tls.is_some() {
+                    // TLS requires userspace encryption, so we can't splice directly to the socket.
+                    // We read into chunk buffer. (Future: Implement kTLS)
                     Next::H1Read
                 } else {
+                    // Plain HTTP -> Pure Zero-Copy via io_uring splice!
                     Next::Splice
                 }
             } else if let Some(j) = c.proxy.as_ref() {
