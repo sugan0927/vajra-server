@@ -7,11 +7,16 @@ set -euo pipefail
 
 DOMAIN="${1:-}"
 
-  # Fix: Loopback TLS for REST API (using Public IP)
+  # Fix: Loopback TLS for REST API (using Public IP & Local Route)
   PUBLIC_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com)
-  if [ -n "$PUBLIC_IP" ] && ! grep -q "$PUBLIC_IP ${DOMAIN}" /etc/hosts; then
-      echo "$PUBLIC_IP ${DOMAIN}" >> /etc/hosts
+  if [ -n "$PUBLIC_IP" ]; then
+      # राउटिंग सेट करें ताकि Vajra इसे बाहरी ट्रैफिक समझे
+      ip route add "$PUBLIC_IP/32" dev lo 2>/dev/null || true
+      if ! grep -q "$PUBLIC_IP ${DOMAIN}" /etc/hosts; then
+          echo "$PUBLIC_IP ${DOMAIN}" >> /etc/hosts
+      fi
   fi
+
 
 EMAIL="${2:-}"
 REPO="${VAJRA_REPO:-sugan0927/vajra-server}"
