@@ -133,23 +133,58 @@ done
 log "4/10 — Vajra binary (from tarball)"
 ARCH="$(uname -m)"
 case "$ARCH" in
-  x86_64)  BIN_ARCH=amd64 ;;
-  aarch64) BIN_ARCH=arm64 ;;
+  x86_64)  BIN_ARCH=x86_64 ;;
+  aarch64) BIN_ARCH=aarch64 ;;
   *) die "Unsupported arch: $ARCH" ;;
 esac
 
-# Tarball डाउनलोड और एक्सट्रैक्ट करें
-URL="https://github.com/${REPO}/releases/download/${VAJRA_VERSION}/vajra-${VAJRA_VERSION}.tar.gz"
-log "Downloading $URL..."
-curl -fsSL "$URL" -o /tmp/vajra.tar.gz
-tar -xzf /tmp/vajra.tar.gz -C /tmp/
+if [[ "$VAJRA_VERSION" == "latest" ]]; then
+  VAJRA_VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' | head -1)"
+fi
+VER_NOV="${VAJRA_VERSION#v}"
+BASE="https://github.com/${REPO}/releases/download/${VAJRA_VERSION}"
+TMP="$(mktemp -d)"
 
-# बाइनरी इंस्टॉल करें
-if [[ -f "/tmp/vajra-${VAJRA_VERSION}/vajra-linux-${BIN_ARCH}" ]]; then
-    mv -f "/tmp/vajra-${VAJRA_VERSION}/vajra-linux-${BIN_ARCH}" /usr/local/bin/vajra
-    chmod +x /usr/local/bin/vajra
-else
-    die "Binary not found in tarball!"
+CANDIDATES=(
+  "vajra-${VER_NOV}-${BIN_ARCH}-unknown-linux-musl.tar.gz"
+  "vajra-${VER_NOV}-${BIN_ARCH}-linux.tar.gz"
+  "vajra-${VAJRA_VERSION}-${BIN_ARCH}-unknown-linux-musl.tar.gz"
+  "vajra-${VAJRA_VERSION}-${BIN_ARCH}-linux.tar.gz"
+)
+
+api_url="https://api.github.com/repos/${REPO}/releases/tags/${VAJRA_VERSION}"
+while IFS= read -r a; do
+  [[ -z "$a" ]] && continue
+  [[ "$a" == *.sha256 ]] && continue
+  [[ "$a" == *.sha512 ]] && continue
+  CANDIDATES+=("$a")
+done < <(curl -fsSL "$api_url" 2>/dev/null | grep -oE '"browser_download_url"\s*:\s*"[^"]+\.tar\.gz"' | sed -E 's|.*/||; s|"$||' | grep -E 'x86_64|aarch64' || true)
+
+ok=0
+for asset in "${CANDIDATES[@]}"; do
+  echo "   → trying: $asset"
+  if curl -fL --retry 2 -sS "$BASE/$asset" -o "$TMP/$asset" 2>/dev/null; then
+    if curl -fL -sS "$BASE/${asset}.sha256" -o "$TMP/${asset}.sha256" 2>/dev/null; then
+      if ( cd "$TMP" && sha256sum -c "${asset}.sha256" >/dev/null 2>&1 ); then
+        echo "   → checksum OK"
+      else
+        echo "   → checksum FAILED, skipping"
+        continue
+      fi
+    fi
+    if tar -xzf "$TMP/$asset" -C "$TMP" 2>/dev/null; then
+      SRC=$(find "$TMP" -type f -name vajra -not -name '*.tar.gz' 2>/dev/null | head -1)
+      if [[ -n "$SRC" ]]; then
+        install -m 0755 "$SRC" /usr/local/bin/vajra
+        echo "   → installed vajra from $asset"
+        ok=1; break
+      fi
+    fi
+  fi
+done
+rm -rf "$TMP"
+if [[ "$ok" != "1" ]]; then
+  die "Could not download Vajra binary from ${BASE}."
 fi
 vajra --version 2>/dev/null | head -1 || true
 
