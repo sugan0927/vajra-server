@@ -7,3 +7,14 @@
 /tmp/
 *.pre-*
 *.bak
+# Python scripts used for patching
+fix_*.py
+build_*.py
+
+# Build artifacts
+vajra
+vajra-linux-*
+*.tar.gz
+*.sha256
+*.sha512
+*.bak
