@@ -6,6 +6,13 @@
 set -euo pipefail
 
 DOMAIN="${1:-}"
+
+  # Fix: Loopback TLS for REST API (using Public IP)
+  PUBLIC_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com)
+  if [ -n "$PUBLIC_IP" ] && ! grep -q "$PUBLIC_IP ${DOMAIN}" /etc/hosts; then
+      echo "$PUBLIC_IP ${DOMAIN}" >> /etc/hosts
+  fi
+
 EMAIL="${2:-}"
 REPO="${VAJRA_REPO:-sugan0927/vajra-server}"
 VAJRA_VERSION="${VAJRA_VERSION:-v0.15.11}"
@@ -299,11 +306,6 @@ svc_is_active vajra || die "Vajra failed to start — check: journalctl -u vajra
 
 log "9/10 — WordPress"
 SITE_ROOT="/var/www/sites/${DOMAIN}"
-  # Fix: WordPress REST API cURL Error 35 (Loopback TLS)
-  if ! grep -q "127.0.0.1 ${DOMAIN}" /etc/hosts; then
-      echo "127.0.0.1 ${DOMAIN}" >> /etc/hosts
-      echo "   -> Added ${DOMAIN} to /etc/hosts for loopback fix"
-  fi
 
 if [[ ! -f "${SITE_ROOT}/wp-load.php" ]]; then
   curl -fL https://wordpress.org/latest.tar.gz | tar -xz -C /tmp
