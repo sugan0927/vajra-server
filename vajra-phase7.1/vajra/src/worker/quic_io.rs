@@ -424,10 +424,12 @@ impl Worker {
                         hit.status,
                         &hit.headers,
                         body,
-                        head_only,
+                        false,
                         &date,
                         Some("HIT"),
                         None,
+                        None,
+                        &self.compression,
                     );
                     let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
                     self.obs
@@ -487,7 +489,7 @@ impl Worker {
             return;
         }
 
-        let resp = http::h2_response(&reply, head_only, &date);
+        let resp = http::h2_response(&reply, head_only, &date, None, &self.compression);
         let (status, bytes) = http::reply_meta(&reply, head_only);
         self.obs
             .response(peer, Http::H3, &req.method, &req.path, status, bytes);

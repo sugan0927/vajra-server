@@ -1070,7 +1070,13 @@ fn h2_base(date: &[u8; DATE_LEN], ctype: &str, len: u64) -> Vec<(Vec<u8>, Vec<u8
     v
 }
 
-pub fn h2_response(reply: &Reply, head_only: bool, date: &[u8; DATE_LEN]) -> H2Response {
+pub fn h2_response(
+    reply: &Reply,
+    head_only: bool,
+    date: &[u8; DATE_LEN],
+    accept_encoding: Option<&str>,
+    comp: &crate::compress::CompressionSettings,
+) -> H2Response {
     match reply {
         Reply::Mem {
             status,
@@ -1078,17 +1084,50 @@ pub fn h2_response(reply: &Reply, head_only: bool, date: &[u8; DATE_LEN]) -> H2R
             body,
             allow,
         } => {
-            let mut headers = h2_base(date, ctype, body.len() as u64);
+            let mut out_body = body.to_vec();
+            let mut is_compressed = false;
+
+            if !head_only && !out_body.is_empty() {
+                if crate::compress::decide(comp, accept_encoding, ctype, out_body.len(), false)
+                    == crate::compress::Plan::Compress
+                {
+                    let enc = crate::compress::negotiate(accept_encoding, comp);
+                    let compressed = match enc {
+                        crate::compress::Encoding::Brotli => crate::compress::brotli_compress(&out_body, comp.level),
+                        crate::compress::Encoding::Gzip => crate::compress::gzip_compress(&out_body, comp.gzip_level),
+                        crate::compress::Encoding::Identity => None,
+                    };
+                    if let Some(c) = compressed {
+                        if c.len() < out_body.len() {
+                            out_body = c;
+                            is_compressed = true;
+                        }
+                    }
+                }
+            }
+
+            let mut headers = h2_base(date, ctype, out_body.len() as u64);
             if *allow {
                 headers.push((b"allow".to_vec(), b"GET, HEAD".to_vec()));
             }
+
+            if !head_only && !body.is_empty() {
+                if is_compressed {
+                    let enc_str = if crate::compress::negotiate(accept_encoding, comp) == crate::compress::Encoding::Brotli { "br" } else { "gzip" };
+                    headers.push((b"content-encoding".to_vec(), enc_str.as_bytes().to_vec()));
+                }
+                if (comp.brotli || comp.gzip) && !crate::compress::is_pre_compressed(ctype) {
+                    headers.push((b"vary".to_vec(), b"Accept-Encoding".to_vec()));
+                }
+            }
+
             H2Response {
                 status: *status,
                 headers,
                 body: if head_only {
                     H2Body::Empty
                 } else {
-                    H2Body::Mem(body.to_vec())
+                    H2Body::Mem(out_body)
                 },
             }
         }
@@ -1140,11 +1179,13 @@ pub fn h2_error(status: u16, date: &[u8; DATE_LEN]) -> H2Response {
 pub fn h2_proxy_response(
     status: u16,
     headers: &[(Vec<u8>, Vec<u8>)],
-    body: Vec<u8>,
+    mut body: Vec<u8>,
     head_req: bool,
     date: &[u8; DATE_LEN],
     xcache: Option<&'static str>,
     fcgi_cache: Option<&'static str>,
+    accept_encoding: Option<&str>,
+    comp: &crate::compress::CompressionSettings,
 ) -> H2Response {
     let bodyless = status == 204 || status == 304;
     let mut out = vec![
@@ -1172,11 +1213,40 @@ pub fn h2_proxy_response(
         out.push((b"x-fastcgi-cache".to_vec(), f.as_bytes().to_vec()));
     }
     if !head_req && !bodyless {
-        out.push((
-            b"content-length".to_vec(),
-            body.len().to_string().into_bytes(),
-        ));
-    }
+            let ctype = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(b"content-type"))
+                .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+                .unwrap_or_default();
+
+            if status == 200 && !body.is_empty() {
+                if crate::compress::decide(comp, accept_encoding, &ctype, body.len(), false)
+                    == crate::compress::Plan::Compress
+                {
+                    let enc = crate::compress::negotiate(accept_encoding, comp);
+                    let compressed = match enc {
+                        crate::compress::Encoding::Brotli => crate::compress::brotli_compress(&body, comp.level),
+                        crate::compress::Encoding::Gzip => crate::compress::gzip_compress(&body, comp.gzip_level),
+                        crate::compress::Encoding::Identity => None,
+                    };
+                    if let Some(c) = compressed {
+                        if c.len() < body.len() {
+                            body = c;
+                            let enc_str = if enc == crate::compress::Encoding::Brotli { "br" } else { "gzip" };
+                            out.push((b"content-encoding".to_vec(), enc_str.as_bytes().to_vec()));
+                        }
+                    }
+                }
+                if (comp.brotli || comp.gzip) && !ctype.is_empty() && !crate::compress::is_pre_compressed(&ctype) {
+                    out.push((b"vary".to_vec(), b"Accept-Encoding".to_vec()));
+                }
+            }
+
+            out.push((
+                b"content-length".to_vec(),
+                body.len().to_string().into_bytes(),
+            ));
+        }
     let body = if head_req || bodyless || body.is_empty() {
         H2Body::Empty
     } else {
