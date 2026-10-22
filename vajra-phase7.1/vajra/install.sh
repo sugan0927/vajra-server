@@ -299,6 +299,12 @@ svc_is_active vajra || die "Vajra failed to start — check: journalctl -u vajra
 
 log "9/10 — WordPress"
 SITE_ROOT="/var/www/sites/${DOMAIN}"
+  # Fix: WordPress REST API cURL Error 35 (Loopback TLS)
+  if ! grep -q "127.0.0.1 ${DOMAIN}" /etc/hosts; then
+      echo "127.0.0.1 ${DOMAIN}" >> /etc/hosts
+      echo "   -> Added ${DOMAIN} to /etc/hosts for loopback fix"
+  fi
+
 if [[ ! -f "${SITE_ROOT}/wp-load.php" ]]; then
   curl -fL https://wordpress.org/latest.tar.gz | tar -xz -C /tmp
   cp -a /tmp/wordpress/. "${SITE_ROOT}/"
