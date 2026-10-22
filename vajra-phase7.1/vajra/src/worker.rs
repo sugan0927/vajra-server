@@ -1523,6 +1523,9 @@ impl Worker {
                         } else {
                             (*hit.body).clone()
                         };
+                        let accept_enc_hit = req.headers.iter()
+                            .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                            .and_then(|(_, v)| std::str::from_utf8(v).ok());
                         let resp = http::h2_proxy_response(
                             hit.status,
                             &hit.headers,
@@ -1531,6 +1534,8 @@ impl Worker {
                             date,
                             Some("HIT"),
                             None,
+                            accept_enc_hit,
+                            &self.compression,
                         );
                         let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
                         self.obs.response(
@@ -1636,6 +1641,9 @@ impl Worker {
                                     let bodyless = status == 204 || status == 304;
                                     let bytes = if bodyless { 0 } else { cached.len() as u64 };
                                     let owned = if bodyless { Vec::new() } else { cached };
+                                    let accept_enc_hit = req.headers.iter()
+                                        .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                                        .and_then(|(_, v)| std::str::from_utf8(v).ok());
                                     let resp = http::h2_proxy_response(
                                         status,
                                         &headers,
@@ -1644,6 +1652,8 @@ impl Worker {
                                         date,
                                         None,
                                         Some("HIT"),
+                                        accept_enc_hit,
+                                        &self.compression,
                                     );
                                     self.obs.response(
                                         peer,
@@ -1680,7 +1690,10 @@ impl Worker {
                 return; // one proxy job at a time; remaining frames wait in `input`
             }
 
-            let resp = http::h2_response(&reply, head_only, date);
+            let accept_encoding = req.headers.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                .and_then(|(_, v)| std::str::from_utf8(v).ok());
+            let resp = http::h2_response(&reply, head_only, date, accept_encoding, &self.compression);
             let (status, bytes) = http::reply_meta(&reply, head_only);
             self.obs
                 .response(peer, Http::H2, &req.method, &req.path, status, bytes);
@@ -2585,6 +2598,8 @@ impl Worker {
                         &date,
                         xcache,
                         fcgi_status,
+                        job.accept_encoding.as_deref(),
+                        &self.compression,
                     );
                     quic_resp = Some((*q, resp));
                 }
@@ -2599,6 +2614,8 @@ impl Worker {
                         &date,
                         xcache,
                         fcgi_status,
+                        job.accept_encoding.as_deref(),
+                        &self.compression,
                     );
                     h.respond(job.stream, resp, &mut c.out);
                 }
