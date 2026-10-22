@@ -420,7 +420,10 @@ impl Worker {
                     } else {
                         (*hit.body).clone()
                     };
-                    let resp = http::h2_proxy_response(
+                    let accept_encoding = req.headers.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+            .and_then(|(_, v)| std::str::from_utf8(v).ok());
+        let resp = http::h2_proxy_response(
                         hit.status,
                         &hit.headers,
                         body,
@@ -428,7 +431,7 @@ impl Worker {
                         &date,
                         Some("HIT"),
                         None,
-                        None,
+                        accept_encoding,
                         &self.compression,
                     );
                     let bytes = if bodyless { 0 } else { hit.body.len() as u64 };
@@ -489,7 +492,10 @@ impl Worker {
             return;
         }
 
-        let resp = http::h2_response(&reply, head_only, &date, None, &self.compression);
+        let accept_encoding = req.headers.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+            .and_then(|(_, v)| std::str::from_utf8(v).ok());
+        let resp = http::h2_response(&reply, head_only, &date, accept_encoding, &self.compression);
         let (status, bytes) = http::reply_meta(&reply, head_only);
         self.obs
             .response(peer, Http::H3, &req.method, &req.path, status, bytes);
