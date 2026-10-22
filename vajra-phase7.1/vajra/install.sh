@@ -473,3 +473,26 @@ echo "    https://${DOMAIN}/wp-admin/install.php"
 echo "    DB Name : ${DB_NAME}"
 echo "    DB User : ${DB_USER}"
 echo "    DB Pass : ${DB_PASS}"
+
+# --- Persistent Loopback Route Fix for WordPress (Hairpin NAT) ---
+PUBLIC_IP=$(curl -s -4 ifconfig.me || curl -s -4 icanhazip.com)
+if [ -n "$PUBLIC_IP" ]; then
+    ip route add "$PUBLIC_IP/32" dev lo 2>/dev/null || true
+    cat > /etc/systemd/system/vajra-loopback-route.service << EOF
+[Unit]
+Description=Vajra Loopback Route for Hairpin NAT fix
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip route add $PUBLIC_IP/32 dev lo
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable vajra-loopback-route.service
+    systemctl start vajra-loopback-route.service
+fi
+# ------------------------------------------------------------------
