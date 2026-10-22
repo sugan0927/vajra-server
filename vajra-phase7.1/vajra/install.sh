@@ -291,6 +291,21 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
+
+# --- Vajra High Performance Network Tuning (Cross-Distro) ---
+mkdir -p /etc/sysctl.d/
+cat > /etc/sysctl.d/99-vajra-net.conf << 'EOF'
+# Vajra Web Server Network Tuning for Max Performance
+net.core.somaxconn=65535
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.ip_local_port_range=1024 65535
+net.netfilter.nf_conntrack_max=1048576
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+EOF
+sysctl --system >/dev/null 2>&1 || true
+# ------------------------------------------------------------
+
   systemctl enable --now vajra
 else
   cat > /etc/init.d/vajra <<'RC'
