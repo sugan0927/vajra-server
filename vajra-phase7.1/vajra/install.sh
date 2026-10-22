@@ -485,7 +485,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/ip route add $PUBLIC_IP/32 dev lo
+ExecStart=/bin/sh -c "/sbin/ip route add $PUBLIC_IP/32 dev lo || true"
 RemainAfterExit=yes
 
 [Install]
