@@ -249,6 +249,9 @@ Client Request
 ## 9. Site Management with `vajra-site`
 
 `vajra-site` is a wrapper script at `/usr/local/bin/vajra-site` that automates site setup: document root, WordPress, PHP-FPM pool, database, cron, and the matching `[[site]]` block in Vajra's configuration.
+sudo systemctl restart vajra
+sleep 2
+sudo systemctl is-active vajra
 
 ### 9.1 Synopsis
 
