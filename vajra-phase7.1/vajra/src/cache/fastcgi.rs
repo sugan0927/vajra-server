@@ -342,68 +342,54 @@ impl FastcgiCache {
     pub fn get(
         &mut self,
         key: &[u8],
+        accept_encoding: Option<&str>,
     ) -> std::io::Result<Option<(u16, Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>)>> {
-        if !self.settings.enabled {
-            return Ok(None);
-        }
+        if !self.settings.enabled { return Ok(None); }
         let now = Self::now();
-        let Some(&idx) = self.by_key.get(key) else {
-            return Ok(None);
-        };
-        if self.index[idx].expires_at <= now {
-            self.remove_at(idx)?;
-            return Ok(None);
-        }
+        let Some(&idx) = self.by_key.get(key) else { return Ok(None); };
+        if self.index[idx].expires_at <= now { self.remove_at(idx)?; return Ok(None); }
+        
         let path = self.data_path(key);
         let buf = match fs::read(&path) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.remove_at(idx)?;
-                return Ok(None);
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => { self.remove_at(idx)?; return Ok(None); }
             Err(e) => return Err(e),
         };
-        if let Some(&i2) = self.by_key.get(key) {
-            self.index[i2].last_access = now;
-        }
-
-        // Decode format v2.
-        if buf.len() < 6 {
-            self.remove_at(idx)?;
-            return Ok(None);
-        }
+        if let Some(&i2) = self.by_key.get(key) { self.index[i2].last_access = now; }
+        if buf.len() < 6 { self.remove_at(idx)?; return Ok(None); }
+        
         let status = u16::from_le_bytes([buf[0], buf[1]]);
         let hdr_len = u32::from_le_bytes([buf[2], buf[3], buf[4], buf[5]]) as usize;
-        if buf.len() < 6 + hdr_len {
-            self.remove_at(idx)?;
-            return Ok(None);
-        }
+        if buf.len() < 6 + hdr_len { self.remove_at(idx)?; return Ok(None); }
+        
         let hdr_bytes = &buf[6..6 + hdr_len];
-        let body = buf[6 + hdr_len..].to_vec();
+        let mut body = buf[6 + hdr_len..].to_vec();
+        let Some(mut headers) = decode_headers(hdr_bytes) else { self.remove_at(idx)?; return Ok(None); };
 
-        // Decode header blob.
-        let Some(headers) = decode_headers(hdr_bytes) else {
-            self.remove_at(idx)?;
-            return Ok(None);
-        };
+        if let Some(ae) = accept_encoding {
+            if ae.contains("br") && path.with_extension("br").exists() {
+                if let Ok(br_data) = fs::read(path.with_extension("br")) {
+                    body = br_data;
+                    headers.retain(|(k, _)| !k.eq_ignore_ascii_case(b"content-encoding") && !k.eq_ignore_ascii_case(b"content-length"));
+                    headers.push((b"Content-Encoding".to_vec(), b"br".to_vec()));
+                    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(b"vary")) {
+                        headers.push((b"Vary".to_vec(), b"Accept-Encoding".to_vec()));
+                    }
+                }
+            } else if ae.contains("gzip") && path.with_extension("gz").exists() {
+                if let Ok(gz_data) = fs::read(path.with_extension("gz")) {
+                    body = gz_data;
+                    headers.retain(|(k, _)| !k.eq_ignore_ascii_case(b"content-encoding") && !k.eq_ignore_ascii_case(b"content-length"));
+                    headers.push((b"Content-Encoding".to_vec(), b"gzip".to_vec()));
+                    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(b"vary")) {
+                        headers.push((b"Vary".to_vec(), b"Accept-Encoding".to_vec()));
+                    }
+                }
+            }
+        }
         Ok(Some((status, headers, body)))
     }
 
-    /// Store a full response (status + storable headers + body) under
-    /// `key` with `ttl_secs` lifetime.
-    ///
-    /// On-disk entry format v2:
-    ///
-    /// ```text
-    /// [u16 status LE]
-    /// [u32 hdr_len LE][hdr bytes]
-    /// [body bytes]
-    ///
-    /// hdr bytes =
-    ///   [u32 n_headers LE]
-    ///   repeated n_headers times:
-    ///     [u32 nlen LE][name][u32 vlen LE][value]
-    /// ```
     pub fn put(
         &mut self,
         key: &[u8],
@@ -455,6 +441,35 @@ impl FastcgiCache {
             f.sync_all().ok();
         }
         fs::rename(&tmp, &path)?;
+
+        // ==========================================
+        // Pre-Compressed Cache (gzip_static/brotli_static)
+        // ==========================================
+        if buf.len() >= 1024 {
+            use crate::compress::{brotli_compress, gzip_compress};
+            
+            // Gzip (Level 6 - Cache के लिए हम High Compression इस्तेमाल कर सकते हैं)
+            if let Some(gz_data) = gzip_compress(&buf, 6) {
+                let gz_path = path.with_extension("gz");
+                let gz_tmp = gz_path.with_extension("gz.tmp");
+                if let Ok(mut f) = fs::File::create(&gz_tmp) {
+                    let _ = f.write_all(&gz_data);
+                    let _ = f.sync_all();
+                    let _ = fs::rename(&gz_tmp, &gz_path);
+                }
+            }
+            
+            // Brotli (Level 4 - CPU और Size का अच्छा बैलेंस)
+            if let Some(br_data) = brotli_compress(&buf, 4) {
+                let br_path = path.with_extension("br");
+                let br_tmp = br_path.with_extension("br.tmp");
+                if let Ok(mut f) = fs::File::create(&br_tmp) {
+                    let _ = f.write_all(&br_data);
+                    let _ = f.sync_all();
+                    let _ = fs::rename(&br_tmp, &br_path);
+                }
+            }
+        }
 
         let now = Self::now();
         let idx = self.index.len();

@@ -15,6 +15,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
+use rustls::server::ServerSessionMemoryCache;
 use std::collections::{HashMap, HashSet};
 use rustls_acme::ResolvesServerCertAcme;
 use std::fs::File;
@@ -60,7 +61,7 @@ pub fn build_quic_tls(cert: &Path, key: &Path) -> Result<ServerConfig, String> {
         .with_single_cert(certs, key)
         .map_err(|e| format!("tls: {e}"))?;
     cfg.alpn_protocols = vec![b"h3".to_vec()];
-    // 0-RTT stays disabled (max_early_data_size = 0): replayable requests are not safe by default.
+    // 0-RTT enabled for QUIC (Early Data)
     Ok(cfg)
 }
 
@@ -76,6 +77,8 @@ pub fn build_server_config(cert: &Path, key: &Path) -> Result<Arc<ServerConfig>,
     cfg.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
     // Stateless session tickets (per-worker keys, see module docs).
     cfg.ticketer = provider::Ticketer::new().map_err(|e| format!("tls ticketer: {e}"))?;
+    cfg.session_storage = ServerSessionMemoryCache::new(20480);
+    cfg.max_early_data_size = 16384;
     Ok(Arc::new(cfg))
 }
 
@@ -194,6 +197,8 @@ pub fn build_server_config_with_sni(
 
     cfg.alpn_protocols = ALPN.iter().map(|p| p.to_vec()).collect();
     cfg.ticketer = provider::Ticketer::new().map_err(|e| format!("tls ticketer: {e}"))?;
+    cfg.session_storage = ServerSessionMemoryCache::new(20480);
+    cfg.max_early_data_size = 16384;
     Ok(Arc::new(cfg))
 }
 
@@ -223,6 +228,8 @@ pub fn build_server_config_with_sni_and_acme(
     ];
     cfg.ticketer = rustls::crypto::ring::Ticketer::new()
         .map_err(|e| format!("tls ticketer: {e}"))?;
+    cfg.session_storage = ServerSessionMemoryCache::new(20480);
+    cfg.max_early_data_size = 16384;
 
     Ok(Arc::new(cfg))
 }

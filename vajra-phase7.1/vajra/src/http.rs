@@ -548,20 +548,23 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                     method, host_str, path_only, query,
                                 );
                                 fc.poll_purge();
-                                match fc.get(&key) {
+                                let accept_enc_hit: Option<&str> = hdrs
+                                    .iter()
+                                    .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                                    .and_then(|(_, v)| std::str::from_utf8(v.as_ref()).ok());
+
+                                match fc.get(&key, accept_enc_hit) {
                                     Ok(Some((status, headers, cached))) => {
                                         crate::metrics::record_fastcgi_cache_hit();
-                                        let accept_enc_hit: Option<&str> = hdrs
-                                            .iter()
-                                            .find(|(n, _)| {
-                                                n.eq_ignore_ascii_case(b"accept-encoding")
-                                            })
-                                            .and_then(|(_, v)| {
-                                                std::str::from_utf8(v.as_ref()).ok()
-                                            });
                                         let comp_default =
                                             crate::compress::CompressionSettings::default();
                                         let comp_hit = ctx.compression.unwrap_or(&comp_default);
+                                        let is_precompressed = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"content-encoding"));
+                                        let mut precomp_comp = crate::compress::CompressionSettings::default();
+                                        precomp_comp.gzip = false;
+                                        precomp_comp.brotli = false;
+                                        let comp_to_pass = if is_precompressed { &precomp_comp } else { comp_hit };
+
                                         write_proxy_response(
                                             out,
                                             status,
@@ -573,7 +576,7 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                                             None,
                                             Some("HIT"),
                                             accept_enc_hit,
-                                            comp_hit,
+                                            comp_to_pass,
                                         );
                                         let bytes = if status == 204 || status == 304 {
                                             0

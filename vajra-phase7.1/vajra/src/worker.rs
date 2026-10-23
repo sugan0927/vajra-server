@@ -1635,15 +1635,23 @@ impl Worker {
                                 query,
                             );
                             self.fastcgi_cache.poll_purge();
-                            match self.fastcgi_cache.get(&key) {
+                            let accept_enc_hit = req.headers.iter()
+                                .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
+                                .and_then(|(_, v)| std::str::from_utf8(v).ok());
+
+                            match self.fastcgi_cache.get(&key, accept_enc_hit) {
                                 Ok(Some((status, headers, cached))) => {
                                     crate::metrics::record_fastcgi_cache_hit();
                                     let bodyless = status == 204 || status == 304;
                                     let bytes = if bodyless { 0 } else { cached.len() as u64 };
                                     let owned = if bodyless { Vec::new() } else { cached };
-                                    let accept_enc_hit = req.headers.iter()
-                                        .find(|(n, _)| n.eq_ignore_ascii_case(b"accept-encoding"))
-                                        .and_then(|(_, v)| std::str::from_utf8(v).ok());
+                                    
+                                    let is_precompressed = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(b"content-encoding"));
+                                    let mut precomp_comp = crate::compress::CompressionSettings::default();
+                                    precomp_comp.gzip = false;
+                                    precomp_comp.brotli = false;
+                                    let comp_to_pass = if is_precompressed { &precomp_comp } else { &self.compression };
+
                                     let resp = http::h2_proxy_response(
                                         status,
                                         &headers,
@@ -1653,7 +1661,7 @@ impl Worker {
                                         None,
                                         Some("HIT"),
                                         accept_enc_hit,
-                                        &self.compression,
+                                        comp_to_pass,
                                     );
                                     self.obs.response(
                                         peer,
