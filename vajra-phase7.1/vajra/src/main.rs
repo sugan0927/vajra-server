@@ -8,6 +8,11 @@
 //! configured, TLS), its own io_uring, TLS config, file cache, response cache
 //! and upstream pools, so threads share nothing after startup. The main thread
 //! only talks to workers over their control channels.
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 mod object_cache;
 
 use std::net::SocketAddr;
