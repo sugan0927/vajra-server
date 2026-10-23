@@ -253,6 +253,19 @@ listen = "0.0.0.0:443"
 cert = "/etc/vajra/certs/fallback.crt"
 key  = "/etc/vajra/certs/fallback.key"
 
+
+[object_cache]
+enabled = true
+listen = "127.0.0.1:6379"
+max_memory_mb = 256
+
+[fastcgi_cache]
+enabled = true
+path = "/var/cache/vajra/fastcgi"
+ttl = 300
+max_size_mb = 256
+cache_methods = ["GET"]
+
 [acme]
 enabled = true
 email = "${EMAIL}"
@@ -290,7 +303,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload
+  mkdir -p /var/cache/vajra/fastcgi
+chmod 755 /var/cache/vajra/fastcgi
+systemctl daemon-reload
 
 # --- Vajra High Performance Network Tuning (Cross-Distro) ---
 mkdir -p /etc/sysctl.d/
