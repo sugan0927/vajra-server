@@ -1,0 +1,76 @@
+# ==========================================
+# Vajra Server Configuration
+# ==========================================
+[server]
+listen = "0.0.0.0:443"
+workers = 1
+
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
+
+[tls]
+listen = "0.0.0.0:443"
+cert = "/etc/vajra/certs/fallback.crt"
+key  = "/etc/vajra/certs/fallback.key"
+
+[quic]
+listen = "0.0.0.0:443"
+
+[acme]
+enabled = true
+email = "sdsugans018@gmail.com"
+staging = false
+[headers]
+hsts = "max-age=31536000; includeSubDomains; preload"
+x_frame_options = "SAMEORIGIN"
+x_content_type_options = "nosniff"
+content_security_policy = "upgrade-insecure-requests; default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval';"
+
+[[site]]
+host = "wp.aidoor.co.in"
+root = "/var/www/sites/wp.aidoor.co.in"
+index = "index.php"
+mode = "wordpress"
+php_sock = "unix:/run/php/vajra-wp_aidoor_co_in.sock"
+
+[[site]]
+host = "api.aidoor.co.in"
+root = "/var/www/sites/api.aidoor.co.in"
+index = "index.php"
+mode = "php"
+php_sock = "unix:/run/php/vajra-api_aidoor_co_in.sock"
+
+[[site]]
+host = "test.aidoor.co.in"
+root = "/var/www/sites/test.aidoor.co.in"
+index = "index.php"
+mode = "php"
+php_sock = "unix:/run/php/vajra-test_aidoor_co_in.sock"
+
+[object_cache]
+enabled = true
+listen = "127.0.0.1:6379"
+max_memory_mb = 256
+
+[fastcgi_cache]
+enabled = true
+path = "/dev/shm/vajra-fastcgi"
+ttl = 300
+max_size_mb = 64
+cache_methods = ["GET"]
+
+# ==========================================
+# Compression (Gzip only — Brotli CPU-bound)
+# ==========================================
+
+# ==========================================
+# Compression — gzip ON, brotli OFF
+# ==========================================
+[compression]
+enabled = true
+gzip = true
+gzip_level = 1
+brotli = false
+brotli_level = 1
+min_size = 1024
