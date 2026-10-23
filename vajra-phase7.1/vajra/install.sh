@@ -243,16 +243,36 @@ sleep 2
 [[ -S "$SOCK_PATH" ]] || warn "PHP-FPM socket not found yet: $SOCK_PATH"
 
 log "7/10 — Vajra config (native ACME, no per-site certs)"
-cat > /etc/vajra/app.toml <<TOML
+cat > /etc/vajra/app.toml <<'VAJRA_APPCFG'
 [server]
-listen = "0.0.0.0:443"
-workers = 1
+listen  = "0.0.0.0:443"
+workers = 4
+grace_secs = 5
+
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
 
 [tls]
 listen = "0.0.0.0:443"
-cert = "/etc/vajra/certs/fallback.crt"
-key  = "/etc/vajra/certs/fallback.key"
+cert   = "/etc/vajra/certs/fallback.crt"
+key    = "/etc/vajra/certs/fallback.key"
 
+[quic]
+listen = "0.0.0.0:443"
+
+[compression]
+enabled = true
+gzip = true
+gzip_level = 6
+brotli = false
+brotli_level = 1
+min_size = 1024
+
+[headers]
+hsts = "max-age=31536000; includeSubDomains"
+x_content_type_options = "nosniff"
+x_frame_options = "SAMEORIGIN"
 
 [object_cache]
 enabled = true
@@ -265,22 +285,7 @@ path = "/var/cache/vajra/fastcgi"
 ttl = 300
 max_size_mb = 256
 cache_methods = ["GET"]
-
-[acme]
-enabled = true
-email = "${EMAIL}"
-staging = false
-
-[logging]
-access_log = "/var/log/vajra/access.log"
-
-[[site]]
-host = "${DOMAIN}"
-root = "/var/www/sites/${DOMAIN}"
-index = "index.php"
-mode = "php"
-php_sock = "unix:${SOCK_PATH}"
-TOML
+VAJRA_APPCFG
 
 log "8/10 — Service unit"
 if has_systemd; then
@@ -386,38 +391,49 @@ echo "    DB User : ${DB_USER}"
 echo "    DB Pass : ${DB_PASS}"
 
 log "7/10 — Vajra config (native ACME + compression)"
-cat > /etc/vajra/app.toml <<TOML
+cat > /etc/vajra/app.toml <<'VAJRA_APPCFG'
 [server]
-listen = "0.0.0.0:443"
-workers = 1
+listen  = "0.0.0.0:443"
+workers = 4
+grace_secs = 5
+
+[logging]
+access_log = "/var/log/vajra/access.log"
+format = "text"
 
 [tls]
 listen = "0.0.0.0:443"
-cert = "/etc/vajra/certs/fallback.crt"
-key  = "/etc/vajra/certs/fallback.key"
+cert   = "/etc/vajra/certs/fallback.crt"
+key    = "/etc/vajra/certs/fallback.key"
 
-[acme]
-enabled = true
-email = "${EMAIL}"
-staging = false
+[quic]
+listen = "0.0.0.0:443"
 
 [compression]
 enabled = true
 gzip = true
 gzip_level = 6
-brotli = true
-brotli_level = 5
+brotli = false
+brotli_level = 1
+min_size = 1024
 
-[logging]
-access_log = "/var/log/vajra/access.log"
+[headers]
+hsts = "max-age=31536000; includeSubDomains"
+x_content_type_options = "nosniff"
+x_frame_options = "SAMEORIGIN"
 
-[[site]]
-host = "${DOMAIN}"
-root = "/var/www/sites/${DOMAIN}"
-index = "index.php"
-mode = "php"
-php_sock = "unix:${SOCK_PATH}"
-TOML
+[object_cache]
+enabled = true
+listen = "127.0.0.1:6379"
+max_memory_mb = 256
+
+[fastcgi_cache]
+enabled = true
+path = "/var/cache/vajra/fastcgi"
+ttl = 300
+max_size_mb = 256
+cache_methods = ["GET"]
+VAJRA_APPCFG
 
 log "8/10 — Service unit"
 if has_systemd; then
