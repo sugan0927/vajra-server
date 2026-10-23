@@ -237,10 +237,24 @@ pub fn ttl_for(
     let (mut s_maxage, mut max_age) = (None, None);
     for (n, v) in headers {
         if n.eq_ignore_ascii_case(b"set-cookie") {
-            return None;
+            // Bug fix: shared caches must not bypass on Set-Cookie alone —
+            // CMSes (WordPress) send session/test cookies on every anonymous
+            // page. Set-Cookie is stripped before storing (see
+            // `storable_headers`), so cached responses never leak cookies.
+            continue;
         }
         if n.eq_ignore_ascii_case(b"vary") && !v.trim_ascii().is_empty() {
-            return None;
+            // Bug fix: allow `Vary: Accept-Encoding` — Vajra varies by
+            // encoding itself in `write_proxy_response`. Any other Vary
+            // value (Cookie, Origin, User-Agent, *) is still a hard bypass.
+            let only_accept_encoding = v
+                .split(|&b| b == b',')
+                .map(|s| s.trim_ascii())
+                .filter(|s| !s.is_empty())
+                .all(|s| s.eq_ignore_ascii_case(b"accept-encoding"));
+            if !only_accept_encoding {
+                return None;
+            }
         }
         if n.eq_ignore_ascii_case(b"cache-control") {
             for d in v.split(|&b| b == b',') {
@@ -276,6 +290,10 @@ pub fn storable_headers(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>
                 && !n.eq_ignore_ascii_case(b"server")
                 && !n.eq_ignore_ascii_case(b"content-length")
                 && !n.eq_ignore_ascii_case(b"age")
+                // Shared cache must never replay another client's cookies.
+                // `write_proxy_response` re-emits the correct Vary.
+                && !n.eq_ignore_ascii_case(b"set-cookie")
+                && !n.eq_ignore_ascii_case(b"vary")
         })
         .cloned()
         .collect()
