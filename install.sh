@@ -396,6 +396,54 @@ verify_and_fix_services() {
     log "✅ Vajra Web Server is running."
 }
 
+
+setup_zram() {
+    log "Setting up ZRAM (Memory Compression)..."
+    local RAM_MB=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo)
+    
+    # ZRAM साइज़: 50% RAM, लेकिन कम से कम 512MB
+    local ZRAM_MB=$((RAM_MB / 2))
+    [ "$ZRAM_MB" -lt 512 ] && ZRAM_MB=512
+
+    case "$DISTRO_FAMILY" in
+        debian)
+            pkg_install zram-tools || true
+            if [ -d /etc/default ]; then
+                cat > /etc/default/zramswap << ZRAMEOF
+ALGO=zstd
+PERCENT=50
+PRIORITY=100
+ZRAMEOF
+                systemctl restart zramswap 2>/dev/null || true
+                systemctl enable zramswap 2>/dev/null || true
+            fi
+            ;;
+        rhel|arch)
+            pkg_install zram-generator || true
+            if [ -d /etc/systemd ]; then
+                cat > /etc/systemd/zram-generator.conf << ZRAMEOF
+[zram0]
+zram-size = ${ZRAM_MB}
+compression-algorithm = zstd
+ZRAMEOF
+                systemctl daemon-reload
+                systemctl start systemd-zram-setup@zram0.service 2>/dev/null || true
+                systemctl enable systemd-zram-setup@zram0.service 2>/dev/null || true
+            fi
+            ;;
+        *)
+            warn "ZRAM auto-setup not implemented for distro family: $DISTRO_FAMILY"
+            ;;
+    esac
+
+    # वेरिफिकेशन
+    if command -v zramctl >/dev/null 2>&1 && zramctl | grep -q "zram0"; then
+        echo "   ✓ ZRAM configured successfully (Size: ~${ZRAM_MB}MB, Algo: zstd)"
+    else
+        warn "ZRAM setup might have failed or is unavailable."
+    fi
+}
+
 main() {
   log "0/6 — Pre-flight"
   detect_distro
@@ -501,6 +549,7 @@ UNIT
   create_vajra_site_cli
 
   tune_system
+  setup_zram
   verify_and_fix_services
 
   echo "✅ Vajra Stack Installed!"
@@ -514,6 +563,7 @@ if [ "$RETUNE_ONLY" = "1" ]; then
     if [ ! -f /etc/vajra/app.toml ]; then die "❌ /etc/vajra/app.toml missing"; fi
     detect_distro
     tune_system
+  setup_zram
     log "✅ Retune complete"
     exit 0
 fi
