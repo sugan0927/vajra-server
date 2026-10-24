@@ -287,6 +287,11 @@ fn main() {
     };
 
 
+    vajra::http::set_redirect_http_to_https(settings.redirect_http_to_https);
+    if settings.redirect_http_to_https {
+        println!("vajra: http→https redirect enabled");
+    }
+
     let ncpu = sys::available_cpus();
     println!(
         "vajra: http  on {}  ({} worker(s))",

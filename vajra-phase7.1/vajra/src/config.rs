@@ -231,6 +231,7 @@ pub struct Settings {
     pub workers: usize,
     pub pin: bool,
     pub grace_secs: u64,
+    pub redirect_http_to_https: bool,
     pub worker: WorkerConfig,
     pub static_files: Option<StaticSettings>,
     /// Phase 1a: multi-site Host-header routing. Empty = legacy single
@@ -491,6 +492,7 @@ impl Default for Settings {
             workers: 1,
             pin: true,
             grace_secs: 5,
+            redirect_http_to_https: false,
             worker: WorkerConfig::default(),
             static_files: None,
             sites: Vec::new(),
@@ -565,6 +567,8 @@ struct RawServer {
     workers: usize,
     pin: bool,
     grace_secs: u64,
+    #[serde(default)]
+    redirect_http_to_https: bool,
 }
 impl Default for RawServer {
     fn default() -> Self {
@@ -573,6 +577,7 @@ impl Default for RawServer {
             workers: 1,
             pin: true,
             grace_secs: 5,
+            redirect_http_to_https: false,
         }
     }
 }
@@ -1139,6 +1144,7 @@ impl Settings {
             workers: raw.server.workers,
             pin: raw.server.pin,
             grace_secs: raw.server.grace_secs,
+            redirect_http_to_https: raw.server.redirect_http_to_https,
             worker: WorkerConfig {
                 ring_entries: l.ring_entries,
                 read_buf_size: l.read_buf_size,

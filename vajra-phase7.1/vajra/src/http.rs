@@ -23,6 +23,7 @@ use crate::static_files::{FileCache, OpenFile};
 use std::cell::RefCell;
 use std::net::IpAddr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Max request headers accepted per request (stack-allocated array).
 pub const MAX_HEADERS: usize = 64;
@@ -145,6 +146,13 @@ pub(crate) fn sec_manages(name: &[u8]) -> bool {
 pub fn set_alt_svc(value: Option<&str>) {
     ALT_SVC.with(|a| *a.borrow_mut() = value.map(|v| v.as_bytes().to_vec()).unwrap_or_default());
 }
+/// Global HTTP→HTTPS redirect flag (set once at startup).
+static REDIRECT_HTTP_TO_HTTPS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_redirect_http_to_https(enabled: bool) {
+    REDIRECT_HTTP_TO_HTTPS.store(enabled, Ordering::Relaxed);
+}
+
 
 /// `Alt-Svc: ..\r\n` for an HTTP/1.1 head, or nothing.
 fn push_alt_svc_h1(out: &mut Vec<u8>) {
@@ -309,6 +317,29 @@ fn process_inner(input: &[u8], out: &mut Vec<u8>, date: &[u8; DATE_LEN], ctx: &m
                     fail(out, ctx.obs, ctx.client_ip, 400, date);
                     return done(input.len(), true);
                 }
+                // ─── HTTP → HTTPS redirect ──────────────────────────
+                if !ctx.secure
+                    && REDIRECT_HTTP_TO_HTTPS.load(Ordering::Relaxed)
+                    && !path.starts_with("/.well-known/acme-challenge/")
+                {
+                    if let Some(h) = host {
+                        if let Ok(host_str) = std::str::from_utf8(h) {
+                            let host_only = host_str.split(':').next().unwrap_or(host_str);
+                            if !host_only.is_empty() {
+                                let mut loc: Vec<u8> = Vec::with_capacity(96);
+                                loc.extend_from_slice(b"Location: https://");
+                                loc.extend_from_slice(host_only.as_bytes());
+                                loc.extend_from_slice(target.as_bytes());
+                                loc.extend_from_slice(b"\r\n");
+                                ctx.obs.response(ctx.client_ip, Http::H1, method, target, 301, 0);
+                                crate::metrics::request_end(target, 301);
+                                write_head(out, 301, &loc, router::TEXT, 0, false, date);
+                                return done(input.len(), true);
+                            }
+                        }
+                    }
+                }
+
 
                 // ─── Effective client IP ────────────────────────────
                 // Post trusted-proxy / XFF resolution. Both the access

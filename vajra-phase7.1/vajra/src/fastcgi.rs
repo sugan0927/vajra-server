@@ -517,7 +517,8 @@ pub fn cgi_to_http(out: &[u8], head_request: bool) -> Result<Vec<u8>, CgiErr> {
     let mut status: Option<u16> = None;
     let mut status_reason: Option<String> = None;
     let mut has_location = false;
-    let mut headers: Vec<u8> = Vec::with_capacity(head.len() + 64);
+    let mut headers: Vec<u8> = Vec::with_capacity(head.len() + 128);
+    headers.extend_from_slice(b"Strict-Transport-Security: max-age=31536000; includeSubDomains; preload\r\n");
 
     for line in head.split(|&b| b == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
@@ -558,10 +559,14 @@ pub fn cgi_to_http(out: &[u8], head_request: bool) -> Result<Vec<u8>, CgiErr> {
                 if lname == b"location" {
                     has_location = true;
                 }
-                headers.extend_from_slice(name);
-                headers.extend_from_slice(b": ");
-                headers.extend_from_slice(value);
-                headers.extend_from_slice(b"\r\n");
+                if lname.eq_ignore_ascii_case(b"x-powered-by") {
+                    headers.extend_from_slice(b"X-Powered-By: Vajra\r\n");
+                } else {
+                    headers.extend_from_slice(name);
+                    headers.extend_from_slice(b": ");
+                    headers.extend_from_slice(value);
+                    headers.extend_from_slice(b"\r\n");
+                }
             }
         }
     }
